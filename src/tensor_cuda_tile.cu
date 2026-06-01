@@ -2,6 +2,7 @@
 
 #include "cuda_tile.h"
 
+#include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <stdexcept>
 
@@ -16,6 +17,7 @@ constexpr int kReduceTile = 2048;
 using I64Tile = ct::tile<long long, ct::shape<kTile>>;
 using F32Tile = ct::tile<float, ct::shape<kTile>>;
 using F16Tile = ct::tile<__half, ct::shape<kTile>>;
+using BF16Tile = ct::tile<__nv_bfloat16, ct::shape<kTile>>;
 using ReduceI64Tile = ct::tile<long long, ct::shape<kReduceTile>>;
 using ReduceF32Tile = ct::tile<float, ct::shape<kReduceTile>>;
 
@@ -86,6 +88,28 @@ __tile_global__ void f16_to_f32_kernel(const __half* __restrict__ src,
     ct::store_masked(dst + idx, ct::element_cast<float>(values), in_bounds);
 }
 
+__tile_global__ void f32_to_bf16_kernel(const float* __restrict__ src,
+                                        __nv_bfloat16* __restrict__ dst,
+                                        long long total) {
+    src = ct::assume_aligned(src, 16_ic);
+    dst = ct::assume_aligned(dst, 16_ic);
+    I64Tile idx = (long long)ct::bid().x * kTile + ct::iota<I64Tile>();
+    auto in_bounds = idx < total;
+    auto values = ct::load_masked(src + idx, in_bounds);
+    ct::store_masked(dst + idx, ct::element_cast<__nv_bfloat16>(values), in_bounds);
+}
+
+__tile_global__ void bf16_to_f32_kernel(const __nv_bfloat16* __restrict__ src,
+                                        float* __restrict__ dst,
+                                        long long total) {
+    src = ct::assume_aligned(src, 16_ic);
+    dst = ct::assume_aligned(dst, 16_ic);
+    I64Tile idx = (long long)ct::bid().x * kTile + ct::iota<I64Tile>();
+    auto in_bounds = idx < total;
+    auto values = ct::load_masked(src + idx, in_bounds);
+    ct::store_masked(dst + idx, ct::element_cast<float>(values), in_bounds);
+}
+
 __tile_global__ void i64_to_f32_kernel(const int64_t* __restrict__ src,
                                        float* __restrict__ dst,
                                        long long total) {
@@ -122,6 +146,28 @@ __tile_global__ void i64_to_f16_kernel(const int64_t* __restrict__ src,
 __tile_global__ void f16_to_i64_kernel(const __half* __restrict__ src,
                                        int64_t* __restrict__ dst,
                                        long long total) {
+    src = ct::assume_aligned(src, 16_ic);
+    dst = ct::assume_aligned(dst, 16_ic);
+    I64Tile idx = (long long)ct::bid().x * kTile + ct::iota<I64Tile>();
+    auto in_bounds = idx < total;
+    F32Tile values = ct::element_cast<float>(ct::load_masked(src + idx, in_bounds));
+    ct::store_masked(dst + idx, ct::element_cast<long long>(values), in_bounds);
+}
+
+__tile_global__ void i64_to_bf16_kernel(const int64_t* __restrict__ src,
+                                        __nv_bfloat16* __restrict__ dst,
+                                        long long total) {
+    src = ct::assume_aligned(src, 16_ic);
+    dst = ct::assume_aligned(dst, 16_ic);
+    I64Tile idx = (long long)ct::bid().x * kTile + ct::iota<I64Tile>();
+    auto in_bounds = idx < total;
+    F32Tile values = ct::element_cast<float>(ct::load_masked(src + idx, in_bounds));
+    ct::store_masked(dst + idx, ct::element_cast<__nv_bfloat16>(values), in_bounds);
+}
+
+__tile_global__ void bf16_to_i64_kernel(const __nv_bfloat16* __restrict__ src,
+                                        int64_t* __restrict__ dst,
+                                        long long total) {
     src = ct::assume_aligned(src, 16_ic);
     dst = ct::assume_aligned(dst, 16_ic);
     I64Tile idx = (long long)ct::bid().x * kTile + ct::iota<I64Tile>();
@@ -278,6 +324,9 @@ void fill(Tensor& dst, float value) {
         case DType::Float16:
             fill_kernel<<<grid, 1>>>(dst.data_f16(), __float2half(value), dst.numel());
             break;
+        case DType::BFloat16:
+            fill_kernel<<<grid, 1>>>(dst.data_bf16(), __float2bfloat16(value), dst.numel());
+            break;
         case DType::Int64:
             fill_kernel<<<grid, 1>>>(dst.data_i64(), (int64_t)value, dst.numel());
             break;
@@ -295,6 +344,8 @@ void arange(Tensor& dst, int64_t start) {
         case DType::Float16:
             arange_f16_kernel<<<grid, 1>>>(dst.data_f16(), start, dst.numel());
             break;
+        case DType::BFloat16:
+            throw std::runtime_error("arange: unsupported BF16 dtype");
         case DType::Int64:
             arange_i64_kernel<<<grid, 1>>>(dst.data_i64(), start, dst.numel());
             break;
@@ -312,6 +363,10 @@ void convert_dtype(const Tensor& src, Tensor& dst) {
         f32_to_f16_kernel<<<grid, 1>>>(src.data_f32(), dst.data_f16(), src.numel());
     } else if (in == DType::Float16 && out == DType::Float32) {
         f16_to_f32_kernel<<<grid, 1>>>((const __half*)src.data_ptr(), dst.data_f32(), src.numel());
+    } else if (in == DType::Float32 && out == DType::BFloat16) {
+        f32_to_bf16_kernel<<<grid, 1>>>(src.data_f32(), dst.data_bf16(), src.numel());
+    } else if (in == DType::BFloat16 && out == DType::Float32) {
+        bf16_to_f32_kernel<<<grid, 1>>>((const __nv_bfloat16*)src.data_ptr(), dst.data_f32(), src.numel());
     } else if (in == DType::Int64 && out == DType::Float32) {
         i64_to_f32_kernel<<<grid, 1>>>(src.data_i64(), dst.data_f32(), src.numel());
     } else if (in == DType::Float32 && out == DType::Int64) {
@@ -320,6 +375,10 @@ void convert_dtype(const Tensor& src, Tensor& dst) {
         i64_to_f16_kernel<<<grid, 1>>>(src.data_i64(), dst.data_f16(), src.numel());
     } else if (in == DType::Float16 && out == DType::Int64) {
         f16_to_i64_kernel<<<grid, 1>>>((const __half*)src.data_ptr(), dst.data_i64(), src.numel());
+    } else if (in == DType::Int64 && out == DType::BFloat16) {
+        i64_to_bf16_kernel<<<grid, 1>>>(src.data_i64(), dst.data_bf16(), src.numel());
+    } else if (in == DType::BFloat16 && out == DType::Int64) {
+        bf16_to_i64_kernel<<<grid, 1>>>((const __nv_bfloat16*)src.data_ptr(), dst.data_i64(), src.numel());
     } else {
         throw std::runtime_error("to_dtype: unsupported conversion");
     }
@@ -403,6 +462,10 @@ void binary_same_shape(const Tensor& a, const Tensor& b, Tensor& out, BinaryOp o
         binary_same_shape_kernel<<<grid, 1>>>((const __half*)a.data_ptr(),
                                               (const __half*)b.data_ptr(),
                                               out.data_f16(), op, out.numel());
+    } else if (out.dtype() == DType::BFloat16) {
+        binary_same_shape_kernel<<<grid, 1>>>((const __nv_bfloat16*)a.data_ptr(),
+                                              (const __nv_bfloat16*)b.data_ptr(),
+                                              out.data_bf16(), op, out.numel());
     } else {
         throw std::runtime_error("binary op: unsupported dtype");
     }
@@ -418,6 +481,10 @@ void binary_inplace_same_shape(Tensor& a, const Tensor& b, BinaryOp op) {
     } else if (a.dtype() == DType::Float16) {
         binary_inplace_same_shape_kernel<<<grid, 1>>>(a.data_f16(),
                                                       (const __half*)b.data_ptr(),
+                                                      op, a.numel());
+    } else if (a.dtype() == DType::BFloat16) {
+        binary_inplace_same_shape_kernel<<<grid, 1>>>(a.data_bf16(),
+                                                      (const __nv_bfloat16*)b.data_ptr(),
                                                       op, a.numel());
     } else {
         throw std::runtime_error("inplace binary op: unsupported dtype");

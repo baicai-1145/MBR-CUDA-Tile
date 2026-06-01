@@ -132,6 +132,9 @@ std::vector<float> Tensor::to_cpu_f32() const {
     } else if (dtype_ == DType::Float16) {
         Tensor f32 = to_f32();
         return f32.to_cpu_f32();
+    } else if (dtype_ == DType::BFloat16) {
+        Tensor f32 = to_f32();
+        return f32.to_cpu_f32();
     } else {
         // Int64 -> float
         Tensor f32 = to_dtype(DType::Float32);
@@ -533,7 +536,8 @@ Tensor Tensor::to_dtype(DType new_dtype) const {
 
     Tensor out = Tensor::empty(shape_, new_dtype);
     if (numel_ == 0) return out;
-    tensor_tile::convert_dtype(*this, out);
+    Tensor src = is_contiguous() ? *this : contiguous();
+    tensor_tile::convert_dtype(src, out);
     return out;
 }
 
@@ -831,6 +835,7 @@ void Tensor::print(const std::string& name, int max_elements) const {
     switch (dtype_) {
         case DType::Float32: dtype_str = "float32"; break;
         case DType::Float16: dtype_str = "float16"; break;
+        case DType::BFloat16: dtype_str = "bfloat16"; break;
         case DType::Int64: dtype_str = "int64"; break;
     }
     std::cout << "Tensor";

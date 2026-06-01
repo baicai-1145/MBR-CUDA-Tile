@@ -477,6 +477,7 @@ ModelWeights ModelWeights::load(const std::string& path) {
             case 0: dtype = DType::Float32; break;
             case 1: dtype = DType::Float16; break;
             case 2: dtype = DType::Int64;   break;
+            case 3: dtype = DType::BFloat16; break;
             default:
                 throw std::runtime_error("ModelWeights: unknown dtype " +
                                          std::to_string(dtype_id) +
@@ -520,6 +521,21 @@ void ModelWeights::convert_linear_weights_to_fp16() {
         }
     }
     std::cout << "  [FP16] Pre-converted " << converted << " linear weight tensors"
+              << " (saved " << (saved_bytes / 1048576) << " MB VRAM)" << std::endl;
+}
+
+void ModelWeights::convert_linear_weights_to_bf16() {
+    int converted = 0;
+    size_t saved_bytes = 0;
+    for (auto& kv : tensors_) {
+        Tensor& t = kv.second;
+        if (t.ndim() == 2 && t.dtype() == DType::Float32) {
+            saved_bytes += t.numel() * 2;
+            kv.second = t.to_bf16();
+            converted++;
+        }
+    }
+    std::cout << "  [BF16] Pre-converted " << converted << " linear weight tensors"
               << " (saved " << (saved_bytes / 1048576) << " MB VRAM)" << std::endl;
 }
 

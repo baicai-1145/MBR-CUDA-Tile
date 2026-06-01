@@ -1,6 +1,7 @@
 #pragma once
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <cuda_bf16.h>
 #include <vector>
 #include <memory>
 #include <string>
@@ -13,12 +14,13 @@
 
 namespace cudasep {
 
-enum class DType { Float32 = 0, Float16 = 1, Int64 = 2 };
+enum class DType { Float32 = 0, Float16 = 1, Int64 = 2, BFloat16 = 3 };
 
 inline size_t dtype_size(DType dt) {
     switch(dt) {
         case DType::Float32: return 4;
         case DType::Float16: return 2;
+        case DType::BFloat16: return 2;
         case DType::Int64: return 8;
     }
     return 0;
@@ -63,6 +65,8 @@ public:
     float* data_f32() { assert(dtype_ == DType::Float32); return (float*)data_; }
     const float* data_f32() const { assert(dtype_ == DType::Float32); return (const float*)data_; }
     __half* data_f16() { assert(dtype_ == DType::Float16); return (__half*)data_; }
+    __nv_bfloat16* data_bf16() { assert(dtype_ == DType::BFloat16); return (__nv_bfloat16*)data_; }
+    const __nv_bfloat16* data_bf16() const { assert(dtype_ == DType::BFloat16); return (const __nv_bfloat16*)data_; }
     int64_t* data_i64() { assert(dtype_ == DType::Int64); return (int64_t*)data_; }
     const int64_t* data_i64() const { assert(dtype_ == DType::Int64); return (const int64_t*)data_; }
 
@@ -98,6 +102,7 @@ public:
     Tensor to_dtype(DType new_dtype) const;
     Tensor to_f32() const { return to_dtype(DType::Float32); }
     Tensor to_f16() const { return to_dtype(DType::Float16); }
+    Tensor to_bf16() const { return to_dtype(DType::BFloat16); }
 
     // Element-wise operators (return new tensors)
     Tensor operator+(const Tensor& other) const;

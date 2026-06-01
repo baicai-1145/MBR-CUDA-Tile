@@ -20,6 +20,7 @@ struct Args {
     int device = 0;
     bool help = false;
     bool quantize_fp16 = false;
+    bool quantize_bf16 = false;
     int chunk_batch_size = 0;
 };
 
@@ -41,6 +42,8 @@ static Args parse_args(int argc, char** argv) {
             args.device = std::stoi(argv[++i]);
         } else if (a == "--fp16") {
             args.quantize_fp16 = true;
+        } else if (a == "--bf16") {
+            args.quantize_bf16 = true;
         } else if (a == "--chunk-batch-size" && i + 1 < argc) {
             args.chunk_batch_size = std::stoi(argv[++i]);
         } else if (a == "--help" || a == "-h") {
@@ -58,6 +61,7 @@ static void print_usage(const char* progname) {
               << "  --output, -o <path>       Output directory or WAV file path (default: output)\n"
               << "  --stem, -s <int>          Stem index to save (default: 0, -1 saves all)\n"
               << "  --fp16                    Use FP16 linear weights\n"
+              << "  --bf16                    Use BF16 linear weights\n"
               << "  --chunk-batch-size <n>    Override chunk inference batch size\n"
               << "  --overlap <float>         (0,1)=overlap ratio, >=1=num_overlap\n"
               << "  --device, -d <int>        CUDA device ID (default: 0)\n"
@@ -77,6 +81,10 @@ static int run_cli(const Args& args) {
         std::cerr << "Error: --model is required" << std::endl;
         return 1;
     }
+    if (args.quantize_fp16 && args.quantize_bf16) {
+        std::cerr << "Error: --fp16 and --bf16 are mutually exclusive" << std::endl;
+        return 1;
+    }
 
     std::cout << "Loading model: " << args.model_path << std::endl;
     cudasep::app::LogCallback cli_logger = [](const std::string& line) {
@@ -84,7 +92,9 @@ static int run_cli(const Args& args) {
     };
 
     cudasep::app::LoadedModel model =
-        cudasep::app::load_model(args.model_path, args.device, args.quantize_fp16, cli_logger);
+        cudasep::app::load_model(args.model_path, args.device,
+                                 args.quantize_fp16, args.quantize_bf16,
+                                 cli_logger);
     if (args.chunk_batch_size > 0) {
         model.chunk_batch_size = args.chunk_batch_size;
         cli_logger("[config] chunk batch size: " + std::to_string(model.chunk_batch_size));

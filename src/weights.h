@@ -91,7 +91,7 @@ private:
 //     [name_len bytes]  Name string
 //     [4 bytes]  Number of dimensions (uint32_t)
 //     [ndim*8 bytes]  Shape (int64_t[])
-//     [4 bytes]  DType (uint32_t: 0=float32, 1=float16)
+//     [4 bytes]  DType (uint32_t: 0=float32, 1=float16, 2=int64, 3=bf16)
 //     [data_size bytes]  Raw tensor data (row-major, GPU-ready)
 // ============================================================================
 
@@ -119,6 +119,10 @@ public:
     /// Convert all 2D (linear) FP32 weight tensors to FP16 in-place.
     /// This avoids runtime FP32->FP16 conversion during GEMM.
     void convert_linear_weights_to_fp16();
+
+    /// Convert all 2D (linear) FP32 weight tensors to BF16 in-place.
+    /// This avoids runtime FP32->BF16 conversion during GEMM.
+    void convert_linear_weights_to_bf16();
 
 private:
     JsonValue config_;

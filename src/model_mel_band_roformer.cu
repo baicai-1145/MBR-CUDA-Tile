@@ -11,6 +11,25 @@
 #include <stdexcept>
 
 namespace cudasep {
+namespace {
+
+Tensor match_dtype_for_add(const Tensor& value, DType dtype) {
+    return (value.dtype() == dtype) ? value : value.to_dtype(dtype);
+}
+
+Tensor maybe_residual_bf16(const Tensor& value) {
+    return (mbr_tile::residual_bf16_enabled() && value.dtype() != DType::BFloat16)
+        ? value.to_bf16()
+        : value;
+}
+
+Tensor maybe_bf16_bias(const Tensor& value) {
+    return (mbr_tile::bias_bf16_enabled() && value.dtype() == DType::Float32)
+        ? value.to_bf16()
+        : value;
+}
+
+}  // namespace
 
 // ============================================================================
 // MBRConfig
@@ -106,7 +125,7 @@ void MelBandRoformer::load(const ModelWeights& weights) {
         std::string prefix = "band_split.to_features." + std::to_string(b);
         band_split_layers_[b].norm_gamma = weights.get(prefix + ".0.gamma");
         band_split_layers_[b].linear_w   = weights.get(prefix + ".1.weight");
-        band_split_layers_[b].linear_b   = weights.get(prefix + ".1.bias");
+        band_split_layers_[b].linear_b   = maybe_bf16_bias(weights.get(prefix + ".1.bias"));
     }
 
     // 5. Load transformer weights
@@ -133,15 +152,15 @@ void MelBandRoformer::load(const ModelWeights& weights) {
                 tw.attn_layers[l].norm_gamma = weights.get(aprefix + ".norm.gamma");
                 tw.attn_layers[l].to_qkv_w   = weights.get(aprefix + ".to_qkv.weight");
                 tw.attn_layers[l].to_gates_w  = weights.get(aprefix + ".to_gates.weight");
-                tw.attn_layers[l].to_gates_b  = weights.get(aprefix + ".to_gates.bias");
+                tw.attn_layers[l].to_gates_b  = maybe_bf16_bias(weights.get(aprefix + ".to_gates.bias"));
                 tw.attn_layers[l].to_out_w    = weights.get(aprefix + ".to_out.0.weight");
                 // FeedForward: lprefix.1.net.*
                 std::string fprefix = lprefix + ".1";
                 tw.ff_layers[l].norm_gamma = weights.get(fprefix + ".net.0.gamma");
                 tw.ff_layers[l].linear1_w  = weights.get(fprefix + ".net.1.weight");
-                tw.ff_layers[l].linear1_b  = weights.get(fprefix + ".net.1.bias");
+                tw.ff_layers[l].linear1_b  = maybe_bf16_bias(weights.get(fprefix + ".net.1.bias"));
                 tw.ff_layers[l].linear2_w  = weights.get(fprefix + ".net.4.weight");
-                tw.ff_layers[l].linear2_b  = weights.get(fprefix + ".net.4.bias");
+                tw.ff_layers[l].linear2_b  = maybe_bf16_bias(weights.get(fprefix + ".net.4.bias"));
             }
             tw.final_norm_gamma = weights.get(tprefix + ".norm.gamma");
         };
@@ -177,7 +196,7 @@ void MelBandRoformer::load(const ModelWeights& weights) {
                                      ".to_freqs." + std::to_string(b) +
                                      ".0." + std::to_string(i * 2);
                 mlp.linear_w[i] = weights.get(prefix + ".weight");
-                mlp.linear_b[i] = weights.get(prefix + ".bias");
+                mlp.linear_b[i] = maybe_bf16_bias(weights.get(prefix + ".bias"));
             }
         }
     }
@@ -240,7 +259,7 @@ Tensor MelBandRoformer::apply_attention(const Tensor& x, const AttentionWeights&
     Tensor normed = mbr_tile::rms_norm(x, w.norm_gamma, scale);
 
     // 2. QKV projection: [B, N, 3*dim_inner]
-    Tensor qkv = mbr_tile::linear_no_bias(normed, w.to_qkv_w);
+    Tensor qkv = mbr_tile::linear_no_bias_bf16_output(normed, w.to_qkv_w);
 
     // 3-4. Split q, k, v and apply rotary embedding to q/k.
     // qkv: [B, N, 3*heads*dim_head] -> q/k/v: [B, heads, N, dim_head]
@@ -298,22 +317,27 @@ Tensor MelBandRoformer::apply_transformer(const Tensor& x,
                                             const Tensor& cos_freqs,
                                             const Tensor& sin_freqs) {
     // x: [B, N, dim]
-    Tensor out = x;
+    Tensor out = maybe_residual_bf16(x);
     float scale = std::sqrt((float)cfg_.dim);
 
     int depth = (int)w.attn_layers.size();
     for (int i = 0; i < depth; i++) {
         // Attention + residual
         Tensor attn_out = apply_attention(out, w.attn_layers[i], cos_freqs, sin_freqs);
+        attn_out = match_dtype_for_add(attn_out, out.dtype());
         out.add_(attn_out);
+        out = maybe_residual_bf16(out);
 
         // FeedForward + residual
         Tensor ff_out = apply_feedforward(out, w.ff_layers[i]);
+        ff_out = match_dtype_for_add(ff_out, out.dtype());
         out.add_(ff_out);
+        out = maybe_residual_bf16(out);
     }
 
     // Final RMS norm
     out = mbr_tile::rms_norm(out, w.final_norm_gamma, scale);
+    out = maybe_residual_bf16(out);
 
     return out;
 }
@@ -475,7 +499,7 @@ Tensor MelBandRoformer::forward(const Tensor& audio) {
         // Skip connections: sum all previous
         if (cfg_.skip_connection) {
             for (int j = 0; j < d; j++) {
-                x = x + skip_store[j];
+                x = x + match_dtype_for_add(skip_store[j], x.dtype());
             }
         }
 
@@ -522,7 +546,7 @@ Tensor MelBandRoformer::forward(const Tensor& audio) {
 
         // Store for skip connections
         if (cfg_.skip_connection) {
-            skip_store[d] = x;
+            skip_store[d] = maybe_residual_bf16(x);
         }
     }
 

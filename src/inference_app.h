@@ -23,6 +23,7 @@ struct LoadedModel {
     int num_overlap = 1;
     int chunk_batch_size = 1;
     bool quantize_fp16 = false;
+    bool quantize_bf16 = false;
     std::vector<std::string> stem_names;
 
     Tensor forward(const Tensor& input);
@@ -35,7 +36,8 @@ struct InferenceResult {
     double rtf = 0.0;
 };
 
-LoadedModel load_model(const std::string& model_path, int device, bool quantize_fp16,
+LoadedModel load_model(const std::string& model_path, int device,
+                       bool quantize_fp16, bool quantize_bf16,
                        LogCallback logger = nullptr);
 InferenceResult run_inference(LoadedModel& model, const std::string& input_path,
                               float overlap, LogCallback logger = nullptr);

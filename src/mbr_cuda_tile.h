@@ -11,6 +11,10 @@ void split_qkv_heads_rotary(const Tensor& qkv, int heads, int dim_head,
 
 Tensor gather_freqs_fold_complex(const Tensor& stft_repr, const Tensor& freq_indices);
 
+bool residual_bf16_enabled();
+
+bool bias_bf16_enabled();
+
 Tensor apply_gates_and_merge_heads(const Tensor& attn, const Tensor& gates,
                                    int heads, int dim_head);
 
@@ -26,6 +30,8 @@ Tensor linear(const Tensor& x, const Tensor& weight, const Tensor& bias);
 Tensor linear_gelu(const Tensor& x, const Tensor& weight, const Tensor& bias);
 
 Tensor linear_no_bias(const Tensor& x, const Tensor& weight);
+
+Tensor linear_no_bias_bf16_output(const Tensor& x, const Tensor& weight);
 
 Tensor linear_sigmoid(const Tensor& x, const Tensor& weight, const Tensor& bias);
 

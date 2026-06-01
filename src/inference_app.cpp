@@ -240,7 +240,9 @@ std::vector<std::string> collect_stem_names(const LoadedModel& model) {
     return names;
 }
 
-LoadedModel load_model(const std::string& model_path, int device, bool quantize_fp16, LogCallback logger) {
+LoadedModel load_model(const std::string& model_path, int device,
+                       bool quantize_fp16, bool quantize_bf16,
+                       LogCallback logger) {
     using Clock = std::chrono::high_resolution_clock;
     auto total_start = Clock::now();
     cudaSetDevice(device);
@@ -248,7 +250,9 @@ LoadedModel load_model(const std::string& model_path, int device, bool quantize_
     LoadedModel loaded;
     loaded.model_path = model_path;
     loaded.quantize_fp16 = quantize_fp16;
+    loaded.quantize_bf16 = quantize_bf16;
     g_quantize_fp16 = quantize_fp16;
+    g_quantize_bf16 = quantize_bf16;
 
     auto weights_start = Clock::now();
     loaded.weights = ModelWeights::load(model_path);
@@ -263,6 +267,12 @@ LoadedModel load_model(const std::string& model_path, int device, bool quantize_
         loaded.weights.convert_linear_weights_to_fp16();
         if (logger) {
             logger("[time] FP16 prepare: " + format_ms(elapsed_ms(fp16_start, Clock::now())));
+        }
+    } else if (quantize_bf16) {
+        auto bf16_start = Clock::now();
+        loaded.weights.convert_linear_weights_to_bf16();
+        if (logger) {
+            logger("[time] BF16 prepare: " + format_ms(elapsed_ms(bf16_start, Clock::now())));
         }
     }
 

@@ -6,6 +6,7 @@
 namespace cudasep {
 
 extern bool g_quantize_fp16;
+extern bool g_quantize_bf16;
 
 class CudaContext {
 public:

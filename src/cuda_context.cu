@@ -8,6 +8,7 @@
 namespace cudasep {
 
 bool g_quantize_fp16 = false;
+bool g_quantize_bf16 = false;
 
 CudaContext::CudaContext() {
     cublasStatus_t status = cublasCreate(&cublas_);

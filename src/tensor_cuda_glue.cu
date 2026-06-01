@@ -2,6 +2,7 @@
 
 #include "cuda_tile.h"
 
+#include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <stdexcept>
 
@@ -15,6 +16,7 @@ constexpr int kTile = 256;
 using I64Tile = ct::tile<long long, ct::shape<kTile>>;
 using F32Tile = ct::tile<float, ct::shape<kTile>>;
 using F16Tile = ct::tile<__half, ct::shape<kTile>>;
+using BF16Tile = ct::tile<__nv_bfloat16, ct::shape<kTile>>;
 using ByteTile = ct::tile<unsigned char, ct::shape<kTile>>;
 
 static inline int64_t ceildiv(int64_t a, int64_t b) {
@@ -202,6 +204,11 @@ __tile_global__ void pad_const_kernel(const unsigned char* __restrict__ src,
         auto values = ct::load_masked(reinterpret_cast<const __half*>(src) + src_linear, inside);
         ct::store_masked(reinterpret_cast<__half*>(dst) + idx, pad, in_bounds);
         ct::store_masked(reinterpret_cast<__half*>(dst) + idx, values, inside);
+    } else if (dtype_code == 3) {
+        BF16Tile pad = ct::element_cast<__nv_bfloat16>(ct::element_cast<float>(idx * 0LL) + pad_value);
+        auto values = ct::load_masked(reinterpret_cast<const __nv_bfloat16*>(src) + src_linear, inside);
+        ct::store_masked(reinterpret_cast<__nv_bfloat16*>(dst) + idx, pad, in_bounds);
+        ct::store_masked(reinterpret_cast<__nv_bfloat16*>(dst) + idx, values, inside);
     } else {
         auto pad = idx * 0LL + (long long)pad_value;
         auto values = ct::load_masked(reinterpret_cast<const long long*>(src) + src_linear, inside);
@@ -321,6 +328,10 @@ void binary_glue(const Tensor& a, const Tensor& b, Tensor& out,
     } else if (out.dtype() == DType::Float16) {
         binary_kernel<<<grid, 1>>>((const __half*)a.data_ptr(), (const __half*)b.data_ptr(),
                                    out.data_f16(), d_meta, op, total);
+    } else if (out.dtype() == DType::BFloat16) {
+        binary_kernel<<<grid, 1>>>((const __nv_bfloat16*)a.data_ptr(),
+                                   (const __nv_bfloat16*)b.data_ptr(),
+                                   out.data_bf16(), d_meta, op, total);
     } else {
         throw std::runtime_error("binary op: unsupported dtype");
     }
@@ -337,6 +348,10 @@ void binary_inplace_glue(Tensor& a, const Tensor& b,
         binary_inplace_kernel<<<grid, 1>>>(a.data_f32(), b.data_f32(), d_meta, op, total);
     } else if (a.dtype() == DType::Float16) {
         binary_inplace_kernel<<<grid, 1>>>(a.data_f16(), (const __half*)b.data_ptr(),
+                                           d_meta, op, total);
+    } else if (a.dtype() == DType::BFloat16) {
+        binary_inplace_kernel<<<grid, 1>>>(a.data_bf16(),
+                                           (const __nv_bfloat16*)b.data_ptr(),
                                            d_meta, op, total);
     } else {
         throw std::runtime_error("inplace binary op: unsupported dtype");
@@ -365,6 +380,9 @@ void strided_copy_glue(const Tensor& src, Tensor& dst, const StridedCopyMeta& me
     } else if (src.dtype() == DType::Float16) {
         strided_copy_value_kernel<<<grid, 1>>>((const __half*)src.data_ptr(), dst.data_f16(),
                                                d_meta, total);
+    } else if (src.dtype() == DType::BFloat16) {
+        strided_copy_value_kernel<<<grid, 1>>>((const __nv_bfloat16*)src.data_ptr(),
+                                               dst.data_bf16(), d_meta, total);
     } else {
         strided_copy_bytes_kernel<<<grid, 1>>>(
             (const unsigned char*)src.data_ptr(), (unsigned char*)dst.data_ptr(), d_meta,
