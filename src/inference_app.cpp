@@ -1,6 +1,7 @@
 #include "inference_app.h"
 
-#include "ops.h"
+#include "chunk_cuda_tile.h"
+#include "cuda_context.h"
 
 #include <algorithm>
 #include <chrono>
@@ -194,8 +195,7 @@ Tensor process_chunked(const Tensor& audio, int chunk_size, int step, int chunk_
             }
 
             Tensor fade_crop = (actual_len < chunk_size) ? window.slice(0, 0, actual_len).contiguous() : window;
-            ops::overlap_add(output, chunk_out, fade_crop, start);
-            ops::weight_accumulate(weight_sum, fade_crop, start);
+            chunk_tile::accumulate_chunk(output, weight_sum, chunk_out, fade_crop, start);
 
             if (logger && (chunk_index == 1 || chunk_index == chunk_count || (chunk_index % 4) == 0)) {
                 logger("[chunk] completed " + std::to_string(chunk_index) + "/" + std::to_string(chunk_count));
@@ -207,7 +207,7 @@ Tensor process_chunked(const Tensor& audio, int chunk_size, int step, int chunk_
         logger("[chunk] merge complete");
     }
 
-    ops::normalize_by_weights(output, weight_sum);
+    chunk_tile::normalize_by_weights(output, weight_sum);
     output = output.reshape(out_shape);
     if (length_init > 2LL * border && border > 0) {
         output = output.slice(output.ndim() - 1, border, border + length_init);

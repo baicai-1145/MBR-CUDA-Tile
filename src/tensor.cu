@@ -1,624 +1,11 @@
 #include "tensor.h"
 #include "memory_pool.h"
+#include "tensor_cuda_tile.h"
 #include <algorithm>
 #include <sstream>
 #include <cmath>
 
 namespace cudasep {
-
-// ============================================================================
-// CUDA Kernels
-// ============================================================================
-
-static constexpr int BLOCK_SIZE = 256;
-
-inline int grid_size(int64_t N) {
-    return (int)((N + BLOCK_SIZE - 1) / BLOCK_SIZE);
-}
-
-// --- Fill kernels ---
-__global__ void fill_f32_kernel(float* dst, float val, int64_t N) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < N) dst[idx] = val;
-}
-
-__global__ void fill_f16_kernel(__half* dst, __half val, int64_t N) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < N) dst[idx] = val;
-}
-
-__global__ void fill_i64_kernel(int64_t* dst, int64_t val, int64_t N) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < N) dst[idx] = val;
-}
-
-// --- Arange kernel ---
-__global__ void arange_f32_kernel(float* dst, int64_t start, int64_t N) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < N) dst[idx] = (float)(start + idx);
-}
-
-__global__ void arange_f16_kernel(__half* dst, int64_t start, int64_t N) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < N) dst[idx] = __float2half((float)(start + idx));
-}
-
-__global__ void arange_i64_kernel(int64_t* dst, int64_t start, int64_t N) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < N) dst[idx] = start + idx;
-}
-
-// --- Type conversion kernels ---
-__global__ void f32_to_f16_kernel(const float* src, __half* dst, int64_t N) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < N) dst[idx] = __float2half(src[idx]);
-}
-
-__global__ void f16_to_f32_kernel(const __half* src, float* dst, int64_t N) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < N) dst[idx] = __half2float(src[idx]);
-}
-
-__global__ void i64_to_f32_kernel(const int64_t* src, float* dst, int64_t N) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < N) dst[idx] = (float)src[idx];
-}
-
-__global__ void f32_to_i64_kernel(const float* src, int64_t* dst, int64_t N) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < N) dst[idx] = (int64_t)src[idx];
-}
-
-__global__ void i64_to_f16_kernel(const int64_t* src, __half* dst, int64_t N) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < N) dst[idx] = __float2half((float)src[idx]);
-}
-
-__global__ void f16_to_i64_kernel(const __half* src, int64_t* dst, int64_t N) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < N) dst[idx] = (int64_t)__half2float(src[idx]);
-}
-
-// --- Scalar ops kernels ---
-__global__ void add_scalar_f32_kernel(float* data, float val, int64_t N) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < N) data[idx] += val;
-}
-
-__global__ void mul_scalar_f32_kernel(float* data, float val, int64_t N) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < N) data[idx] *= val;
-}
-
-__global__ void add_scalar_f16_kernel(__half* data, __half val, int64_t N) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < N) data[idx] = __hadd(data[idx], val);
-}
-
-__global__ void mul_scalar_f16_kernel(__half* data, __half val, int64_t N) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < N) data[idx] = __hmul(data[idx], val);
-}
-
-__global__ void clamp_f32_kernel(float* data, float min_val, float max_val, int64_t N) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < N) {
-        float v = data[idx];
-        v = fmaxf(v, min_val);
-        v = fminf(v, max_val);
-        data[idx] = v;
-    }
-}
-
-__global__ void clamp_f16_kernel(__half* data, __half min_val, __half max_val, int64_t N) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < N) {
-        float v = __half2float(data[idx]);
-        v = fmaxf(v, __half2float(min_val));
-        v = fminf(v, __half2float(max_val));
-        data[idx] = __float2half(v);
-    }
-}
-
-__global__ void negate_f32_kernel(const float* src, float* dst, int64_t N) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < N) dst[idx] = -src[idx];
-}
-
-__global__ void negate_f16_kernel(const __half* src, __half* dst, int64_t N) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < N) dst[idx] = __hneg(src[idx]);
-}
-
-// --- Comparison kernel ---
-__global__ void gt_scalar_f32_kernel(const float* src, float val, float* dst, int64_t N) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < N) dst[idx] = (src[idx] > val) ? 1.0f : 0.0f;
-}
-
-__global__ void gt_scalar_f16_kernel(const __half* src, __half val, __half* dst, int64_t N) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < N) {
-        dst[idx] = (__half2float(src[idx]) > __half2float(val))
-                       ? __float2half(1.0f)
-                       : __float2half(0.0f);
-    }
-}
-
-// --- Broadcasting element-wise binary kernels ---
-//
-// We pass shape and strides for both operands (with broadcast strides = 0
-// for dims of size 1) plus the output shape. Max 8 dimensions supported.
-
-static constexpr int MAX_DIMS = 8;
-
-// Metadata for strided copy (permute/contiguous) - passed by value to avoid cudaMalloc
-struct StridedCopyMeta {
-    int64_t src_strides[MAX_DIMS];
-    int64_t dst_shape[MAX_DIMS];
-    int ndim;
-};
-
-struct BroadcastMeta {
-    int64_t out_shape[MAX_DIMS];
-    int64_t a_strides[MAX_DIMS];
-    int64_t b_strides[MAX_DIMS];
-    int ndim;
-};
-
-__device__ inline int64_t broadcast_offset(int64_t linear_idx,
-                                            const int64_t* out_shape,
-                                            const int64_t* src_strides,
-                                            int ndim) {
-    int64_t offset = 0;
-    for (int d = ndim - 1; d >= 0; --d) {
-        int64_t coord = linear_idx % out_shape[d];
-        linear_idx /= out_shape[d];
-        offset += coord * src_strides[d];
-    }
-    return offset;
-}
-
-enum class BinaryOp { Add, Sub, Mul, Div };
-
-template <BinaryOp op>
-__device__ inline float binary_apply_f32(float a, float b) {
-    if constexpr (op == BinaryOp::Add) return a + b;
-    if constexpr (op == BinaryOp::Sub) return a - b;
-    if constexpr (op == BinaryOp::Mul) return a * b;
-    if constexpr (op == BinaryOp::Div) return a / b;
-    return 0.0f;
-}
-
-template <BinaryOp op>
-__device__ inline __half binary_apply_f16(__half a, __half b) {
-    if constexpr (op == BinaryOp::Add) return __hadd(a, b);
-    if constexpr (op == BinaryOp::Sub) return __hsub(a, b);
-    if constexpr (op == BinaryOp::Mul) return __hmul(a, b);
-    if constexpr (op == BinaryOp::Div) return __hdiv(a, b);
-    return __float2half(0.0f);
-}
-
-template <BinaryOp op>
-__global__ void elementwise_binary_f32_kernel(const float* a, const float* b, float* out,
-                                               BroadcastMeta meta, int64_t N) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < N) {
-        int64_t a_off = broadcast_offset(idx, meta.out_shape, meta.a_strides, meta.ndim);
-        int64_t b_off = broadcast_offset(idx, meta.out_shape, meta.b_strides, meta.ndim);
-        out[idx] = binary_apply_f32<op>(a[a_off], b[b_off]);
-    }
-}
-
-template <BinaryOp op>
-__global__ void elementwise_binary_f16_kernel(const __half* a, const __half* b, __half* out,
-                                               BroadcastMeta meta, int64_t N) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < N) {
-        int64_t a_off = broadcast_offset(idx, meta.out_shape, meta.a_strides, meta.ndim);
-        int64_t b_off = broadcast_offset(idx, meta.out_shape, meta.b_strides, meta.ndim);
-        out[idx] = binary_apply_f16<op>(a[a_off], b[b_off]);
-    }
-}
-
-// In-place binary (this += or *= other with broadcasting)
-template <BinaryOp op>
-__global__ void elementwise_binary_inplace_f32_kernel(float* a, const float* b,
-                                                       BroadcastMeta meta, int64_t N) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < N) {
-        int64_t b_off = broadcast_offset(idx, meta.out_shape, meta.b_strides, meta.ndim);
-        a[idx] = binary_apply_f32<op>(a[idx], b[b_off]);
-    }
-}
-
-template <BinaryOp op>
-__global__ void elementwise_binary_inplace_f16_kernel(__half* a, const __half* b,
-                                                       BroadcastMeta meta, int64_t N) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < N) {
-        int64_t b_off = broadcast_offset(idx, meta.out_shape, meta.b_strides, meta.ndim);
-        a[idx] = binary_apply_f16<op>(a[idx], b[b_off]);
-    }
-}
-
-// --- Permute kernel ---
-__global__ void permute_kernel(const char* src, char* dst,
-                               const int64_t* src_strides,
-                               const int64_t* dst_shape,
-                               const int* perm,
-                               int ndim, int elem_size, int64_t N) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= N) return;
-
-    // Compute coordinates in destination tensor
-    int64_t tmp = idx;
-    int64_t src_offset = 0;
-    for (int d = ndim - 1; d >= 0; --d) {
-        int64_t coord = tmp % dst_shape[d];
-        tmp /= dst_shape[d];
-        // This coordinate in dst dimension d corresponds to src dimension perm[d]
-        src_offset += coord * src_strides[perm[d]];
-    }
-    // Copy element
-    const char* sp = src + src_offset * elem_size;
-    char* dp = dst + idx * elem_size;
-    for (int i = 0; i < elem_size; ++i) {
-        dp[i] = sp[i];
-    }
-}
-
-// --- Slice kernel ---
-__global__ void slice_kernel(const char* src, char* dst,
-                             const int64_t* src_shape,
-                             const int64_t* src_strides,
-                             const int64_t* dst_shape,
-                             int slice_dim, int64_t slice_start,
-                             int ndim, int elem_size, int64_t N) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= N) return;
-
-    // Compute dst coordinates
-    int64_t tmp = idx;
-    int64_t src_offset = 0;
-    for (int d = ndim - 1; d >= 0; --d) {
-        int64_t coord = tmp % dst_shape[d];
-        tmp /= dst_shape[d];
-        int64_t src_coord = (d == slice_dim) ? (coord + slice_start) : coord;
-        src_offset += src_coord * src_strides[d];
-    }
-    const char* sp = src + src_offset * elem_size;
-    char* dp = dst + idx * elem_size;
-    for (int i = 0; i < elem_size; ++i) {
-        dp[i] = sp[i];
-    }
-}
-
-// --- Index select kernel ---
-__global__ void index_select_kernel(const char* src, char* dst,
-                                     const int64_t* indices,
-                                     StridedCopyMeta meta,
-                                     int select_dim,
-                                     int elem_size, int64_t N) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= N) return;
-
-    int64_t tmp = idx;
-    int64_t src_offset = 0;
-    for (int d = meta.ndim - 1; d >= 0; --d) {
-        int64_t coord = tmp % meta.dst_shape[d];
-        tmp /= meta.dst_shape[d];
-        int64_t src_coord = (d == select_dim) ? indices[coord] : coord;
-        src_offset += src_coord * meta.src_strides[d];
-    }
-    const char* sp = src + src_offset * elem_size;
-    char* dp = dst + idx * elem_size;
-    for (int i = 0; i < elem_size; ++i) {
-        dp[i] = sp[i];
-    }
-}
-
-// Metadata for padding kernels
-struct PadMeta {
-    int64_t src_shape[MAX_DIMS];
-    int64_t dst_shape[MAX_DIMS];
-    int64_t pad_before[MAX_DIMS];
-    int ndim;
-};
-
-// --- Pad constant kernel ---
-__global__ void pad_const_kernel(const char* src, char* dst,
-                                  PadMeta meta,
-                                  int elem_size,
-                                  float pad_val, int dtype_code,
-                                  int64_t N) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= N) return;
-
-    // Compute dst coordinates
-    int64_t tmp = idx;
-    int64_t coords[MAX_DIMS];
-    for (int d = meta.ndim - 1; d >= 0; --d) {
-        coords[d] = tmp % meta.dst_shape[d];
-        tmp /= meta.dst_shape[d];
-    }
-
-    // Check if inside source region
-    bool inside = true;
-    int64_t src_linear = 0;
-    int64_t src_stride = 1;
-    for (int d = meta.ndim - 1; d >= 0; --d) {
-        int64_t src_coord = coords[d] - meta.pad_before[d];
-        if (src_coord < 0 || src_coord >= meta.src_shape[d]) {
-            inside = false;
-            break;
-        }
-        src_linear += src_coord * src_stride;
-        src_stride *= meta.src_shape[d];
-    }
-
-    char* dp = dst + idx * elem_size;
-    if (inside) {
-        const char* sp = src + src_linear * elem_size;
-        for (int i = 0; i < elem_size; ++i) dp[i] = sp[i];
-    } else {
-        // Fill with pad value
-        if (dtype_code == 0) { // Float32
-            *((float*)dp) = pad_val;
-        } else if (dtype_code == 1) { // Float16
-            *((__half*)dp) = __float2half(pad_val);
-        } else { // Int64
-            *((int64_t*)dp) = (int64_t)pad_val;
-        }
-    }
-}
-
-// --- Pad reflect kernel ---
-__global__ void pad_reflect_kernel(const char* src, char* dst,
-                                    PadMeta meta,
-                                    int elem_size, int64_t N) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= N) return;
-
-    int64_t tmp = idx;
-    int64_t coords[MAX_DIMS];
-    for (int d = meta.ndim - 1; d >= 0; --d) {
-        coords[d] = tmp % meta.dst_shape[d];
-        tmp /= meta.dst_shape[d];
-    }
-
-    // Map each coordinate to source via reflection
-    int64_t src_linear = 0;
-    int64_t src_stride = 1;
-    for (int d = meta.ndim - 1; d >= 0; --d) {
-        int64_t src_coord = coords[d] - meta.pad_before[d];
-        // Reflect
-        if (src_coord < 0) {
-            src_coord = -src_coord;
-        } else if (src_coord >= meta.src_shape[d]) {
-            src_coord = 2 * (meta.src_shape[d] - 1) - src_coord;
-        }
-        // Clamp (safety)
-        if (src_coord < 0) src_coord = 0;
-        if (src_coord >= meta.src_shape[d]) src_coord = meta.src_shape[d] - 1;
-        src_linear += src_coord * src_stride;
-        src_stride *= meta.src_shape[d];
-    }
-
-    const char* sp = src + src_linear * elem_size;
-    char* dp = dst + idx * elem_size;
-    for (int i = 0; i < elem_size; ++i) dp[i] = sp[i];
-}
-
-// --- Expand (broadcast copy) kernel ---
-__global__ void expand_kernel(const char* src, char* dst,
-                               const int64_t* src_shape,
-                               const int64_t* dst_shape,
-                               const int64_t* src_strides,
-                               int ndim, int elem_size, int64_t N) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= N) return;
-
-    int64_t tmp = idx;
-    int64_t src_offset = 0;
-    for (int d = ndim - 1; d >= 0; --d) {
-        int64_t coord = tmp % dst_shape[d];
-        tmp /= dst_shape[d];
-        // If src dim is 1, collapse coordinate to 0
-        if (src_shape[d] == 1) {
-            // stride is 0 effectively
-        } else {
-            src_offset += coord * src_strides[d];
-        }
-    }
-    const char* sp = src + src_offset * elem_size;
-    char* dp = dst + idx * elem_size;
-    for (int i = 0; i < elem_size; ++i) dp[i] = sp[i];
-}
-
-// --- Reduction kernels ---
-// Reduce along the innermost dimension using warp shuffle
-__global__ void sum_reduce_last_dim_f32(const float* src, float* dst,
-                                         int64_t inner_size,
-                                         int64_t outer_size) {
-    int64_t outer_idx = (int64_t)blockIdx.x;
-    if (outer_idx >= outer_size) return;
-
-    const float* row = src + outer_idx * inner_size;
-    float val = 0.0f;
-    for (int64_t i = threadIdx.x; i < inner_size; i += blockDim.x) {
-        val += row[i];
-    }
-    // Warp reduce
-    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
-        val += __shfl_down_sync(0xFFFFFFFF, val, offset);
-    }
-    // Use shared memory to reduce across warps
-    __shared__ float shared[32]; // max 32 warps per block
-    int lane = threadIdx.x & 31;
-    int warp_id = threadIdx.x >> 5;
-    if (lane == 0) shared[warp_id] = val;
-    __syncthreads();
-    int nwarps = (blockDim.x + 31) / 32;
-    if (threadIdx.x < (unsigned)nwarps) {
-        val = shared[threadIdx.x];
-    } else {
-        val = 0.0f;
-    }
-    if (threadIdx.x < 32) {
-        for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
-            val += __shfl_down_sync(0xFFFFFFFF, val, offset);
-        }
-    }
-    if (threadIdx.x == 0) {
-        dst[outer_idx] = val;
-    }
-}
-
-__global__ void max_reduce_last_dim_f32(const float* src, float* dst,
-                                         int64_t inner_size,
-                                         int64_t outer_size) {
-    int64_t outer_idx = (int64_t)blockIdx.x;
-    if (outer_idx >= outer_size) return;
-
-    const float* row = src + outer_idx * inner_size;
-    float val = -INFINITY;
-    for (int64_t i = threadIdx.x; i < inner_size; i += blockDim.x) {
-        val = fmaxf(val, row[i]);
-    }
-    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
-        float tmp = __shfl_down_sync(0xFFFFFFFF, val, offset);
-        val = fmaxf(val, tmp);
-    }
-    __shared__ float shared[32];
-    int lane = threadIdx.x & 31;
-    int warp_id = threadIdx.x >> 5;
-    if (lane == 0) shared[warp_id] = val;
-    __syncthreads();
-    int nwarps = (blockDim.x + 31) / 32;
-    if (threadIdx.x < (unsigned)nwarps) {
-        val = shared[threadIdx.x];
-    } else {
-        val = -INFINITY;
-    }
-    if (threadIdx.x < 32) {
-        for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
-            float tmp = __shfl_down_sync(0xFFFFFFFF, val, offset);
-            val = fmaxf(val, tmp);
-        }
-    }
-    if (threadIdx.x == 0) {
-        dst[outer_idx] = val;
-    }
-}
-
-// General reduction kernel: reduce dimension `reduce_dim` which may not be the last.
-// Reshape to [outer, reduce, inner] and reduce the middle dim.
-__global__ void sum_reduce_general_f32(const float* src, float* dst,
-                                        int64_t outer, int64_t reduce, int64_t inner,
-                                        int64_t N_out) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= N_out) return;
-
-    int64_t outer_idx = idx / inner;
-    int64_t inner_idx = idx % inner;
-
-    float val = 0.0f;
-    for (int64_t r = 0; r < reduce; ++r) {
-        val += src[outer_idx * reduce * inner + r * inner + inner_idx];
-    }
-    dst[idx] = val;
-}
-
-__global__ void max_reduce_general_f32(const float* src, float* dst,
-                                        int64_t outer, int64_t reduce, int64_t inner,
-                                        int64_t N_out) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= N_out) return;
-
-    int64_t outer_idx = idx / inner;
-    int64_t inner_idx = idx % inner;
-
-    float val = -INFINITY;
-    for (int64_t r = 0; r < reduce; ++r) {
-        float v = src[outer_idx * reduce * inner + r * inner + inner_idx];
-        val = fmaxf(val, v);
-    }
-    dst[idx] = val;
-}
-
-// --- Copy kernel (generic, for non-contiguous copies) using embedded metadata ---
-__global__ void strided_copy_kernel(const char* src, char* dst,
-                                     StridedCopyMeta meta,
-                                     int elem_size, int64_t N) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= N) return;
-
-    int64_t tmp = idx;
-    int64_t src_offset = 0;
-    for (int d = meta.ndim - 1; d >= 0; --d) {
-        int64_t coord = tmp % meta.dst_shape[d];
-        tmp /= meta.dst_shape[d];
-        src_offset += coord * meta.src_strides[d];
-    }
-    const char* sp = src + src_offset * elem_size;
-    char* dp = dst + idx * elem_size;
-    for (int i = 0; i < elem_size; ++i) dp[i] = sp[i];
-}
-
-// Specialized f32 strided copy — uses float load/store instead of byte memcpy
-__global__ void strided_copy_f32_kernel(const float* __restrict__ src, float* __restrict__ dst,
-                                         StridedCopyMeta meta, int64_t N) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= N) return;
-
-    int64_t tmp = idx;
-    int64_t src_offset = 0;
-    for (int d = meta.ndim - 1; d >= 0; --d) {
-        int64_t coord = tmp % meta.dst_shape[d];
-        tmp /= meta.dst_shape[d];
-        src_offset += coord * meta.src_strides[d];
-    }
-    dst[idx] = src[src_offset];
-}
-
-// Specialized f16 strided copy
-__global__ void strided_copy_f16_kernel(const __half* __restrict__ src, __half* __restrict__ dst,
-                                         StridedCopyMeta meta, int64_t N) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= N) return;
-
-    int64_t tmp = idx;
-    int64_t src_offset = 0;
-    for (int d = meta.ndim - 1; d >= 0; --d) {
-        int64_t coord = tmp % meta.dst_shape[d];
-        tmp /= meta.dst_shape[d];
-        src_offset += coord * meta.src_strides[d];
-    }
-    dst[idx] = src[src_offset];
-}
-
-// ============================================================================
-// Helper: allocate device arrays and copy host data to them
-// ============================================================================
-
-struct DeviceArrays {
-    int64_t* d_ptr;
-    DeviceArrays(const int64_t* host, int count) {
-        CUDA_CHECK(cudaMalloc(&d_ptr, count * sizeof(int64_t)));
-        CUDA_CHECK(cudaMemcpy(d_ptr, host, count * sizeof(int64_t), cudaMemcpyHostToDevice));
-    }
-    ~DeviceArrays() { cudaFree(d_ptr); }
-};
-
-struct DeviceIntArray {
-    int* d_ptr;
-    DeviceIntArray(const int* host, int count) {
-        CUDA_CHECK(cudaMalloc(&d_ptr, count * sizeof(int)));
-        CUDA_CHECK(cudaMemcpy(d_ptr, host, count * sizeof(int), cudaMemcpyHostToDevice));
-    }
-    ~DeviceIntArray() { cudaFree(d_ptr); }
-};
 
 // ============================================================================
 // Tensor Implementation
@@ -695,20 +82,7 @@ Tensor Tensor::ones(std::vector<int64_t> shape, DType dtype) {
 Tensor Tensor::full(std::vector<int64_t> shape, float value, DType dtype) {
     Tensor t = empty(std::move(shape), dtype);
     if (t.numel_ == 0) return t;
-    int64_t N = t.numel_;
-    int grid = grid_size(N);
-    switch (dtype) {
-        case DType::Float32:
-            fill_f32_kernel<<<grid, BLOCK_SIZE>>>(t.data_f32(), value, N);
-            break;
-        case DType::Float16:
-            fill_f16_kernel<<<grid, BLOCK_SIZE>>>(t.data_f16(), __float2half(value), N);
-            break;
-        case DType::Int64:
-            fill_i64_kernel<<<grid, BLOCK_SIZE>>>(t.data_i64(), (int64_t)value, N);
-            break;
-    }
-    CUDA_CHECK(cudaGetLastError());
+    tensor_tile::fill(t, value);
     return t;
 }
 
@@ -744,19 +118,7 @@ Tensor Tensor::arange(int64_t start, int64_t end, DType dtype) {
     int64_t N = end - start;
     if (N <= 0) return Tensor();
     Tensor t = empty({N}, dtype);
-    int grid = grid_size(N);
-    switch (dtype) {
-        case DType::Float32:
-            arange_f32_kernel<<<grid, BLOCK_SIZE>>>(t.data_f32(), start, N);
-            break;
-        case DType::Float16:
-            arange_f16_kernel<<<grid, BLOCK_SIZE>>>(t.data_f16(), start, N);
-            break;
-        case DType::Int64:
-            arange_i64_kernel<<<grid, BLOCK_SIZE>>>(t.data_i64(), start, N);
-            break;
-    }
-    CUDA_CHECK(cudaGetLastError());
+    tensor_tile::arange(t, start);
     return t;
 }
 
@@ -874,30 +236,13 @@ Tensor Tensor::contiguous() const {
     Tensor out = Tensor::empty(shape_, dtype_);
     if (numel_ == 0) return out;
 
-    int elem_size = (int)dtype_size(dtype_);
-    StridedCopyMeta meta;
+    tensor_tile::StridedCopyMeta meta;
     meta.ndim = nd;
     for (int i = 0; i < nd; ++i) {
         meta.src_strides[i] = strides_[i];
         meta.dst_shape[i] = shape_[i];
     }
-
-    int grid = grid_size(numel_);
-    if (dtype_ == DType::Float32) {
-        strided_copy_f32_kernel<<<grid, BLOCK_SIZE>>>(
-            (const float*)data_, (float*)out.data_,
-            meta, numel_);
-    } else if (dtype_ == DType::Float16) {
-        strided_copy_f16_kernel<<<grid, BLOCK_SIZE>>>(
-            (const __half*)data_, (__half*)out.data_,
-            meta, numel_);
-    } else {
-        int elem_size = (int)dtype_size(dtype_);
-        strided_copy_kernel<<<grid, BLOCK_SIZE>>>(
-            (const char*)data_, (char*)out.data_,
-            meta, elem_size, numel_);
-    }
-    CUDA_CHECK(cudaGetLastError());
+    tensor_tile::strided_copy_glue(*this, out, meta);
 
     return out;
 }
@@ -994,68 +339,15 @@ Tensor Tensor::index_select(int dim, const Tensor& indices) const {
     if (out_numel == 0) return out;
 
     int nd = ndim();
-    int elem_size = (int)dtype_size(dtype_);
-
-    StridedCopyMeta meta;
+    tensor_tile::StridedCopyMeta meta;
     meta.ndim = nd;
     for (int i = 0; i < nd; ++i) {
         meta.src_strides[i] = strides_[i];
         meta.dst_shape[i] = out_shape[i];
     }
-
-    int grid_sz = grid_size(out_numel);
-    index_select_kernel<<<grid_sz, BLOCK_SIZE>>>(
-        (const char*)data_, (char*)out.data_,
-        indices.data_i64(), meta,
-        dim, elem_size, out_numel);
-    CUDA_CHECK(cudaGetLastError());
+    tensor_tile::index_select_glue(*this, out, indices, meta, dim);
 
     return out;
-}
-
-// --- cat kernel ---
-struct CatSrcInfo {
-    const void* ptr;
-    int64_t dim_size;
-    int64_t dim_offset;
-};
-
-__global__ void cat_2d_kernel(
-    char* __restrict__ out,
-    const CatSrcInfo* __restrict__ infos,
-    int64_t outer_size,
-    int64_t total_cat_dim,
-    int64_t inner_bytes,   // inner_size * elem_size
-    int64_t src_elems_max  // max elements per tensor (for grid sizing)
-) {
-    int tensor_idx = blockIdx.y;
-    const CatSrcInfo& info = infos[tensor_idx];
-
-    int64_t src_bytes = outer_size * info.dim_size * inner_bytes;
-    int64_t bid = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-
-    // Process 4 bytes at a time for alignment
-    int64_t idx4 = bid * 4;
-    if (idx4 >= src_bytes) return;
-
-    // Decompose byte index to (outer, local_d_byte, inner_byte)
-    int64_t dim_bytes = info.dim_size * inner_bytes;
-    int64_t outer_idx = idx4 / dim_bytes;
-    int64_t rem = idx4 % dim_bytes;
-
-    // Destination byte offset
-    int64_t dst_idx = outer_idx * total_cat_dim * inner_bytes + info.dim_offset * inner_bytes + rem;
-
-    // Copy 4 bytes (handles float32 and float16 generically)
-    if (idx4 + 4 <= src_bytes) {
-        *reinterpret_cast<uint32_t*>(out + dst_idx) =
-            *reinterpret_cast<const uint32_t*>((const char*)info.ptr + idx4);
-    } else {
-        // Tail bytes
-        for (int64_t b = idx4; b < src_bytes; b++) {
-            out[dst_idx + (b - idx4)] = ((const char*)info.ptr)[b];
-        }
-    }
 }
 
 // --- cat ---
@@ -1095,7 +387,7 @@ Tensor Tensor::cat(const std::vector<Tensor>& tensors, int dim) {
 
     // Ensure all tensors are contiguous and build metadata
     std::vector<Tensor> contig(N);
-    std::vector<CatSrcInfo> h_infos(N);
+    std::vector<tensor_tile::CatSrcInfo> h_infos(N);
     int64_t dim_offset = 0;
     int64_t max_src_bytes = 0;
     for (int i = 0; i < N; i++) {
@@ -1108,28 +400,8 @@ Tensor Tensor::cat(const std::vector<Tensor>& tensors, int dim) {
         dim_offset += h_infos[i].dim_size;
     }
 
-    // Upload metadata to GPU (small allocation, reuse static buffer)
-    static CatSrcInfo* d_infos = nullptr;
-    static size_t d_infos_cap = 0;
-    size_t infos_bytes = N * sizeof(CatSrcInfo);
-    if (infos_bytes > d_infos_cap) {
-        if (d_infos) cudaFree(d_infos);
-        CUDA_CHECK(cudaMalloc(&d_infos, infos_bytes));
-        d_infos_cap = infos_bytes;
-    }
-    CUDA_CHECK(cudaMemcpyAsync(d_infos, h_infos.data(), infos_bytes, cudaMemcpyHostToDevice));
-
-    // Launch 2D kernel: (blocks_per_tensor, N)
-    // Each thread processes 4 bytes
-    int64_t max_units = (max_src_bytes + 3) / 4;  // 4-byte units
-    int threads = 256;
-    int blocks_x = (int)((max_units + threads - 1) / threads);
-    dim3 grid(blocks_x, N);
-
-    cat_2d_kernel<<<grid, threads>>>(
-        (char*)out.data_, d_infos,
-        outer_size, total_dim, inner_bytes, max_units);
-    CUDA_CHECK(cudaGetLastError());
+    tensor_tile::cat_glue((char*)out.data_, h_infos.data(), N,
+                          outer_size, total_dim, inner_bytes, max_src_bytes);
 
     return out;
 }
@@ -1206,8 +478,7 @@ Tensor Tensor::pad(const std::vector<int64_t>& padding, float value) const {
     Tensor out = Tensor::empty(out_shape, dtype_);
     if (out_numel == 0) return out;
 
-    int elem_size = (int)dtype_size(dtype_);
-    PadMeta pmeta;
+    tensor_tile::PadMeta pmeta;
     pmeta.ndim = nd;
     for (int i = 0; i < nd; ++i) {
         pmeta.src_shape[i] = shape_[i];
@@ -1215,11 +486,7 @@ Tensor Tensor::pad(const std::vector<int64_t>& padding, float value) const {
         pmeta.pad_before[i] = pad_before[i];
     }
 
-    int grid_sz = grid_size(out_numel);
-    pad_const_kernel<<<grid_sz, BLOCK_SIZE>>>(
-        (const char*)data_, (char*)out.data_,
-        pmeta, elem_size, value, (int)dtype_, out_numel);
-    CUDA_CHECK(cudaGetLastError());
+    tensor_tile::pad_const_glue(*this, out, pmeta, value);
 
     return out;
 }
@@ -1247,8 +514,7 @@ Tensor Tensor::pad_reflect(const std::vector<int64_t>& padding) const {
     Tensor out = Tensor::empty(out_shape, dtype_);
     if (out_numel == 0) return out;
 
-    int elem_size = (int)dtype_size(dtype_);
-    PadMeta pmeta;
+    tensor_tile::PadMeta pmeta;
     pmeta.ndim = nd;
     for (int i = 0; i < nd; ++i) {
         pmeta.src_shape[i] = shape_[i];
@@ -1256,11 +522,7 @@ Tensor Tensor::pad_reflect(const std::vector<int64_t>& padding) const {
         pmeta.pad_before[i] = pad_before[i];
     }
 
-    int grid_sz = grid_size(out_numel);
-    pad_reflect_kernel<<<grid_sz, BLOCK_SIZE>>>(
-        (const char*)data_, (char*)out.data_,
-        pmeta, elem_size, out_numel);
-    CUDA_CHECK(cudaGetLastError());
+    tensor_tile::pad_reflect_glue(*this, out, pmeta);
 
     return out;
 }
@@ -1271,25 +533,7 @@ Tensor Tensor::to_dtype(DType new_dtype) const {
 
     Tensor out = Tensor::empty(shape_, new_dtype);
     if (numel_ == 0) return out;
-
-    int grid_sz = grid_size(numel_);
-
-    if (dtype_ == DType::Float32 && new_dtype == DType::Float16) {
-        f32_to_f16_kernel<<<grid_sz, BLOCK_SIZE>>>(data_f32(), out.data_f16(), numel_);
-    } else if (dtype_ == DType::Float16 && new_dtype == DType::Float32) {
-        f16_to_f32_kernel<<<grid_sz, BLOCK_SIZE>>>((const __half*)data_, out.data_f32(), numel_);
-    } else if (dtype_ == DType::Int64 && new_dtype == DType::Float32) {
-        i64_to_f32_kernel<<<grid_sz, BLOCK_SIZE>>>((const int64_t*)data_, out.data_f32(), numel_);
-    } else if (dtype_ == DType::Float32 && new_dtype == DType::Int64) {
-        f32_to_i64_kernel<<<grid_sz, BLOCK_SIZE>>>(data_f32(), out.data_i64(), numel_);
-    } else if (dtype_ == DType::Int64 && new_dtype == DType::Float16) {
-        i64_to_f16_kernel<<<grid_sz, BLOCK_SIZE>>>((const int64_t*)data_, out.data_f16(), numel_);
-    } else if (dtype_ == DType::Float16 && new_dtype == DType::Int64) {
-        f16_to_i64_kernel<<<grid_sz, BLOCK_SIZE>>>((const __half*)data_, out.data_i64(), numel_);
-    } else {
-        throw std::runtime_error("to_dtype: unsupported conversion");
-    }
-    CUDA_CHECK(cudaGetLastError());
+    tensor_tile::convert_dtype(*this, out);
     return out;
 }
 
@@ -1297,18 +541,19 @@ Tensor Tensor::to_dtype(DType new_dtype) const {
 // Broadcasting helpers
 // ============================================================================
 
-static BroadcastMeta compute_broadcast_meta(const std::vector<int64_t>& a_shape,
-                                             const std::vector<int64_t>& a_strides,
-                                             const std::vector<int64_t>& b_shape,
-                                             const std::vector<int64_t>& b_strides,
-                                             std::vector<int64_t>& out_shape) {
+static tensor_tile::BroadcastMeta compute_broadcast_meta(
+    const std::vector<int64_t>& a_shape,
+    const std::vector<int64_t>& a_strides,
+    const std::vector<int64_t>& b_shape,
+    const std::vector<int64_t>& b_strides,
+    std::vector<int64_t>& out_shape) {
     int nd_a = (int)a_shape.size();
     int nd_b = (int)b_shape.size();
     int nd = std::max(nd_a, nd_b);
-    if (nd > MAX_DIMS) throw std::runtime_error("broadcast: too many dims (max 8)");
+    if (nd > tensor_tile::kMaxDims) throw std::runtime_error("broadcast: too many dims (max 8)");
 
     out_shape.resize(nd);
-    BroadcastMeta meta;
+    tensor_tile::BroadcastMeta meta;
     meta.ndim = nd;
 
     for (int d = 0; d < nd; ++d) {
@@ -1331,15 +576,16 @@ static BroadcastMeta compute_broadcast_meta(const std::vector<int64_t>& a_shape,
 }
 
 // For in-place: `a` is the output, so a_shape must match out_shape.
-static BroadcastMeta compute_broadcast_meta_inplace(const std::vector<int64_t>& a_shape,
-                                                     const std::vector<int64_t>& b_shape,
-                                                     const std::vector<int64_t>& b_strides) {
+static tensor_tile::BroadcastMeta compute_broadcast_meta_inplace(
+    const std::vector<int64_t>& a_shape,
+    const std::vector<int64_t>& b_shape,
+    const std::vector<int64_t>& b_strides) {
     int nd_a = (int)a_shape.size();
     int nd_b = (int)b_shape.size();
     int nd = nd_a; // a is output, so nd == nd_a
-    if (nd > MAX_DIMS) throw std::runtime_error("broadcast inplace: too many dims");
+    if (nd > tensor_tile::kMaxDims) throw std::runtime_error("broadcast inplace: too many dims");
 
-    BroadcastMeta meta;
+    tensor_tile::BroadcastMeta meta;
     meta.ndim = nd;
 
     for (int d = 0; d < nd; ++d) {
@@ -1361,145 +607,87 @@ static BroadcastMeta compute_broadcast_meta_inplace(const std::vector<int64_t>& 
 // Element-wise operators
 // ============================================================================
 
-template <BinaryOp op>
+template <tensor_tile::BinaryOp op>
 static Tensor binary_op(const Tensor& a, const Tensor& b) {
+    DType dt = a.dtype();
+    if (dt != b.dtype()) throw std::runtime_error("binary op: dtype mismatch");
+
+    if (a.shape() == b.shape() && a.is_contiguous() && b.is_contiguous()) {
+        Tensor out = Tensor::empty(a.shape(), dt);
+        tensor_tile::binary_same_shape(a, b, out, op);
+        return out;
+    }
+
     std::vector<int64_t> out_shape;
-    BroadcastMeta meta = compute_broadcast_meta(
+    tensor_tile::BroadcastMeta meta = compute_broadcast_meta(
         a.shape(), a.strides(), b.shape(), b.strides(), out_shape);
 
     int64_t out_numel = 1;
     for (auto s : out_shape) out_numel *= s;
 
-    DType dt = a.dtype();
-    if (dt != b.dtype()) throw std::runtime_error("binary op: dtype mismatch");
-
     Tensor out = Tensor::empty(out_shape, dt);
     if (out_numel == 0) return out;
-
-    int grid_sz = grid_size(out_numel);
-    if (dt == DType::Float32) {
-        elementwise_binary_f32_kernel<op><<<grid_sz, BLOCK_SIZE>>>(
-            a.data_f32(), b.data_f32(), out.data_f32(), meta, out_numel);
-    } else if (dt == DType::Float16) {
-        elementwise_binary_f16_kernel<op><<<grid_sz, BLOCK_SIZE>>>(
-            (const __half*)a.data_ptr(), (const __half*)b.data_ptr(),
-            (__half*)out.data_ptr(), meta, out_numel);
-    } else {
-        throw std::runtime_error("binary op: unsupported dtype");
-    }
-    CUDA_CHECK(cudaGetLastError());
+    tensor_tile::binary_glue(a, b, out, meta, op);
     return out;
 }
 
-Tensor Tensor::operator+(const Tensor& other) const { return binary_op<BinaryOp::Add>(*this, other); }
-Tensor Tensor::operator-(const Tensor& other) const { return binary_op<BinaryOp::Sub>(*this, other); }
-Tensor Tensor::operator*(const Tensor& other) const { return binary_op<BinaryOp::Mul>(*this, other); }
-Tensor Tensor::operator/(const Tensor& other) const { return binary_op<BinaryOp::Div>(*this, other); }
+Tensor Tensor::operator+(const Tensor& other) const { return binary_op<tensor_tile::BinaryOp::Add>(*this, other); }
+Tensor Tensor::operator-(const Tensor& other) const { return binary_op<tensor_tile::BinaryOp::Sub>(*this, other); }
+Tensor Tensor::operator*(const Tensor& other) const { return binary_op<tensor_tile::BinaryOp::Mul>(*this, other); }
+Tensor Tensor::operator/(const Tensor& other) const { return binary_op<tensor_tile::BinaryOp::Div>(*this, other); }
 
 Tensor Tensor::operator-() const {
     Tensor out = Tensor::empty(shape_, dtype_);
     if (numel_ == 0) return out;
-    int grid_sz = grid_size(numel_);
-    if (dtype_ == DType::Float32) {
-        negate_f32_kernel<<<grid_sz, BLOCK_SIZE>>>(data_f32(), out.data_f32(), numel_);
-    } else if (dtype_ == DType::Float16) {
-        negate_f16_kernel<<<grid_sz, BLOCK_SIZE>>>(
-            (const __half*)data_, (__half*)out.data_, numel_);
-    } else {
-        throw std::runtime_error("negate: unsupported dtype");
-    }
-    CUDA_CHECK(cudaGetLastError());
+    tensor_tile::negate(*this, out);
     return out;
 }
 
 // --- In-place operations ---
 
-template <BinaryOp op>
+template <tensor_tile::BinaryOp op>
 static void binary_op_inplace(Tensor& a, const Tensor& b) {
     DType dt = a.dtype();
     if (dt != b.dtype()) throw std::runtime_error("inplace binary op: dtype mismatch");
 
-    BroadcastMeta meta = compute_broadcast_meta_inplace(a.shape(), b.shape(), b.strides());
+    if (a.shape() == b.shape() && a.is_contiguous() && b.is_contiguous()) {
+        tensor_tile::binary_inplace_same_shape(a, b, op);
+        return;
+    }
+
+    tensor_tile::BroadcastMeta meta = compute_broadcast_meta_inplace(a.shape(), b.shape(), b.strides());
     int64_t N = a.numel();
     if (N == 0) return;
-
-    int grid_sz = grid_size(N);
-    if (dt == DType::Float32) {
-        elementwise_binary_inplace_f32_kernel<op><<<grid_sz, BLOCK_SIZE>>>(
-            a.data_f32(), b.data_f32(), meta, N);
-    } else if (dt == DType::Float16) {
-        elementwise_binary_inplace_f16_kernel<op><<<grid_sz, BLOCK_SIZE>>>(
-            a.data_f16(), (const __half*)b.data_ptr(), meta, N);
-    } else {
-        throw std::runtime_error("inplace binary op: unsupported dtype");
-    }
-    CUDA_CHECK(cudaGetLastError());
+    tensor_tile::binary_inplace_glue(a, b, meta, op);
 }
 
 Tensor& Tensor::add_(const Tensor& other) {
-    binary_op_inplace<BinaryOp::Add>(*this, other);
+    binary_op_inplace<tensor_tile::BinaryOp::Add>(*this, other);
     return *this;
 }
 
 Tensor& Tensor::mul_(const Tensor& other) {
-    binary_op_inplace<BinaryOp::Mul>(*this, other);
+    binary_op_inplace<tensor_tile::BinaryOp::Mul>(*this, other);
     return *this;
 }
 
 Tensor& Tensor::add_scalar_(float val) {
-    if (numel_ == 0) return *this;
-    int grid_sz = grid_size(numel_);
-    if (dtype_ == DType::Float32) {
-        add_scalar_f32_kernel<<<grid_sz, BLOCK_SIZE>>>(data_f32(), val, numel_);
-    } else if (dtype_ == DType::Float16) {
-        add_scalar_f16_kernel<<<grid_sz, BLOCK_SIZE>>>(data_f16(), __float2half(val), numel_);
-    } else {
-        throw std::runtime_error("add_scalar_: unsupported dtype");
-    }
-    CUDA_CHECK(cudaGetLastError());
+    tensor_tile::add_scalar(*this, val);
     return *this;
 }
 
 Tensor& Tensor::mul_scalar_(float val) {
-    if (numel_ == 0) return *this;
-    int grid_sz = grid_size(numel_);
-    if (dtype_ == DType::Float32) {
-        mul_scalar_f32_kernel<<<grid_sz, BLOCK_SIZE>>>(data_f32(), val, numel_);
-    } else if (dtype_ == DType::Float16) {
-        mul_scalar_f16_kernel<<<grid_sz, BLOCK_SIZE>>>(data_f16(), __float2half(val), numel_);
-    } else {
-        throw std::runtime_error("mul_scalar_: unsupported dtype");
-    }
-    CUDA_CHECK(cudaGetLastError());
+    tensor_tile::mul_scalar(*this, val);
     return *this;
 }
 
 Tensor& Tensor::clamp_(float min_val, float max_val) {
-    if (numel_ == 0) return *this;
-    int grid_sz = grid_size(numel_);
-    if (dtype_ == DType::Float32) {
-        clamp_f32_kernel<<<grid_sz, BLOCK_SIZE>>>(data_f32(), min_val, max_val, numel_);
-    } else if (dtype_ == DType::Float16) {
-        clamp_f16_kernel<<<grid_sz, BLOCK_SIZE>>>(
-            data_f16(), __float2half(min_val), __float2half(max_val), numel_);
-    } else {
-        throw std::runtime_error("clamp_: unsupported dtype");
-    }
-    CUDA_CHECK(cudaGetLastError());
+    tensor_tile::clamp(*this, min_val, max_val);
     return *this;
 }
 
 Tensor& Tensor::fill_(float val) {
-    if (numel_ == 0) return *this;
-    int grid_sz = grid_size(numel_);
-    if (dtype_ == DType::Float32) {
-        fill_f32_kernel<<<grid_sz, BLOCK_SIZE>>>(data_f32(), val, numel_);
-    } else if (dtype_ == DType::Float16) {
-        fill_f16_kernel<<<grid_sz, BLOCK_SIZE>>>(data_f16(), __float2half(val), numel_);
-    } else if (dtype_ == DType::Int64) {
-        fill_i64_kernel<<<grid_sz, BLOCK_SIZE>>>(data_i64(), (int64_t)val, numel_);
-    }
-    CUDA_CHECK(cudaGetLastError());
+    tensor_tile::fill(*this, val);
     return *this;
 }
 
@@ -1507,16 +695,7 @@ Tensor& Tensor::fill_(float val) {
 Tensor Tensor::operator>(float val) const {
     Tensor out = Tensor::empty(shape_, dtype_);
     if (numel_ == 0) return out;
-    int grid_sz = grid_size(numel_);
-    if (dtype_ == DType::Float32) {
-        gt_scalar_f32_kernel<<<grid_sz, BLOCK_SIZE>>>(data_f32(), val, out.data_f32(), numel_);
-    } else if (dtype_ == DType::Float16) {
-        gt_scalar_f16_kernel<<<grid_sz, BLOCK_SIZE>>>(
-            (const __half*)data_, __float2half(val), (__half*)out.data_, numel_);
-    } else {
-        throw std::runtime_error("operator>: unsupported dtype");
-    }
-    CUDA_CHECK(cudaGetLastError());
+    tensor_tile::greater_than(*this, out, val);
     return out;
 }
 
@@ -1551,19 +730,13 @@ Tensor Tensor::sum(int dim, bool keepdim) const {
     }
     if (out_shape.empty()) out_shape.push_back(1);
 
-    int64_t out_numel = outer * inner;
     Tensor out = Tensor::empty(out_shape, DType::Float32);
 
     if (dim == ndim() - 1 && inner == 1) {
-        // Use optimized warp-shuffle reduction for last dim
-        sum_reduce_last_dim_f32<<<(int)outer, BLOCK_SIZE>>>(
-            data_f32(), out.data_f32(), reduce, outer);
+        tensor_tile::sum_reduce_last_dim(*this, out, reduce, outer);
     } else {
-        int grid_sz = grid_size(out_numel);
-        sum_reduce_general_f32<<<grid_sz, BLOCK_SIZE>>>(
-            data_f32(), out.data_f32(), outer, reduce, inner, out_numel);
+        tensor_tile::sum_reduce_general_glue(*this, out, outer, reduce, inner);
     }
-    CUDA_CHECK(cudaGetLastError());
     return out;
 }
 
@@ -1592,18 +765,13 @@ Tensor Tensor::max(int dim, bool keepdim) const {
     }
     if (out_shape.empty()) out_shape.push_back(1);
 
-    int64_t out_numel = outer * inner;
     Tensor out = Tensor::empty(out_shape, DType::Float32);
 
     if (dim == ndim() - 1 && inner == 1) {
-        max_reduce_last_dim_f32<<<(int)outer, BLOCK_SIZE>>>(
-            data_f32(), out.data_f32(), reduce, outer);
+        tensor_tile::max_reduce_last_dim(*this, out, reduce, outer);
     } else {
-        int grid_sz = grid_size(out_numel);
-        max_reduce_general_f32<<<grid_sz, BLOCK_SIZE>>>(
-            data_f32(), out.data_f32(), outer, reduce, inner, out_numel);
+        tensor_tile::max_reduce_general_glue(*this, out, outer, reduce, inner);
     }
-    CUDA_CHECK(cudaGetLastError());
     return out;
 }
 
@@ -1620,28 +788,13 @@ Tensor Tensor::clone() const {
         } else {
             // Strided copy
             int nd = ndim();
-            int elem_size = (int)dtype_size(dtype_);
-            StridedCopyMeta meta;
+            tensor_tile::StridedCopyMeta meta;
             meta.ndim = nd;
             for (int i = 0; i < nd; ++i) {
                 meta.src_strides[i] = strides_[i];
                 meta.dst_shape[i] = shape_[i];
             }
-            int grid_sz = grid_size(numel_);
-            if (dtype_ == DType::Float32) {
-                strided_copy_f32_kernel<<<grid_sz, BLOCK_SIZE>>>(
-                    (const float*)data_, (float*)out.data_,
-                    meta, numel_);
-            } else if (dtype_ == DType::Float16) {
-                strided_copy_f16_kernel<<<grid_sz, BLOCK_SIZE>>>(
-                    (const __half*)data_, (__half*)out.data_,
-                    meta, numel_);
-            } else {
-                strided_copy_kernel<<<grid_sz, BLOCK_SIZE>>>(
-                    (const char*)data_, (char*)out.data_,
-                    meta, elem_size, numel_);
-            }
-            CUDA_CHECK(cudaGetLastError());
+            tensor_tile::strided_copy_glue(*this, out, meta);
         }
     }
     return out;

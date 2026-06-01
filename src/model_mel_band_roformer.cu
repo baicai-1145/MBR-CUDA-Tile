@@ -4,149 +4,13 @@
 // mirroring the Python forward pass exactly.
 
 #include "model_mel_band_roformer.h"
-#include "ops.h"
+#include "mbr_cuda_tile.h"
+#include "stft_cuda_tile.h"
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
 
 namespace cudasep {
-
-namespace {
-
-static constexpr int kTransformBlock = 256;
-
-__global__ void split_qkv_heads_kernel(const float* __restrict__ qkv,
-                                       float* __restrict__ q,
-                                       float* __restrict__ k,
-                                       float* __restrict__ v,
-                                       int B, int H, int N, int D) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    int64_t total = (int64_t)B * H * N * D;
-    if (idx >= total) return;
-
-    int d = (int)(idx % D);
-    int n = (int)((idx / D) % N);
-    int h = (int)((idx / (D * (int64_t)N)) % H);
-    int b = (int)(idx / ((int64_t)D * N * H));
-
-    int64_t head_offset = (int64_t)h * D + d;
-    int64_t base = ((int64_t)b * N + n) * (3LL * H * D);
-    q[idx] = qkv[base + head_offset];
-    k[idx] = qkv[base + (int64_t)H * D + head_offset];
-    v[idx] = qkv[base + 2LL * H * D + head_offset];
-}
-
-__global__ void split_qkv_heads_vec4_kernel(const float4* __restrict__ qkv,
-                                            float4* __restrict__ q,
-                                            float4* __restrict__ k,
-                                            float4* __restrict__ v,
-                                            int B, int H, int N, int D4) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    int64_t total = (int64_t)B * H * N * D4;
-    if (idx >= total) return;
-
-    int d4 = (int)(idx % D4);
-    int n = (int)((idx / D4) % N);
-    int h = (int)((idx / (D4 * (int64_t)N)) % H);
-    int b = (int)(idx / ((int64_t)D4 * N * H));
-
-    int64_t head_offset = (int64_t)h * D4 + d4;
-    int64_t base = ((int64_t)b * N + n) * (3LL * H * D4);
-    q[idx] = qkv[base + head_offset];
-    k[idx] = qkv[base + (int64_t)H * D4 + head_offset];
-    v[idx] = qkv[base + 2LL * H * D4 + head_offset];
-}
-
-__global__ void apply_gates_and_merge_heads_kernel(const float* __restrict__ attn,
-                                                   const float* __restrict__ gates,
-                                                   float* __restrict__ merged,
-                                                   int B, int H, int N, int D) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    int64_t total = (int64_t)B * H * N * D;
-    if (idx >= total) return;
-
-    int d = (int)(idx % D);
-    int n = (int)((idx / D) % N);
-    int h = (int)((idx / (D * (int64_t)N)) % H);
-    int b = (int)(idx / ((int64_t)D * N * H));
-
-    int64_t gate_idx = ((int64_t)b * N + n) * H + h;
-    int64_t merged_idx = ((int64_t)b * N + n) * (H * (int64_t)D) + (int64_t)h * D + d;
-    merged[merged_idx] = attn[idx] * gates[gate_idx];
-}
-
-__global__ void apply_gates_and_merge_heads_vec4_kernel(const float4* __restrict__ attn,
-                                                        const float* __restrict__ gates,
-                                                        float4* __restrict__ merged,
-                                                        int B, int H, int N, int D4) {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    int64_t total = (int64_t)B * H * N * D4;
-    if (idx >= total) return;
-
-    int d4 = (int)(idx % D4);
-    int n = (int)((idx / D4) % N);
-    int h = (int)((idx / (D4 * (int64_t)N)) % H);
-    int b = (int)(idx / ((int64_t)D4 * N * H));
-
-    float gate = gates[((int64_t)b * N + n) * H + h];
-    float4 value = attn[idx];
-    value.x *= gate;
-    value.y *= gate;
-    value.z *= gate;
-    value.w *= gate;
-    int64_t merged_idx = ((int64_t)b * N + n) * (H * (int64_t)D4) + (int64_t)h * D4 + d4;
-    merged[merged_idx] = value;
-}
-
-static void split_qkv_heads(const Tensor& qkv, int heads, int dim_head,
-                            Tensor& q, Tensor& k, Tensor& v) {
-    int B = (int)qkv.size(0);
-    int N = (int)qkv.size(1);
-    q = Tensor::empty({(int64_t)B, (int64_t)heads, (int64_t)N, (int64_t)dim_head}, DType::Float32);
-    k = Tensor::empty({(int64_t)B, (int64_t)heads, (int64_t)N, (int64_t)dim_head}, DType::Float32);
-    v = Tensor::empty({(int64_t)B, (int64_t)heads, (int64_t)N, (int64_t)dim_head}, DType::Float32);
-    if ((dim_head % 4) == 0) {
-        int D4 = dim_head / 4;
-        int64_t total = (int64_t)B * heads * N * D4;
-        int grid = (int)((total + kTransformBlock - 1) / kTransformBlock);
-        split_qkv_heads_vec4_kernel<<<grid, kTransformBlock>>>(reinterpret_cast<const float4*>(qkv.data_f32()),
-                                                               reinterpret_cast<float4*>(q.data_f32()),
-                                                               reinterpret_cast<float4*>(k.data_f32()),
-                                                               reinterpret_cast<float4*>(v.data_f32()),
-                                                               B, heads, N, D4);
-    } else {
-        int64_t total = (int64_t)B * heads * N * dim_head;
-        int grid = (int)((total + kTransformBlock - 1) / kTransformBlock);
-        split_qkv_heads_kernel<<<grid, kTransformBlock>>>(qkv.data_f32(), q.data_f32(), k.data_f32(), v.data_f32(),
-                                                          B, heads, N, dim_head);
-    }
-    CUDA_CHECK(cudaGetLastError());
-}
-
-static Tensor apply_gates_and_merge_heads(const Tensor& attn, const Tensor& gates,
-                                          int heads, int dim_head) {
-    int B = (int)attn.size(0);
-    int N = (int)attn.size(2);
-    Tensor merged = Tensor::empty({(int64_t)B, (int64_t)N, (int64_t)heads * dim_head}, DType::Float32);
-    if ((dim_head % 4) == 0) {
-        int D4 = dim_head / 4;
-        int64_t total = (int64_t)B * heads * N * D4;
-        int grid = (int)((total + kTransformBlock - 1) / kTransformBlock);
-        apply_gates_and_merge_heads_vec4_kernel<<<grid, kTransformBlock>>>(reinterpret_cast<const float4*>(attn.data_f32()),
-                                                                           gates.data_f32(),
-                                                                           reinterpret_cast<float4*>(merged.data_f32()),
-                                                                           B, heads, N, D4);
-    } else {
-        int64_t total = (int64_t)B * heads * N * dim_head;
-        int grid = (int)((total + kTransformBlock - 1) / kTransformBlock);
-        apply_gates_and_merge_heads_kernel<<<grid, kTransformBlock>>>(attn.data_f32(), gates.data_f32(), merged.data_f32(),
-                                                                      B, heads, N, dim_head);
-    }
-    CUDA_CHECK(cudaGetLastError());
-    return merged;
-}
-
-}
 
 // ============================================================================
 // MBRConfig
@@ -232,7 +96,7 @@ void MelBandRoformer::load(const ModelWeights& weights) {
     std::cout << "[MelBandRoformer] Using precomputed mel bands from .csm file" << std::endl;
 
     // 3. Create STFT window
-    stft_window_ = ops::hann_window(cfg_.stft_win_length);
+    stft_window_ = stft_tile::hann_window(cfg_.stft_win_length);
 
     int dim = cfg_.dim;
 
@@ -373,37 +237,34 @@ Tensor MelBandRoformer::apply_attention(const Tensor& x, const AttentionWeights&
     float scale = std::sqrt((float)dim);
 
     // 1. RMS Norm
-    Tensor normed = ops::rms_norm(x, w.norm_gamma, scale);
+    Tensor normed = mbr_tile::rms_norm(x, w.norm_gamma, scale);
 
     // 2. QKV projection: [B, N, 3*dim_inner]
-    Tensor qkv = ops::linear_no_bias(normed, w.to_qkv_w);
+    Tensor qkv = mbr_tile::linear_no_bias(normed, w.to_qkv_w);
 
-    // 3. Reshape to q, k, v: each [B, heads, N, dim_head]
-    // qkv: [B, N, 3*heads*dim_head] -> rearrange 'b n (qkv h d) -> qkv b h n d'
+    // 3-4. Split q, k, v and apply rotary embedding to q/k.
+    // qkv: [B, N, 3*heads*dim_head] -> q/k/v: [B, heads, N, dim_head]
     int64_t B = qkv.size(0);
     int64_t N = qkv.size(1);
     Tensor q;
     Tensor k;
     Tensor v;
-    split_qkv_heads(qkv, heads, dim_head, q, k, v);
-
-    // 4. Apply rotary embedding to q and k
-    ops::apply_rotary_emb(q, k, cos_freqs, sin_freqs);
+    mbr_tile::split_qkv_heads_rotary(qkv, heads, dim_head, cos_freqs, sin_freqs, q, k, v);
 
     // 5. Scaled dot-product attention
     float attn_scale = 1.0f / std::sqrt((float)dim_head);
-    Tensor out = ops::scaled_dot_product_attention(q, k, v, attn_scale);
+    Tensor out = mbr_tile::scaled_dot_product_attention(q, k, v, attn_scale);
     // out: [B, H, N, D]
 
     // 6. Gating
     // gates = sigmoid(linear(normed, to_gates_w, to_gates_b)) -> [B, N, heads]
-    Tensor gates = ops::linear_sigmoid(normed, w.to_gates_w, w.to_gates_b);
+    Tensor gates = mbr_tile::linear_sigmoid(normed, w.to_gates_w, w.to_gates_b);
 
     // 7-8. Apply gates and merge heads directly to [B, N, dim_inner]
-    out = apply_gates_and_merge_heads(out, gates, heads, dim_head);
+    out = mbr_tile::apply_gates_and_merge_heads(out, gates, heads, dim_head);
 
     // 9. Output projection
-    out = ops::linear_no_bias(out, w.to_out_w);  // [B, N, dim]
+    out = mbr_tile::linear_no_bias(out, w.to_out_w);  // [B, N, dim]
 
     return out;
 }
@@ -417,13 +278,13 @@ Tensor MelBandRoformer::apply_feedforward(const Tensor& x, const FeedForwardWeig
     float scale = std::sqrt((float)cfg_.dim);
 
     // 1. RMS Norm
-    Tensor h = ops::rms_norm(x, w.norm_gamma, scale);
+    Tensor h = mbr_tile::rms_norm(x, w.norm_gamma, scale);
 
     // 2. Fused Linear1 + GELU: [B, N, dim] -> [B, N, dim*4]
-    h = ops::linear_gelu(h, w.linear1_w, w.linear1_b);
+    h = mbr_tile::linear_gelu(h, w.linear1_w, w.linear1_b);
 
     // 3. Linear2: [B, N, dim*4] -> [B, N, dim]
-    h = ops::linear(h, w.linear2_w, w.linear2_b);
+    h = mbr_tile::linear(h, w.linear2_w, w.linear2_b);
 
     return h;
 }
@@ -452,7 +313,7 @@ Tensor MelBandRoformer::apply_transformer(const Tensor& x,
     }
 
     // Final RMS norm
-    out = ops::rms_norm(out, w.final_norm_gamma, scale);
+    out = mbr_tile::rms_norm(out, w.final_norm_gamma, scale);
 
     return out;
 }
@@ -482,10 +343,10 @@ Tensor MelBandRoformer::apply_band_split(const Tensor& x) {
     for (int b = 0; b < num_bands; b++) {
         // band_splits[b]: [B, T, band_freq_dim]
         float band_scale = std::sqrt((float)band_freq_dims_[b]);
-        Tensor band_normed = ops::rms_norm(band_splits[b], band_split_layers_[b].norm_gamma,
-                                            band_scale);
-        Tensor band_out = ops::linear(band_normed, band_split_layers_[b].linear_w,
-                                       band_split_layers_[b].linear_b);
+        Tensor band_normed = mbr_tile::rms_norm(band_splits[b], band_split_layers_[b].norm_gamma,
+                                                band_scale);
+        Tensor band_out = mbr_tile::linear(band_normed, band_split_layers_[b].linear_w,
+                                           band_split_layers_[b].linear_b);
         // band_out: [B, T, dim]
         band_outputs.push_back(band_out);
     }
@@ -524,16 +385,16 @@ Tensor MelBandRoformer::apply_mask_estimator(const Tensor& x,
 
         Tensor h = band_x;
         for (int i = 0; i < num_linears; i++) {
-            h = ops::linear(h, mlp.linear_w[i], mlp.linear_b[i]);
+            h = mbr_tile::linear(h, mlp.linear_w[i], mlp.linear_b[i]);
             // Apply Tanh activation between linear layers (not after the last one)
             if (i < num_linears - 1) {
-                h = ops::tanh_act(h);
+                h = mbr_tile::tanh_act(h);
             }
         }
 
         // Apply GLU: splits last dim in half, applies sigmoid gate
         // h: [B, T, band_freq_dim * 2] -> [B, T, band_freq_dim]
-        h = ops::glu(h, -1);
+        h = mbr_tile::glu_last_dim(h);
 
         band_outputs.push_back(h);
     }
@@ -571,9 +432,9 @@ Tensor MelBandRoformer::forward(const Tensor& audio) {
     Tensor audio_flat = raw_audio.reshape({batch * channels, raw_audio_length});
 
     // STFT: [B*channels, F, T_stft, 2]
-    Tensor stft_repr = ops::stft(audio_flat, cfg_.stft_n_fft, cfg_.stft_hop_length,
-                                 cfg_.stft_win_length, stft_window_, true,
-                                 cfg_.stft_normalized);
+    Tensor stft_repr = stft_tile::stft(audio_flat, cfg_.stft_n_fft, cfg_.stft_hop_length,
+                                       cfg_.stft_win_length, stft_window_, true,
+                                       cfg_.stft_normalized);
 
     int64_t F = stft_repr.size(1);   // num frequency bins (n_fft/2 + 1)
     int64_t T = stft_repr.size(2);   // num time frames
@@ -594,18 +455,9 @@ Tensor MelBandRoformer::forward(const Tensor& audio) {
 
     int64_t total_freq = F * channels;
 
-    // ---- 5. Gather frequency bands ----
-    // Python: x = stft_repr[batch_arange, self.freq_indices]
-    // Index select along dim=1 using freq_indices
-    Tensor x = stft_repr.index_select(1, freq_indices_gpu_);
-    // x: [B, total_band_freqs, T, 2]
-
-    int64_t total_band_freqs = x.size(1);
-
-    // ---- 6. Fold complex into frequency dimension ----
-    // Python: x = rearrange(x, 'b f t c -> b t (f c)')
-    x = x.permute({0, 2, 1, 3}).contiguous();  // [B, T, total_band_freqs, 2]
-    x = x.reshape({batch, T, total_band_freqs * 2});
+    // ---- 5-6. Gather frequency bands and fold complex into frequency dimension ----
+    Tensor x = mbr_tile::gather_freqs_fold_complex(stft_repr, freq_indices_gpu_);
+    int64_t total_band_freqs = x.size(2) / 2;
     // x: [B, T, total_band_freqs * 2]
 
     // ---- 7. Band split ----
@@ -685,98 +537,21 @@ Tensor MelBandRoformer::forward(const Tensor& audio) {
         stem_masks.push_back(mask);
     }
 
-    // Stack masks: [B, num_stems, T, total_freq_complex]
-    Tensor masks = Tensor::stack(stem_masks, 1);
-
-    // Reshape masks: 'b n t (f c) -> b n f t c' where c=2
-    // masks: [B, N, T, total_band_freqs * 2] -> [B, N, total_band_freqs, T, 2]
-    masks = masks.reshape({batch, (int64_t)num_stems, T, total_band_freqs, 2});
-    masks = masks.permute({0, 1, 3, 2, 4}).contiguous();
-    // masks: [B, num_stems, total_band_freqs, T, 2]
-
-    // ---- 10. Complex multiply and scatter for overlapping bands ----
-    // stft_repr: [B, total_freq, T, 2] -> [B, 1, total_freq, T, 2]
-    stft_repr = stft_repr.unsqueeze(1);
-
-    // Complex multiply stft_repr * masks using scatter_add for overlapping bands
-    // Python:
-    //   stft_repr = view_as_complex(stft_repr)       -> [B, 1, total_freq, T] complex
-    //   masks = view_as_complex(masks)               -> [B, N, total_band_freqs, T] complex
-    //   stft_repr_exp = expand(stft_repr, n=N)       -> [B, N, total_freq, T] complex
-    //   masks_summed = zeros_like(stft_repr_exp).scatter_add_(2, scatter_indices, masks)
-    //   masks_averaged = masks_summed / denom
-    //   stft_repr = stft_repr * masks_averaged
-    //
-    // We work in real representation. Complex multiply via ops::complex_mul.
-
-    // Expand stft_repr to match stems: [B, 1, total_freq, T, 2] -> [B, N, total_freq, T, 2]
-    Tensor stft_expanded = stft_repr.expand({batch, (int64_t)num_stems,
-                                              total_freq, T, 2}).contiguous();
-
-    // Create scatter destination (zeros): [B, N, total_freq, T, 2]
-    Tensor masks_summed = Tensor::zeros({batch, (int64_t)num_stems, total_freq, T, 2});
-
-    // Build scatter indices for the [B, N, total_band_freqs, T, 2] tensor along dim=2
-    // Each element of freq_indices_ maps band_freq -> original_freq
-    // We need indices tensor of shape [B, N, total_band_freqs, T, 2]
-    // where indices[b, n, f, t, c] = freq_indices_[f]
-    {
-        // Create base indices [total_band_freqs] on GPU
-        // Expand to [B, N, total_band_freqs, T, 2]
-        Tensor idx_base = freq_indices_gpu_.reshape({1, 1, total_band_freqs, 1, 1});
-        Tensor scatter_idx = idx_base.expand({batch, (int64_t)num_stems,
-                                               total_band_freqs, T, 2}).contiguous();
-        // scatter_idx must be Int64
-        ops::scatter_add(masks_summed, 2, scatter_idx, masks);
-    }
-
-    // Average overlapping bands
-    // Python: denom = repeat(self.num_bands_per_freq, 'f -> (f r) 1', r=channels)
-    // num_bands_per_freq_gpu_: [total_freq]
-    // We need denom: [total_freq, 1] -> broadcast to [B, N, total_freq, T, 2]
-    // But since clamping and dividing, we'll reshape for broadcasting
-    Tensor denom = num_bands_per_freq_gpu_.reshape({1, 1, total_freq, 1, 1})
-                   .expand({batch, (int64_t)num_stems, total_freq, T, 2}).contiguous();
-    denom.clamp_(1e-8f, 1e30f);  // clamp(min=1e-8)
-    Tensor masks_averaged = masks_summed / denom;
-
-    // Complex multiply: stft_repr * masks_averaged
-    // For complex multiply in real representation:
-    // stft_expanded: [B, N, total_freq, T, 2], masks_averaged: [B, N, total_freq, T, 2]
-    // Merge the middle dims for complex_mul: reshape to [..., 2]
-    int64_t spatial = batch * num_stems * total_freq * T;
-    Tensor stft_flat = stft_expanded.reshape({spatial, 2});
-    Tensor mask_flat = masks_averaged.reshape({spatial, 2});
-    Tensor result_flat = ops::complex_mul(stft_flat, mask_flat);
-    Tensor stft_result = result_flat.reshape({batch, (int64_t)num_stems, total_freq, T, 2});
-
-    // ---- 11. Prepare for iSTFT ----
-    // Python: stft_repr = rearrange(stft_repr, 'b n (f s) t -> (b n s) f t', s=audio_channels)
-    // stft_result: [B, N, total_freq, T, 2] where total_freq = F * channels
-    // Need to deinterleave stereo: total_freq = F * S, reshape to [B, N, F, S, T, 2]
-    // then to [(B*N*S), F, T, 2]
-    if (audio_channels > 1) {
-        // [B, N, F*S, T, 2] -> [B, N, F, S, T, 2]
-        stft_result = stft_result.reshape({batch, (int64_t)num_stems, F,
-                                           (int64_t)audio_channels, T, 2});
-        // -> [B, N, S, F, T, 2]
-        stft_result = stft_result.permute({0, 1, 3, 2, 4, 5}).contiguous();
-        // -> [(B*N*S), F, T, 2]
-        stft_result = stft_result.reshape({batch * num_stems * audio_channels, F, T, 2});
-    } else {
-        // [B, N, F, T, 2] -> [(B*N), F, T, 2]
-        stft_result = stft_result.reshape({batch * num_stems, F, T, 2});
-    }
+    // ---- 10. Apply masks and scatter overlapping bands ----
+    Tensor stft_result = mbr_tile::apply_mask_and_scatter(
+        stft_repr, stem_masks, freq_indices_gpu_, num_bands_per_freq_gpu_,
+        batch, num_stems, total_freq, total_band_freqs, T, audio_channels);
+    // stft_result: [(B * num_stems * audio_channels), F, T, 2]
 
     // Zero DC component if requested
     if (cfg_.zero_dc) {
-        stft_result = ops::index_fill(stft_result, 1, 0, 0.0f);
+        mbr_tile::zero_dc(stft_result);
     }
 
     // ---- 12. iSTFT ----
-    Tensor recon_audio = ops::istft(stft_result, cfg_.stft_n_fft, cfg_.stft_hop_length,
-                                    cfg_.stft_win_length, stft_window_, istft_length,
-                                    true, cfg_.stft_normalized);
+    Tensor recon_audio = stft_tile::istft(stft_result, cfg_.stft_n_fft, cfg_.stft_hop_length,
+                                          cfg_.stft_win_length, stft_window_, istft_length,
+                                          true, cfg_.stft_normalized);
 
     int64_t out_length = recon_audio.size(1);
 
