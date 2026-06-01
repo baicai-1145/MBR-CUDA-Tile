@@ -3,36 +3,24 @@
 # =============================================================================
 build/
 build_*/
+build-min/
 out/
 dist/
 
 # =============================================================================
-# Generated cuDNN import libraries (created by build scripts / CI)
-# Each machine generates these from its own cuDNN installation
+# Converted model files (.csm) and local model directories
 # =============================================================================
-cudnn_libs/
-
-# =============================================================================
-# Converted model files (.csm) — large binary files
-# Download from: https://huggingface.co/SVCFusion/Cuda-MSST-Infer-Models
-# =============================================================================
-csm_models/
-converted_models/
 *.csm
+mel-band-roformer-deux/
 
 # =============================================================================
-# Audio files (test inputs/outputs)
+# Audio files and inference outputs
 # =============================================================================
 *.wav
-*.mp3
-*.flac
-*.ogg
-*.m4a
-bench_output/
-.cudasep_http_uploads/
+outputs/
 
 # =============================================================================
-# Python
+# Python cache
 # =============================================================================
 __pycache__/
 *.py[cod]

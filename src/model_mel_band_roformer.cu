@@ -5,29 +5,13 @@
 
 #include "model_mel_band_roformer.h"
 #include "ops.h"
-#include <chrono>
 #include <cmath>
-#include <algorithm>
-#include <numeric>
 #include <iostream>
-#include <iomanip>
-#include <sstream>
-#include <cassert>
+#include <stdexcept>
 
 namespace cudasep {
 
 namespace {
-
-static double profile_elapsed_ms(const std::chrono::high_resolution_clock::time_point& start,
-                                 const std::chrono::high_resolution_clock::time_point& end) {
-    return std::chrono::duration<double, std::milli>(end - start).count();
-}
-
-static std::string profile_format_ms(double ms) {
-    std::ostringstream ss;
-    ss << std::fixed << std::setprecision(ms >= 100.0 ? 1 : 3) << ms << " ms";
-    return ss.str();
-}
 
 static constexpr int kTransformBlock = 256;
 
@@ -162,20 +146,6 @@ static Tensor apply_gates_and_merge_heads(const Tensor& attn, const Tensor& gate
     return merged;
 }
 
-struct ProfileScope {
-    double* target = nullptr;
-    std::chrono::high_resolution_clock::time_point start;
-    explicit ProfileScope(double* value) : target(value) {
-        if (target) start = std::chrono::high_resolution_clock::now();
-    }
-    ~ProfileScope() {
-        if (target) {
-            cudaDeviceSynchronize();
-            *target += profile_elapsed_ms(start, std::chrono::high_resolution_clock::now());
-        }
-    }
-};
-
 }
 
 // ============================================================================
@@ -208,111 +178,6 @@ MBRConfig MBRConfig::from_json(const JsonValue& j) {
 }
 
 // ============================================================================
-// compute_mel_bands
-// ============================================================================
-
-void MelBandRoformer::compute_mel_bands() {
-    int n_fft = cfg_.stft_n_fft;
-    int num_bands = cfg_.num_bands;
-    int num_fft_bins = n_fft / 2 + 1;  // e.g. 1025
-    int audio_channels = cfg_.stereo ? 2 : 1;
-
-    // 1. Create mel filterbank on GPU, copy to CPU for processing
-    Tensor mel_fb_gpu = ops::mel_filterbank(cfg_.sample_rate, n_fft, num_bands);
-    // mel_fb_gpu: [num_bands, num_fft_bins] float32
-    std::vector<float> mel_fb = mel_fb_gpu.to_cpu_f32();
-
-    // 2. Force mel_filter_bank[0][0] = 1 and mel_filter_bank[-1][-1] = 1
-    mel_fb[0 * num_fft_bins + 0] = 1.0f;
-    mel_fb[(num_bands - 1) * num_fft_bins + (num_fft_bins - 1)] = 1.0f;
-
-    // 3. Binary threshold: freqs_per_band = (mel_fb > 0)
-    // freqs_per_band[band][freq] = true/false
-    std::vector<std::vector<bool>> freqs_per_band(num_bands, std::vector<bool>(num_fft_bins, false));
-    for (int b = 0; b < num_bands; b++) {
-        for (int f = 0; f < num_fft_bins; f++) {
-            freqs_per_band[b][f] = (mel_fb[b * num_fft_bins + f] > 0.0f);
-        }
-    }
-
-    // 4. Build freq_indices: for each band, collect active frequency indices
-    // Python: repeated_freq_indices = repeat(arange(freqs), 'f -> b f', b=num_bands)
-    //         freq_indices = repeated_freq_indices[freqs_per_band]
-    std::vector<int64_t> freq_indices_mono;
-    num_freqs_per_band_.resize(num_bands);
-    for (int b = 0; b < num_bands; b++) {
-        int count = 0;
-        for (int f = 0; f < num_fft_bins; f++) {
-            if (freqs_per_band[b][f]) {
-                freq_indices_mono.push_back((int64_t)f);
-                count++;
-            }
-        }
-        num_freqs_per_band_[b] = count;
-    }
-
-    // 5. If stereo: duplicate indices as (f*2, f*2+1) pairs
-    // Python: freq_indices = repeat(freq_indices, 'f -> f s', s=2)
-    //         freq_indices = freq_indices * 2 + torch.arange(2)
-    //         freq_indices = rearrange(freq_indices, 'f s -> (f s)')
-    if (cfg_.stereo) {
-        std::vector<int64_t> stereo_indices;
-        stereo_indices.reserve(freq_indices_mono.size() * 2);
-        for (int64_t f : freq_indices_mono) {
-            stereo_indices.push_back(f * 2);
-            stereo_indices.push_back(f * 2 + 1);
-        }
-        freq_indices_ = std::move(stereo_indices);
-    } else {
-        freq_indices_ = std::move(freq_indices_mono);
-    }
-
-    // 6. Build num_bands_per_freq
-    // Python: num_bands_per_freq = reduce(freqs_per_band, 'b f -> f', 'sum')
-    int total_freq = num_fft_bins * audio_channels;  // after stereo interleave
-    num_bands_per_freq_.resize(total_freq);
-
-    // First compute per-FFT-bin counts
-    std::vector<int64_t> bands_per_fft_bin(num_fft_bins, 0);
-    for (int b = 0; b < num_bands; b++) {
-        for (int f = 0; f < num_fft_bins; f++) {
-            if (freqs_per_band[b][f]) {
-                bands_per_fft_bin[f]++;
-            }
-        }
-    }
-
-    // Expand to stereo if needed: 'b s f t c -> b (f s) t c'
-    // After merging stereo into frequency: index pattern is (f0_ch0, f0_ch1, f1_ch0, f1_ch1, ...)
-    if (cfg_.stereo) {
-        for (int f = 0; f < num_fft_bins; f++) {
-            num_bands_per_freq_[f * 2]     = bands_per_fft_bin[f];
-            num_bands_per_freq_[f * 2 + 1] = bands_per_fft_bin[f];
-        }
-    } else {
-        num_bands_per_freq_ = bands_per_fft_bin;
-    }
-
-    // 7. Compute band_freq_dims = 2 * num_freqs * audio_channels (for complex real+imag)
-    // Python: freqs_per_bands_with_complex = tuple(2 * f * self.audio_channels for f in num_freqs_per_band)
-    band_freq_dims_.resize(num_bands);
-    for (int b = 0; b < num_bands; b++) {
-        band_freq_dims_[b] = 2 * num_freqs_per_band_[b] * audio_channels;
-    }
-
-    // 8. Upload freq_indices and num_bands_per_freq to GPU
-    freq_indices_gpu_ = Tensor::from_cpu_i64(freq_indices_.data(),
-                                             {(int64_t)freq_indices_.size()});
-
-    // num_bands_per_freq as float for division later
-    // Python: denom = repeat(self.num_bands_per_freq, 'f -> (f r) 1', r=channels)
-    // But the denom is used with the actual freq dimension after stereo merge
-    std::vector<float> nbpf_float(num_bands_per_freq_.begin(), num_bands_per_freq_.end());
-    num_bands_per_freq_gpu_ = Tensor::from_cpu_f32(nbpf_float.data(),
-                                                    {(int64_t)total_freq});
-}
-
-// ============================================================================
 // load
 // ============================================================================
 
@@ -321,72 +186,55 @@ void MelBandRoformer::load(const ModelWeights& weights) {
     cfg_ = MBRConfig::from_json(weights.config());
 
     // 2. Load precomputed mel band data (from converter)
-    if (weights.has("__precomputed__.freq_indices")) {
-        // Use precomputed mel bands from Python (librosa Slaney scale)
-        freq_indices_gpu_ = weights.get("__precomputed__.freq_indices");
-        Tensor num_freqs_t = weights.get("__precomputed__.num_freqs_per_band");
-        Tensor num_bands_f = weights.get("__precomputed__.num_bands_per_freq");
-
-        // Copy to CPU vectors
-        int num_bands = cfg_.num_bands;
-        int audio_channels = cfg_.stereo ? 2 : 1;
-        int num_fft_bins = cfg_.stft_n_fft / 2 + 1;
-
-        // num_freqs_per_band (int64 on GPU -> copy to CPU)
-        std::vector<int64_t> nfpb_cpu(num_bands);
-        num_freqs_t.copy_to_cpu(nfpb_cpu.data(), num_bands * sizeof(int64_t));
-        num_freqs_per_band_.resize(num_bands);
-        for (int i = 0; i < num_bands; i++) num_freqs_per_band_[i] = nfpb_cpu[i];
-
-        // num_bands_per_freq (int64 -> float for division)
-        int total_freq = num_fft_bins * audio_channels;
-        std::vector<int64_t> nbpf_cpu(num_fft_bins);
-        num_bands_f.copy_to_cpu(nbpf_cpu.data(), num_fft_bins * sizeof(int64_t));
-
-        // Expand to stereo
-        num_bands_per_freq_.resize(total_freq);
-        if (cfg_.stereo) {
-            for (int f = 0; f < num_fft_bins; f++) {
-                num_bands_per_freq_[f * 2]     = nbpf_cpu[f];
-                num_bands_per_freq_[f * 2 + 1] = nbpf_cpu[f];
-            }
-        } else {
-            for (int f = 0; f < num_fft_bins; f++) {
-                num_bands_per_freq_[f] = nbpf_cpu[f];
-            }
-        }
-
-        // band_freq_dims
-        band_freq_dims_.resize(num_bands);
-        for (int b = 0; b < num_bands; b++) {
-            band_freq_dims_[b] = 2 * num_freqs_per_band_[b] * audio_channels;
-        }
-
-        // freq_indices CPU copy
-        int64_t n_idx = freq_indices_gpu_.numel();
-        freq_indices_.resize(n_idx);
-        freq_indices_gpu_.copy_to_cpu(freq_indices_.data(), n_idx * sizeof(int64_t));
-
-        // num_bands_per_freq as float GPU tensor
-        std::vector<float> nbpf_float(num_bands_per_freq_.begin(), num_bands_per_freq_.end());
-        num_bands_per_freq_gpu_ = Tensor::from_cpu_f32(nbpf_float.data(), {(int64_t)total_freq});
-
-        std::cout << "[MelBandRoformer] Using precomputed mel bands from .csm file" << std::endl;
-    } else {
-        // Fallback: compute mel bands (may not match Python model)
-        std::cerr << "[MelBandRoformer] WARNING: No precomputed mel bands, computing from scratch" << std::endl;
-        compute_mel_bands();
+    if (!weights.has("__precomputed__.freq_indices")) {
+        throw std::runtime_error("MelBandRoformer .csm must include precomputed mel band data");
     }
+
+    // Use precomputed mel bands from the .csm file.
+    freq_indices_gpu_ = weights.get("__precomputed__.freq_indices");
+    Tensor num_freqs_t = weights.get("__precomputed__.num_freqs_per_band");
+    Tensor num_bands_f = weights.get("__precomputed__.num_bands_per_freq");
+
+    int num_bands = cfg_.num_bands;
+    int audio_channels = cfg_.stereo ? 2 : 1;
+    int num_fft_bins = cfg_.stft_n_fft / 2 + 1;
+
+    std::vector<int64_t> nfpb_cpu(num_bands);
+    num_freqs_t.copy_to_cpu(nfpb_cpu.data(), num_bands * sizeof(int64_t));
+    num_freqs_per_band_ = std::move(nfpb_cpu);
+
+    int total_freq = num_fft_bins * audio_channels;
+    std::vector<int64_t> nbpf_cpu(num_fft_bins);
+    num_bands_f.copy_to_cpu(nbpf_cpu.data(), num_fft_bins * sizeof(int64_t));
+
+    num_bands_per_freq_.resize(total_freq);
+    if (cfg_.stereo) {
+        for (int f = 0; f < num_fft_bins; f++) {
+            num_bands_per_freq_[f * 2] = nbpf_cpu[f];
+            num_bands_per_freq_[f * 2 + 1] = nbpf_cpu[f];
+        }
+    } else {
+        num_bands_per_freq_ = std::move(nbpf_cpu);
+    }
+
+    band_freq_dims_.resize(num_bands);
+    for (int b = 0; b < num_bands; b++) {
+        band_freq_dims_[b] = 2 * num_freqs_per_band_[b] * audio_channels;
+    }
+
+    int64_t n_idx = freq_indices_gpu_.numel();
+    freq_indices_.resize(n_idx);
+    freq_indices_gpu_.copy_to_cpu(freq_indices_.data(), n_idx * sizeof(int64_t));
+
+    std::vector<float> nbpf_float(num_bands_per_freq_.begin(), num_bands_per_freq_.end());
+    num_bands_per_freq_gpu_ = Tensor::from_cpu_f32(nbpf_float.data(), {(int64_t)total_freq});
+
+    std::cout << "[MelBandRoformer] Using precomputed mel bands from .csm file" << std::endl;
 
     // 3. Create STFT window
     stft_window_ = ops::hann_window(cfg_.stft_win_length);
 
-    int num_bands = cfg_.num_bands;
     int dim = cfg_.dim;
-    int heads = cfg_.heads;
-    int dim_head = cfg_.dim_head;
-    int dim_inner = heads * dim_head;
-    int ff_dim = dim * cfg_.mlp_expansion_factor;
 
     // 4. Load band_split weights
     band_split_layers_.resize(num_bands);
@@ -473,7 +321,7 @@ void MelBandRoformer::load(const ModelWeights& weights) {
     std::cout << "[MelBandRoformer] Model loaded: dim=" << dim
               << " depth=" << cfg_.depth
               << " bands=" << num_bands
-              << " heads=" << heads
+              << " heads=" << cfg_.heads
               << " stems=" << cfg_.num_stems
               << " stereo=" << cfg_.stereo
               << " freq_indices=" << freq_indices_.size()
@@ -522,23 +370,13 @@ Tensor MelBandRoformer::apply_attention(const Tensor& x, const AttentionWeights&
     int dim = cfg_.dim;
     int heads = cfg_.heads;
     int dim_head = cfg_.dim_head;
-    int dim_inner = heads * dim_head;
     float scale = std::sqrt((float)dim);
-    bool profile_enabled = (bool)profile_logger_;
 
     // 1. RMS Norm
-    Tensor normed;
-    {
-        ProfileScope norm_scope(profile_enabled ? &profile_stats_.attn_norm_ms : nullptr);
-        normed = ops::rms_norm(x, w.norm_gamma, scale);
-    }
+    Tensor normed = ops::rms_norm(x, w.norm_gamma, scale);
 
     // 2. QKV projection: [B, N, 3*dim_inner]
-    Tensor qkv;
-    {
-        ProfileScope qkv_proj_scope(profile_enabled ? &profile_stats_.qkv_proj_ms : nullptr);
-        qkv = ops::linear_no_bias(normed, w.to_qkv_w);
-    }
+    Tensor qkv = ops::linear_no_bias(normed, w.to_qkv_w);
 
     // 3. Reshape to q, k, v: each [B, heads, N, dim_head]
     // qkv: [B, N, 3*heads*dim_head] -> rearrange 'b n (qkv h d) -> qkv b h n d'
@@ -547,45 +385,25 @@ Tensor MelBandRoformer::apply_attention(const Tensor& x, const AttentionWeights&
     Tensor q;
     Tensor k;
     Tensor v;
-    {
-        ProfileScope qkv_split_scope(profile_enabled ? &profile_stats_.qkv_split_ms : nullptr);
-        split_qkv_heads(qkv, heads, dim_head, q, k, v);
-    }
+    split_qkv_heads(qkv, heads, dim_head, q, k, v);
 
     // 4. Apply rotary embedding to q and k
-    {
-        ProfileScope rotary_scope(profile_enabled ? &profile_stats_.rotary_ms : nullptr);
-        ops::apply_rotary_emb(q, k, cos_freqs, sin_freqs);
-    }
+    ops::apply_rotary_emb(q, k, cos_freqs, sin_freqs);
 
     // 5. Scaled dot-product attention
     float attn_scale = 1.0f / std::sqrt((float)dim_head);
-    Tensor out;
-    {
-        ProfileScope attn_core_scope(profile_enabled ? &profile_stats_.attn_core_ms : nullptr);
-        out = ops::scaled_dot_product_attention(q, k, v, attn_scale);
-    }
+    Tensor out = ops::scaled_dot_product_attention(q, k, v, attn_scale);
     // out: [B, H, N, D]
 
     // 6. Gating
     // gates = sigmoid(linear(normed, to_gates_w, to_gates_b)) -> [B, N, heads]
-    Tensor gates;
-    {
-        ProfileScope gate_proj_scope(profile_enabled ? &profile_stats_.gate_proj_ms : nullptr);
-        gates = ops::linear_sigmoid(normed, w.to_gates_w, w.to_gates_b);
-    }
+    Tensor gates = ops::linear_sigmoid(normed, w.to_gates_w, w.to_gates_b);
 
     // 7-8. Apply gates and merge heads directly to [B, N, dim_inner]
-    {
-        ProfileScope gate_merge_scope(profile_enabled ? &profile_stats_.gate_merge_ms : nullptr);
-        out = apply_gates_and_merge_heads(out, gates, heads, dim_head);
-    }
+    out = apply_gates_and_merge_heads(out, gates, heads, dim_head);
 
     // 9. Output projection
-    {
-        ProfileScope out_proj_scope(profile_enabled ? &profile_stats_.out_proj_ms : nullptr);
-        out = ops::linear_no_bias(out, w.to_out_w);  // [B, N, dim]
-    }
+    out = ops::linear_no_bias(out, w.to_out_w);  // [B, N, dim]
 
     return out;
 }
@@ -597,26 +415,15 @@ Tensor MelBandRoformer::apply_attention(const Tensor& x, const AttentionWeights&
 Tensor MelBandRoformer::apply_feedforward(const Tensor& x, const FeedForwardWeights& w) {
     // x: [B, N, dim]
     float scale = std::sqrt((float)cfg_.dim);
-    bool profile_enabled = (bool)profile_logger_;
 
     // 1. RMS Norm
-    Tensor h;
-    {
-        ProfileScope norm_scope(profile_enabled ? &profile_stats_.ff_norm_ms : nullptr);
-        h = ops::rms_norm(x, w.norm_gamma, scale);
-    }
+    Tensor h = ops::rms_norm(x, w.norm_gamma, scale);
 
     // 2. Fused Linear1 + GELU: [B, N, dim] -> [B, N, dim*4]
-    {
-        ProfileScope linear1_scope(profile_enabled ? &profile_stats_.ff_linear1_ms : nullptr);
-        h = ops::linear_gelu(h, w.linear1_w, w.linear1_b);
-    }
+    h = ops::linear_gelu(h, w.linear1_w, w.linear1_b);
 
     // 3. Linear2: [B, N, dim*4] -> [B, N, dim]
-    {
-        ProfileScope linear2_scope(profile_enabled ? &profile_stats_.ff_linear2_ms : nullptr);
-        h = ops::linear(h, w.linear2_w, w.linear2_b);
-    }
+    h = ops::linear(h, w.linear2_w, w.linear2_b);
 
     return h;
 }
@@ -662,7 +469,6 @@ Tensor MelBandRoformer::apply_band_split(const Tensor& x) {
     int64_t B = x.size(0);
     int64_t T = x.size(1);
     int num_bands = cfg_.num_bands;
-    int dim = cfg_.dim;
     float scale_rms = std::sqrt((float)band_freq_dims_[0]);  // will recompute per band
 
     // Split x along last dimension by band_freq_dims_
@@ -742,9 +548,6 @@ Tensor MelBandRoformer::apply_mask_estimator(const Tensor& x,
 // ============================================================================
 
 Tensor MelBandRoformer::forward(const Tensor& audio) {
-    using Clock = std::chrono::high_resolution_clock;
-    bool profile_enabled = (bool)profile_logger_;
-    profile_stats_ = {};
     // audio: [B, channels, samples] or [B, samples]
     int audio_channels = cfg_.stereo ? 2 : 1;
     int num_stems = cfg_.num_stems;
@@ -763,28 +566,14 @@ Tensor MelBandRoformer::forward(const Tensor& audio) {
     int64_t raw_audio_length = raw_audio.size(2);
     int64_t istft_length = cfg_.match_input_audio_length ? raw_audio_length : -1;
 
-    double stft_ms = 0.0;
-    double gather_fold_ms = 0.0;
-    double band_split_ms = 0.0;
-    double time_transform_ms = 0.0;
-    double freq_transform_ms = 0.0;
-    double mask_estimator_ms = 0.0;
-    double mask_merge_ms = 0.0;
-    double istft_ms = 0.0;
-
     // ---- 2. STFT ----
     // Reshape for STFT: [B, channels, T] -> [B*channels, T]
     Tensor audio_flat = raw_audio.reshape({batch * channels, raw_audio_length});
 
     // STFT: [B*channels, F, T_stft, 2]
-    auto stft_start = Clock::now();
     Tensor stft_repr = ops::stft(audio_flat, cfg_.stft_n_fft, cfg_.stft_hop_length,
                                  cfg_.stft_win_length, stft_window_, true,
                                  cfg_.stft_normalized);
-    if (profile_enabled) {
-        cudaDeviceSynchronize();
-        stft_ms += profile_elapsed_ms(stft_start, Clock::now());
-    }
 
     int64_t F = stft_repr.size(1);   // num frequency bins (n_fft/2 + 1)
     int64_t T = stft_repr.size(2);   // num time frames
@@ -808,7 +597,6 @@ Tensor MelBandRoformer::forward(const Tensor& audio) {
     // ---- 5. Gather frequency bands ----
     // Python: x = stft_repr[batch_arange, self.freq_indices]
     // Index select along dim=1 using freq_indices
-    auto gather_fold_start = Clock::now();
     Tensor x = stft_repr.index_select(1, freq_indices_gpu_);
     // x: [B, total_band_freqs, T, 2]
 
@@ -818,19 +606,10 @@ Tensor MelBandRoformer::forward(const Tensor& audio) {
     // Python: x = rearrange(x, 'b f t c -> b t (f c)')
     x = x.permute({0, 2, 1, 3}).contiguous();  // [B, T, total_band_freqs, 2]
     x = x.reshape({batch, T, total_band_freqs * 2});
-    if (profile_enabled) {
-        cudaDeviceSynchronize();
-        gather_fold_ms += profile_elapsed_ms(gather_fold_start, Clock::now());
-    }
     // x: [B, T, total_band_freqs * 2]
 
     // ---- 7. Band split ----
-    auto band_split_start = Clock::now();
     x = apply_band_split(x);
-    if (profile_enabled) {
-        cudaDeviceSynchronize();
-        band_split_ms += profile_elapsed_ms(band_split_start, Clock::now());
-    }
     // x: [B, T, num_bands, dim]
 
     // ---- 8. Transformer layers (depth iterations) ----
@@ -850,7 +629,6 @@ Tensor MelBandRoformer::forward(const Tensor& audio) {
 
         // Time attention: [B, T, F, D] -> [B, F, T, D] -> [B*F, T, D]
         // Python: x = rearrange(x, 'b t f d -> b f t d')
-        auto time_start = Clock::now();
         x = x.permute({0, 2, 1, 3}).contiguous();  // [B, num_bands, T, dim]
         int64_t BF = batch * num_bands;
         x = x.reshape({BF, T, (int64_t)dim});      // [B*num_bands, T, dim]
@@ -870,13 +648,8 @@ Tensor MelBandRoformer::forward(const Tensor& audio) {
         // Reshape back: [B*F, T, D] -> [B, F, T, D] -> [B, T, F, D]
         x = x.reshape({batch, (int64_t)num_bands, T, (int64_t)dim});
         x = x.permute({0, 2, 1, 3}).contiguous();  // [B, T, num_bands, dim]
-        if (profile_enabled) {
-            cudaDeviceSynchronize();
-            time_transform_ms += profile_elapsed_ms(time_start, Clock::now());
-        }
 
         // Freq attention: [B, T, F, D] -> [B*T, F, D]
-        auto freq_start = Clock::now();
         int64_t BT = batch * T;
         x = x.reshape({BT, (int64_t)num_bands, (int64_t)dim});
 
@@ -894,10 +667,6 @@ Tensor MelBandRoformer::forward(const Tensor& audio) {
 
         // Reshape back: [B*T, F, D] -> [B, T, F, D]
         x = x.reshape({batch, T, (int64_t)num_bands, (int64_t)dim});
-        if (profile_enabled) {
-            cudaDeviceSynchronize();
-            freq_transform_ms += profile_elapsed_ms(freq_start, Clock::now());
-        }
 
         // Store for skip connections
         if (cfg_.skip_connection) {
@@ -911,18 +680,12 @@ Tensor MelBandRoformer::forward(const Tensor& audio) {
     std::vector<Tensor> stem_masks;
     stem_masks.reserve(num_stems);
     for (int s = 0; s < num_stems; s++) {
-        auto mask_start = Clock::now();
         Tensor mask = apply_mask_estimator(x, mask_estimators_[s]);
         // mask: [B, T, total_freq_complex]
-        if (profile_enabled) {
-            cudaDeviceSynchronize();
-            mask_estimator_ms += profile_elapsed_ms(mask_start, Clock::now());
-        }
         stem_masks.push_back(mask);
     }
 
     // Stack masks: [B, num_stems, T, total_freq_complex]
-    auto merge_start = Clock::now();
     Tensor masks = Tensor::stack(stem_masks, 1);
 
     // Reshape masks: 'b n t (f c) -> b n f t c' where c=2
@@ -986,10 +749,6 @@ Tensor MelBandRoformer::forward(const Tensor& audio) {
     Tensor mask_flat = masks_averaged.reshape({spatial, 2});
     Tensor result_flat = ops::complex_mul(stft_flat, mask_flat);
     Tensor stft_result = result_flat.reshape({batch, (int64_t)num_stems, total_freq, T, 2});
-    if (profile_enabled) {
-        cudaDeviceSynchronize();
-        mask_merge_ms += profile_elapsed_ms(merge_start, Clock::now());
-    }
 
     // ---- 11. Prepare for iSTFT ----
     // Python: stft_repr = rearrange(stft_repr, 'b n (f s) t -> (b n s) f t', s=audio_channels)
@@ -1015,14 +774,9 @@ Tensor MelBandRoformer::forward(const Tensor& audio) {
     }
 
     // ---- 12. iSTFT ----
-    auto istft_start = Clock::now();
     Tensor recon_audio = ops::istft(stft_result, cfg_.stft_n_fft, cfg_.stft_hop_length,
                                     cfg_.stft_win_length, stft_window_, istft_length,
                                     true, cfg_.stft_normalized);
-    if (profile_enabled) {
-        cudaDeviceSynchronize();
-        istft_ms += profile_elapsed_ms(istft_start, Clock::now());
-    }
 
     int64_t out_length = recon_audio.size(1);
 
@@ -1034,28 +788,6 @@ Tensor MelBandRoformer::forward(const Tensor& audio) {
     if (num_stems == 1) {
         // Python: rearrange(recon_audio, 'b 1 s t -> b s t')
         recon_audio = recon_audio.squeeze(1);  // [B, channels, T]
-    }
-
-    if (profile_logger_) {
-        profile_logger_("[基层][MBR] STFT: " + profile_format_ms(stft_ms));
-        profile_logger_("[基层][MBR] 频带收集折叠: " + profile_format_ms(gather_fold_ms));
-        profile_logger_("[基层][MBR] Band Split: " + profile_format_ms(band_split_ms));
-        profile_logger_("[基层][MBR] Time Transformer: " + profile_format_ms(time_transform_ms));
-        profile_logger_("[基层][MBR] Freq Transformer: " + profile_format_ms(freq_transform_ms));
-        profile_logger_("[基层][Attn] RMSNorm: " + profile_format_ms(profile_stats_.attn_norm_ms));
-        profile_logger_("[基层][Attn] QKV 投影: " + profile_format_ms(profile_stats_.qkv_proj_ms));
-        profile_logger_("[基层][Attn] QKV 拆头: " + profile_format_ms(profile_stats_.qkv_split_ms));
-        profile_logger_("[基层][Attn] Rotary: " + profile_format_ms(profile_stats_.rotary_ms));
-        profile_logger_("[基层][Attn] 注意力核心: " + profile_format_ms(profile_stats_.attn_core_ms));
-        profile_logger_("[基层][Attn] Gate 投影: " + profile_format_ms(profile_stats_.gate_proj_ms));
-        profile_logger_("[基层][Attn] Gate 合并: " + profile_format_ms(profile_stats_.gate_merge_ms));
-        profile_logger_("[基层][Attn] 输出投影: " + profile_format_ms(profile_stats_.out_proj_ms));
-        profile_logger_("[基层][FFN] RMSNorm: " + profile_format_ms(profile_stats_.ff_norm_ms));
-        profile_logger_("[基层][FFN] Linear1+GELU: " + profile_format_ms(profile_stats_.ff_linear1_ms));
-        profile_logger_("[基层][FFN] Linear2: " + profile_format_ms(profile_stats_.ff_linear2_ms));
-        profile_logger_("[基层][MBR] Mask Estimator: " + profile_format_ms(mask_estimator_ms));
-        profile_logger_("[基层][MBR] Mask Merge: " + profile_format_ms(mask_merge_ms));
-        profile_logger_("[基层][MBR] iSTFT: " + profile_format_ms(istft_ms));
     }
 
     return recon_audio;

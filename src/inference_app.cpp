@@ -16,47 +16,22 @@ namespace cudasep::app {
 
 namespace {
 
-static double elapsed_ms(const std::chrono::high_resolution_clock::time_point& start,
-                         const std::chrono::high_resolution_clock::time_point& end) {
+double elapsed_ms(const std::chrono::high_resolution_clock::time_point& start,
+                  const std::chrono::high_resolution_clock::time_point& end) {
     return std::chrono::duration<double, std::milli>(end - start).count();
 }
 
-static std::string format_ms(double ms) {
+std::string format_ms(double ms) {
     std::ostringstream ss;
     ss << std::fixed << std::setprecision(ms >= 100.0 ? 1 : 3) << ms << " ms";
     return ss.str();
 }
 
-}  // namespace
-
-const char* model_type_name(ModelType t) {
-    switch (t) {
-        case ModelType::MelBandRoformer: return "MelBandRoformer";
-        case ModelType::BSRoformer: return "BSRoformer";
-        case ModelType::MDX23C: return "MDX23C";
-        case ModelType::HTDemucs: return "HTDemucs";
-        default: return "Unknown";
-    }
+int default_num_overlap(const JsonValue& config) {
+    return std::max(1, config.get_int("num_overlap", 1));
 }
 
-static int default_num_overlap(const JsonValue& config, ModelType t) {
-    if (config.has("num_overlap")) {
-        return std::max(1, config.get_int("num_overlap", 1));
-    }
-
-    switch (t) {
-        case ModelType::MelBandRoformer:
-        case ModelType::BSRoformer:
-            return 2;
-        case ModelType::MDX23C:
-        case ModelType::HTDemucs:
-            return 4;
-        default:
-            return 4;
-    }
-}
-
-static int resolve_step(int chunk_size, float overlap_arg, int default_overlap) {
+int resolve_step(int chunk_size, float overlap_arg, int default_overlap) {
     if (overlap_arg > 0.0f && overlap_arg < 1.0f) {
         int step = (int)std::lround(chunk_size * (1.0f - overlap_arg));
         return std::max(1, step);
@@ -69,63 +44,29 @@ static int resolve_step(int chunk_size, float overlap_arg, int default_overlap) 
     return std::max(1, chunk_size / std::max(1, num_overlap));
 }
 
-static std::string lower_ascii(std::string s) {
-    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return (char)std::tolower(c); });
-    return s;
-}
-
-ModelType detect_model_type(const JsonValue& config) {
+void require_mel_band_roformer_config(const JsonValue& config) {
     if (config.has("model_type")) {
-        std::string mt = config.get_string("model_type", "");
-        if (mt == "mel_band_roformer" || mt == "MelBandRoformer") return ModelType::MelBandRoformer;
-        if (mt == "bs_roformer" || mt == "BSRoformer") return ModelType::BSRoformer;
-        if (mt == "mdx23c" || mt == "MDX23C" || mt == "tfc_tdf") return ModelType::MDX23C;
-        if (mt == "htdemucs" || mt == "HTDemucs") return ModelType::HTDemucs;
+        std::string model_type = config.get_string("model_type", "");
+        if (model_type != "mel_band_roformer" && model_type != "MelBandRoformer") {
+            throw std::runtime_error("Only MelBandRoformer .csm files are supported");
+        }
     }
 
-    if (config.has("nfft") && config.has("depth") && config.has("growth")) return ModelType::HTDemucs;
-    if (config.has("num_bands") || config.has("mel_scale")) return ModelType::MelBandRoformer;
-    if (config.has("freqs_per_bands")) return ModelType::BSRoformer;
-    if (config.has("num_scales") || config.has("bottleneck_factor") || config.has("num_subbands")) {
-        if (config.has("growth") && config.has("depth")) return ModelType::HTDemucs;
-        return ModelType::MDX23C;
+    if (!config.has("num_bands") || !config.has("stft_n_fft")) {
+        throw std::runtime_error("Only MelBandRoformer .csm files are supported");
     }
-    if (config.has("dim") && config.has("depth") && config.has("dim_head")) {
-        if (config.has("num_bands")) return ModelType::MelBandRoformer;
-        return ModelType::BSRoformer;
-    }
-    return ModelType::Unknown;
 }
 
-static Tensor process_chunked(const Tensor& audio, int chunk_size, int step, ChunkMode mode,
-                              int chunk_batch_size,
-                              std::function<Tensor(const Tensor&)> model_forward,
-                              LogCallback logger,
-                              LogCallback timing_logger) {
-    using Clock = std::chrono::high_resolution_clock;
-    bool collect_timing = (bool)timing_logger;
-    auto total_start = Clock::now();
+Tensor process_chunked(const Tensor& audio, int chunk_size, int step, int chunk_batch_size,
+                       std::function<Tensor(const Tensor&)> model_forward,
+                       LogCallback logger) {
     Tensor mix = audio;
     int64_t length_init = audio.size(-1);
-    double pad_ms = 0.0;
-    double prepare_ms = 0.0;
-    double forward_ms = 0.0;
-    double overlap_ms = 0.0;
-    double window_ms = 0.0;
-    double normalize_ms = 0.0;
 
-    int fade_size = 0;
-    int border = 0;
-    if (mode == ChunkMode::Generic) {
-        fade_size = chunk_size / 10;
-        border = chunk_size - step;
-        if (length_init > 2LL * border && border > 0) {
-            auto pad_start = Clock::now();
-            mix = mix.pad_reflect({border, border});
-            if (collect_timing) {
-                pad_ms += elapsed_ms(pad_start, Clock::now());
-            }
-        }
+    int fade_size = chunk_size / 10;
+    int border = chunk_size - step;
+    if (length_init > 2LL * border && border > 0) {
+        mix = mix.pad_reflect({border, border});
     }
 
     int64_t total_samples = mix.size(-1);
@@ -134,23 +75,20 @@ static Tensor process_chunked(const Tensor& audio, int chunk_size, int step, Chu
     for (int64_t start = 0; start < total_samples; start += step) {
         chunk_starts.push_back(start);
     }
+
     int64_t chunk_count = (int64_t)chunk_starts.size();
     int effective_batch = std::max(1, (int)std::min<int64_t>((int64_t)chunk_batch_size, chunk_count));
     bool single_chunk_mode = (effective_batch == 1);
 
     auto prepare_input_chunk = [&](int64_t start, int64_t end) {
-        auto chunk_prepare_start = Clock::now();
         Tensor chunk = mix.slice(-1, start, end);
         int64_t actual_len = end - start;
         if (actual_len < chunk_size) {
-            if (mode == ChunkMode::Generic && actual_len > chunk_size / 2) {
+            if (actual_len > chunk_size / 2) {
                 chunk = chunk.pad_reflect({0, chunk_size - actual_len});
             } else {
                 chunk = chunk.pad({0, chunk_size - actual_len}, 0.0f);
             }
-        }
-        if (collect_timing) {
-            prepare_ms += elapsed_ms(chunk_prepare_start, Clock::now());
         }
         return chunk;
     };
@@ -160,12 +98,7 @@ static Tensor process_chunked(const Tensor& audio, int chunk_size, int step, Chu
         int64_t start = chunk_starts.front();
         int64_t end = std::min(start + chunk_size, total_samples);
         Tensor first_chunk = prepare_input_chunk(start, end);
-        auto first_forward_start = Clock::now();
         first_batch_out = model_forward(first_chunk);
-        if (collect_timing) {
-            cudaDeviceSynchronize();
-            forward_ms += elapsed_ms(first_forward_start, Clock::now());
-        }
     } else {
         std::vector<Tensor> first_group_inputs;
         int first_group = std::min<int64_t>(effective_batch, chunk_count);
@@ -176,13 +109,8 @@ static Tensor process_chunked(const Tensor& audio, int chunk_size, int step, Chu
             first_group_inputs.push_back(prepare_input_chunk(start, end));
         }
 
-        auto first_forward_start = Clock::now();
         Tensor first_batch_in = Tensor::cat(first_group_inputs, 0);
         first_batch_out = model_forward(first_batch_in);
-        if (collect_timing) {
-            cudaDeviceSynchronize();
-            forward_ms += elapsed_ms(first_forward_start, Clock::now());
-        }
     }
 
     std::vector<int64_t> out_shape = first_batch_out.shape();
@@ -190,7 +118,7 @@ static Tensor process_chunked(const Tensor& audio, int chunk_size, int step, Chu
     out_shape.back() = total_samples;
 
     std::vector<float> fade(chunk_size, 1.0f);
-    if (mode == ChunkMode::Generic && fade_size > 0) {
+    if (fade_size > 0) {
         if (fade_size == 1) {
             fade.front() = 0.0f;
             fade.back() = 0.0f;
@@ -211,12 +139,13 @@ static Tensor process_chunked(const Tensor& audio, int chunk_size, int step, Chu
 
     int64_t chunk_index = 0;
     if (logger) {
-        logger("[分片] 开始分片推理");
-        logger("[分片] 分片大小: " + std::to_string(chunk_size));
-        logger("[分片] 步长: " + std::to_string(step));
-        logger("[分片] 分片数量: " + std::to_string(chunk_count));
-        logger("[分片] 批量大小: " + std::to_string(effective_batch));
+        logger("[chunk] start");
+        logger("[chunk] size: " + std::to_string(chunk_size));
+        logger("[chunk] step: " + std::to_string(step));
+        logger("[chunk] count: " + std::to_string(chunk_count));
+        logger("[chunk] batch size: " + std::to_string(effective_batch));
     }
+
     for (int64_t group_start = 0; group_start < chunk_count; group_start += effective_batch) {
         int group_size = (int)std::min<int64_t>(effective_batch, chunk_count - group_start);
         Tensor batch_out;
@@ -226,12 +155,7 @@ static Tensor process_chunked(const Tensor& audio, int chunk_size, int step, Chu
             int64_t start = chunk_starts[(size_t)group_start];
             int64_t end = std::min(start + chunk_size, total_samples);
             Tensor chunk_in = prepare_input_chunk(start, end);
-            auto chunk_forward_start = Clock::now();
             batch_out = model_forward(chunk_in);
-            if (collect_timing) {
-                cudaDeviceSynchronize();
-                forward_ms += elapsed_ms(chunk_forward_start, Clock::now());
-            }
         } else {
             std::vector<Tensor> batch_inputs;
             batch_inputs.reserve((size_t)group_size);
@@ -240,13 +164,8 @@ static Tensor process_chunked(const Tensor& audio, int chunk_size, int step, Chu
                 int64_t end = std::min(start + chunk_size, total_samples);
                 batch_inputs.push_back(prepare_input_chunk(start, end));
             }
-            auto chunk_forward_start = Clock::now();
             Tensor batch_in = Tensor::cat(batch_inputs, 0);
             batch_out = model_forward(batch_in);
-            if (collect_timing) {
-                cudaDeviceSynchronize();
-                forward_ms += elapsed_ms(chunk_forward_start, Clock::now());
-            }
         }
 
         for (int local = 0; local < group_size; ++local) {
@@ -263,8 +182,7 @@ static Tensor process_chunked(const Tensor& audio, int chunk_size, int step, Chu
             chunk_out = chunk_out.reshape({num_channels, actual_len}).contiguous();
 
             Tensor window = fade_tensor;
-            if (mode == ChunkMode::Generic && fade_size > 0 && (start == 0 || last_chunk)) {
-                auto window_start = Clock::now();
+            if (fade_size > 0 && (start == 0 || last_chunk)) {
                 std::vector<float> window_cpu = fade;
                 if (start == 0) {
                     std::fill(window_cpu.begin(), window_cpu.begin() + fade_size, 1.0f);
@@ -273,64 +191,35 @@ static Tensor process_chunked(const Tensor& audio, int chunk_size, int step, Chu
                     std::fill(window_cpu.end() - fade_size, window_cpu.end(), 1.0f);
                 }
                 window = Tensor::from_cpu_f32(window_cpu.data(), {(int64_t)chunk_size});
-                if (collect_timing) {
-                    window_ms += elapsed_ms(window_start, Clock::now());
-                }
             }
 
             Tensor fade_crop = (actual_len < chunk_size) ? window.slice(0, 0, actual_len).contiguous() : window;
-            auto overlap_start = Clock::now();
             ops::overlap_add(output, chunk_out, fade_crop, start);
             ops::weight_accumulate(weight_sum, fade_crop, start);
-            if (collect_timing) {
-                cudaDeviceSynchronize();
-                overlap_ms += elapsed_ms(overlap_start, Clock::now());
-            }
 
             if (logger && (chunk_index == 1 || chunk_index == chunk_count || (chunk_index % 4) == 0)) {
-                logger("[分片] 已完成分片 " + std::to_string(chunk_index) + "/" + std::to_string(chunk_count));
+                logger("[chunk] completed " + std::to_string(chunk_index) + "/" + std::to_string(chunk_count));
             }
         }
     }
 
     if (logger) {
-        logger("[分片] 分片拼接完成");
+        logger("[chunk] merge complete");
     }
 
-    auto normalize_start = Clock::now();
     ops::normalize_by_weights(output, weight_sum);
-    if (collect_timing) {
-        cudaDeviceSynchronize();
-        normalize_ms += elapsed_ms(normalize_start, Clock::now());
-    }
     output = output.reshape(out_shape);
-    if (mode == ChunkMode::Generic && length_init > 2LL * border && border > 0) {
+    if (length_init > 2LL * border && border > 0) {
         output = output.slice(output.ndim() - 1, border, border + length_init);
     }
-    if (timing_logger) {
-        double total_ms = elapsed_ms(total_start, Clock::now());
-        timing_logger("[耗时] 分片补边: " + format_ms(pad_ms));
-        timing_logger("[耗时] 分片准备: " + format_ms(prepare_ms));
-        timing_logger("[耗时] 模型前向累计: " + format_ms(forward_ms));
-        timing_logger("[耗时] 窗口构造: " + format_ms(window_ms));
-        timing_logger("[耗时] 重叠相加累计: " + format_ms(overlap_ms));
-        timing_logger("[耗时] 归一化: " + format_ms(normalize_ms));
-        if (chunk_count > 0) {
-            timing_logger("[耗时] 单分片平均前向: " + format_ms(forward_ms / (double)chunk_count));
-        }
-        timing_logger("[耗时] 分片推理总计: " + format_ms(total_ms));
-    }
+
     return output;
 }
 
+}  // namespace
+
 Tensor LoadedModel::forward(const Tensor& input) {
-    switch (type) {
-        case ModelType::MelBandRoformer: return mbr.forward(input);
-        case ModelType::BSRoformer: return bsr.forward(input);
-        case ModelType::MDX23C: return mdx.forward(input);
-        case ModelType::HTDemucs: return htd.forward(input);
-        default: throw std::runtime_error("Unknown model type");
-    }
+    return model.forward(input);
 }
 
 std::vector<std::string> collect_stem_names(const LoadedModel& model) {
@@ -341,15 +230,6 @@ std::vector<std::string> collect_stem_names(const LoadedModel& model) {
         for (size_t i = 0; i < instruments.size(); ++i) {
             names.push_back(instruments[i].as_string());
         }
-    }
-    if (names.empty() && config.has("sources") && config["sources"].is_array()) {
-        const JsonValue& sources = config["sources"];
-        for (size_t i = 0; i < sources.size(); ++i) {
-            names.push_back(sources[i].as_string());
-        }
-    }
-    if (names.empty() && config.has("target_instrument")) {
-        names.push_back(config.get_string("target_instrument", "target"));
     }
     while ((int)names.size() < model.num_sources) {
         names.push_back("stem_" + std::to_string(names.size()));
@@ -365,156 +245,101 @@ LoadedModel load_model(const std::string& model_path, int device, bool quantize_
     auto total_start = Clock::now();
     cudaSetDevice(device);
 
-    LoadedModel model;
-    model.model_path = model_path;
-    model.quantize_fp16 = quantize_fp16;
+    LoadedModel loaded;
+    loaded.model_path = model_path;
+    loaded.quantize_fp16 = quantize_fp16;
     g_quantize_fp16 = quantize_fp16;
 
     auto weights_start = Clock::now();
-    model.weights = ModelWeights::load(model_path);
+    loaded.weights = ModelWeights::load(model_path);
     if (logger) {
-        logger("[耗时] 权重加载: " + format_ms(elapsed_ms(weights_start, Clock::now())));
+        logger("[time] weights load: " + format_ms(elapsed_ms(weights_start, Clock::now())));
     }
 
-    model.type = detect_model_type(model.weights.config());
-    if (model.type == ModelType::Unknown) {
-        throw std::runtime_error("Could not detect model type from config");
-    }
+    require_mel_band_roformer_config(loaded.weights.config());
 
     if (quantize_fp16) {
         auto fp16_start = Clock::now();
-        model.weights.convert_linear_weights_to_fp16();
+        loaded.weights.convert_linear_weights_to_fp16();
         if (logger) {
-            logger("[耗时] FP16 量化准备: " + format_ms(elapsed_ms(fp16_start, Clock::now())));
+            logger("[time] FP16 prepare: " + format_ms(elapsed_ms(fp16_start, Clock::now())));
         }
     }
 
     auto init_start = Clock::now();
-    switch (model.type) {
-        case ModelType::MelBandRoformer:
-            model.mbr.load(model.weights);
-            model.num_sources = model.mbr.config().num_stems;
-            model.sample_rate = model.mbr.config().sample_rate;
-            model.chunk_size = model.weights.config().get_int("chunk_size", model.mbr.config().stft_n_fft * 256);
-            model.num_overlap = default_num_overlap(model.weights.config(), model.type);
-            model.chunk_batch_size = 2;
-            model.chunk_mode = ChunkMode::Generic;
-            break;
-        case ModelType::BSRoformer:
-            model.bsr.load(model.weights);
-            model.num_sources = model.bsr.config().num_stems;
-            model.sample_rate = model.bsr.config().sample_rate;
-            model.chunk_size = model.weights.config().get_int("chunk_size", model.bsr.config().stft_n_fft * 256);
-            model.num_overlap = default_num_overlap(model.weights.config(), model.type);
-            model.chunk_batch_size = 2;
-            model.chunk_mode = ChunkMode::Generic;
-            break;
-        case ModelType::MDX23C:
-            model.mdx.load(model.weights);
-            model.num_sources = model.mdx.config().num_target_instruments;
-            model.sample_rate = model.mdx.config().sample_rate;
-            model.chunk_size = model.weights.config().get_int("chunk_size", model.mdx.config().chunk_size);
-            model.num_overlap = default_num_overlap(model.weights.config(), model.type);
-            model.chunk_mode = ChunkMode::Generic;
-            break;
-        case ModelType::HTDemucs:
-            model.htd.load(model.weights);
-            model.num_sources = model.htd.config().num_sources;
-            model.sample_rate = model.htd.config().samplerate;
-            model.chunk_size = (int)(model.htd.config().segment * model.htd.config().samplerate);
-            model.num_overlap = default_num_overlap(model.weights.config(), model.type);
-            model.chunk_mode = ChunkMode::Demucs;
-            break;
-        default:
-            throw std::runtime_error("Unknown model type");
-    }
+    loaded.model.load(loaded.weights);
+    loaded.num_sources = loaded.model.config().num_stems;
+    loaded.sample_rate = loaded.model.config().sample_rate;
+    loaded.chunk_size = loaded.weights.config().get_int("chunk_size", loaded.model.config().stft_n_fft * 256);
+    loaded.num_overlap = default_num_overlap(loaded.weights.config());
+    loaded.chunk_batch_size = 1;
     cudaDeviceSynchronize();
     if (logger) {
-        logger("[耗时] 模型初始化: " + format_ms(elapsed_ms(init_start, Clock::now())));
+        logger("[time] model init: " + format_ms(elapsed_ms(init_start, Clock::now())));
     }
 
-    model.stem_names = collect_stem_names(model);
+    loaded.stem_names = collect_stem_names(loaded);
     if (logger) {
-        logger("[耗时] 模型加载总计: " + format_ms(elapsed_ms(total_start, Clock::now())));
+        logger("[time] model load total: " + format_ms(elapsed_ms(total_start, Clock::now())));
     }
-    return model;
+    return loaded;
 }
 
-InferenceResult run_inference(LoadedModel& model, const AudioData& audio, float overlap, LogCallback logger) {
+InferenceResult run_inference(LoadedModel& model, const std::string& input_path, float overlap,
+                              LogCallback logger) {
     using Clock = std::chrono::high_resolution_clock;
-    auto total_start = Clock::now();
-    auto input_start = Clock::now();
-    Tensor input = audio.samples.unsqueeze(0);
-    double input_ms = elapsed_ms(input_start, Clock::now());
-
+    auto load_start = Clock::now();
+    AudioData audio = load_wav(input_path);
     if (logger) {
-        logger("[音频] 采样率: " + std::to_string(audio.sample_rate));
-        logger("[音频] 声道数: " + std::to_string(audio.channels));
-        logger("[音频] 采样点: " + std::to_string(audio.num_samples));
-        logger("[耗时] 输入张量准备: " + format_ms(input_ms));
+        logger("[time] WAV load: " + format_ms(elapsed_ms(load_start, Clock::now())));
+        logger("[audio] sample rate: " + std::to_string(audio.sample_rate));
+        logger("[audio] channels: " + std::to_string(audio.channels));
+        logger("[audio] samples: " + std::to_string(audio.num_samples));
     }
 
+    Tensor input = audio.samples.unsqueeze(0);
     cudaDeviceSynchronize();
     auto t0 = Clock::now();
 
     Tensor output;
-    LogCallback timing_logger = model.detailed_logger ? model.detailed_logger : nullptr;
-    if (model.type == ModelType::MelBandRoformer) {
-        model.mbr.set_profile_logger(model.detailed_logger);
-    }
     if (model.chunk_size > 0 && audio.num_samples > model.chunk_size) {
         int step = resolve_step(model.chunk_size, overlap, model.num_overlap);
         if (logger) {
-            logger("[推理] 音频长度超过 chunk_size，启用分片推理");
+            logger("[infer] chunked");
         }
-        output = process_chunked(input, model.chunk_size, step, model.chunk_mode,
-                                 model.chunk_batch_size,
-                                 [&](const Tensor& x) { return model.forward(x); }, logger, timing_logger);
+        output = process_chunked(input, model.chunk_size, step, model.chunk_batch_size,
+                                 [&](const Tensor& x) { return model.forward(x); },
+                                 logger);
     } else {
         if (logger) {
-            logger("[推理] 音频长度较短，直接执行整段推理");
+            logger("[infer] single chunk");
         }
         output = model.forward(input);
         cudaDeviceSynchronize();
     }
-    if (model.type == ModelType::MelBandRoformer) {
-        model.mbr.set_profile_logger(nullptr);
-    }
 
     auto t1 = Clock::now();
-
     InferenceResult result;
-    result.audio = audio;
+    result.audio = std::move(audio);
     result.output = std::move(output);
     result.infer_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-    result.rtf = (double)audio.num_samples / model.sample_rate / (result.infer_ms / 1000.0);
+    result.rtf = (double)result.audio.num_samples / model.sample_rate / (result.infer_ms / 1000.0);
     if (logger) {
-        logger("[推理] 推理耗时: " + format_ms(result.infer_ms));
-        logger("[推理] 实时率: " + std::to_string(result.rtf));
-        logger("[耗时] 端到端推理总计: " + format_ms(elapsed_ms(total_start, Clock::now())));
+        logger("[infer] time: " + format_ms(result.infer_ms));
+        logger("[infer] RTF: " + std::to_string(result.rtf));
     }
     return result;
 }
 
-InferenceResult run_inference(LoadedModel& model, const std::string& input_path, float overlap, LogCallback logger) {
-    using Clock = std::chrono::high_resolution_clock;
-    auto load_start = Clock::now();
-    AudioData audio = load_audio(input_path);
-    if (logger) {
-        logger("[耗时] 音频读取: " + format_ms(elapsed_ms(load_start, Clock::now())));
-    }
-    return run_inference(model, audio, overlap, logger);
-}
-
 Tensor extract_stem_audio(const Tensor& output, int stem) {
-    if (output.ndim() == 4) {
-        int sources = (int)output.size(1);
-        if (stem < 0 || stem >= sources) {
-            throw std::runtime_error("Stem index out of range");
-        }
-        return output.slice(1, stem, stem + 1).squeeze(0).squeeze(0);
+    if (output.ndim() != 4) {
+        return output.squeeze(0);
     }
-    return output.squeeze(0);
+    int sources = (int)output.size(1);
+    if (stem < 0 || stem >= sources) {
+        throw std::runtime_error("Stem index out of range");
+    }
+    return output.slice(1, stem, stem + 1).squeeze(0).squeeze(0);
 }
 
 std::string stem_label(const LoadedModel& model, int stem) {
@@ -522,55 +347,6 @@ std::string stem_label(const LoadedModel& model, int stem) {
         return model.stem_names[stem];
     }
     return "stem_" + std::to_string(stem);
-}
-
-std::vector<OutputTrack> collect_output_tracks(const LoadedModel& model, const AudioData& input, const Tensor& output) {
-    std::vector<OutputTrack> tracks;
-    if (output.ndim() == 4) {
-        int sources = (int)output.size(1);
-        Tensor sum;
-        bool has_sum = false;
-        bool has_other = false;
-        for (int s = 0; s < sources; ++s) {
-            OutputTrack track;
-            track.name = stem_label(model, s);
-            track.audio = extract_stem_audio(output, s);
-            track.derived = false;
-            if (!has_sum) {
-                sum = track.audio.clone();
-                has_sum = true;
-            } else {
-                sum = sum + track.audio;
-            }
-            if (lower_ascii(track.name) == "other") {
-                has_other = true;
-            }
-            tracks.push_back(std::move(track));
-        }
-        if (!has_other && has_sum) {
-            OutputTrack other;
-            other.name = "other";
-            other.audio = input.samples - sum;
-            other.derived = true;
-            tracks.push_back(std::move(other));
-        }
-        return tracks;
-    }
-
-    OutputTrack primary;
-    primary.name = model.stem_names.empty() ? "target" : model.stem_names.front();
-    primary.audio = output.squeeze(0);
-    primary.derived = false;
-    tracks.push_back(primary);
-
-    if (lower_ascii(primary.name) != "other") {
-        OutputTrack other;
-        other.name = "other";
-        other.audio = input.samples - primary.audio;
-        other.derived = true;
-        tracks.push_back(std::move(other));
-    }
-    return tracks;
 }
 
 std::vector<fs::path> save_outputs(const LoadedModel& model, const Tensor& output,

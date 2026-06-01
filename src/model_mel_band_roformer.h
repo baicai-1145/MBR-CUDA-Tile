@@ -1,7 +1,6 @@
 #pragma once
 #include "tensor.h"
 #include "weights.h"
-#include <functional>
 #include <vector>
 #include <string>
 #include <unordered_map>
@@ -43,7 +42,6 @@ public:
 
     // Run inference: input [B, channels, samples], output [B, channels, samples] (or [B, num_stems, channels, samples])
     Tensor forward(const Tensor& audio);
-    void set_profile_logger(std::function<void(const std::string&)> logger) { profile_logger_ = std::move(logger); }
 
     const MBRConfig& config() const { return cfg_; }
 
@@ -60,22 +58,6 @@ private:
 
     // STFT window
     Tensor stft_window_;
-    std::function<void(const std::string&)> profile_logger_;
-
-    struct ProfileStats {
-        double attn_norm_ms = 0.0;
-        double qkv_proj_ms = 0.0;
-        double qkv_split_ms = 0.0;
-        double rotary_ms = 0.0;
-        double attn_core_ms = 0.0;
-        double gate_proj_ms = 0.0;
-        double gate_merge_ms = 0.0;
-        double out_proj_ms = 0.0;
-        double ff_norm_ms = 0.0;
-        double ff_linear1_ms = 0.0;
-        double ff_linear2_ms = 0.0;
-    };
-    ProfileStats profile_stats_;
 
     // Rotary embeddings cache (keyed by seq_len)
     std::unordered_map<int, std::pair<Tensor, Tensor>> rotary_cache_;
@@ -132,7 +114,6 @@ private:
     std::vector<MaskEstimatorWeights> mask_estimators_;
 
     // Helper methods
-    void compute_mel_bands();
     Tensor compute_rotary_cos_sin(int seq_len, int dim);
 
     // Forward sub-steps

@@ -1,12 +1,8 @@
 #include "audio_io.h"
 #include <fstream>
 #include <cstring>
-#include <algorithm>
-#include <cstdio>
 #include <stdexcept>
-#ifdef _WIN32
-#include <windows.h>
-#endif
+#include <vector>
 
 namespace cudasep {
 
@@ -54,19 +50,6 @@ static void write_u32(std::ofstream& f, uint32_t v) {
 
 static void write_tag(std::ofstream& f, const char tag[4]) {
     f.write(tag, 4);
-}
-
-// ============================================================================
-// Helper: get file extension (lowercase)
-// ============================================================================
-
-static std::string get_extension(const std::string& path) {
-    auto dot = path.rfind('.');
-    if (dot == std::string::npos) return "";
-    std::string ext = path.substr(dot);
-    std::transform(ext.begin(), ext.end(), ext.begin(),
-                   [](unsigned char c) { return (char)std::tolower(c); });
-    return ext;
 }
 
 // ============================================================================
@@ -275,7 +258,7 @@ AudioData load_wav(const std::string& path) {
 // WAV Writer
 // ============================================================================
 
-std::vector<uint8_t> encode_wav_bytes(const Tensor& samples, int sample_rate) {
+static std::vector<uint8_t> encode_wav_bytes(const Tensor& samples, int sample_rate) {
     if (samples.ndim() != 2) {
         throw std::runtime_error("encode_wav_bytes: expected 2D tensor [channels, num_samples], got " +
                                  std::to_string(samples.ndim()) + "D");
@@ -348,69 +331,6 @@ void save_wav(const std::string& path, const Tensor& samples, int sample_rate) {
     }
     f.write(reinterpret_cast<const char*>(bytes.data()), (std::streamsize)bytes.size());
     f.close();
-}
-
-// ============================================================================
-// FFmpeg fallback
-// ============================================================================
-
-AudioData load_via_ffmpeg(const std::string& path) {
-    // Generate temp WAV path in same directory as input
-    std::string temp_path;
-    {
-        auto last_sep = path.find_last_of("/\\");
-        std::string dir = (last_sep != std::string::npos) ? path.substr(0, last_sep + 1) : "";
-        auto last_dot = path.rfind('.');
-        std::string base = (last_dot != std::string::npos && last_dot > (last_sep != std::string::npos ? last_sep : 0))
-                           ? path.substr((last_sep != std::string::npos ? last_sep + 1 : 0), last_dot - (last_sep != std::string::npos ? last_sep + 1 : 0))
-                           : path.substr(last_sep != std::string::npos ? last_sep + 1 : 0);
-        temp_path = dir + base + ".tmp.wav";
-    }
-
-    // Build ffmpeg command
-    // Use pcm_f32le so we get 32-bit float WAV output
-#ifdef _WIN32
-    std::string cmd = "ffmpeg -y -i \"" + path + "\" -f wav -acodec pcm_f32le \"" + temp_path + "\" 2>nul";
-#else
-    std::string cmd = "ffmpeg -y -i \"" + path + "\" -f wav -acodec pcm_f32le \"" + temp_path + "\" 2>/dev/null";
-#endif
-
-    int ret = std::system(cmd.c_str());
-    if (ret != 0) {
-        // Clean up temp file if it exists
-        std::remove(temp_path.c_str());
-        throw std::runtime_error("ffmpeg failed to convert audio file: " + path +
-                                 " (exit code: " + std::to_string(ret) + "). Is ffmpeg installed and in PATH?");
-    }
-
-    // Read the converted WAV
-    AudioData result;
-    try {
-        result = load_wav(temp_path);
-    } catch (...) {
-        std::remove(temp_path.c_str());
-        throw;
-    }
-
-    // Clean up temp file
-    std::remove(temp_path.c_str());
-
-    return result;
-}
-
-// ============================================================================
-// Main entry point
-// ============================================================================
-
-AudioData load_audio(const std::string& path) {
-    std::string ext = get_extension(path);
-
-    if (ext == ".wav" || ext == ".wave") {
-        return load_wav(path);
-    } else {
-        // For all other formats (mp3, flac, ogg, m4a, aac, wma, opus, etc.), use ffmpeg
-        return load_via_ffmpeg(path);
-    }
 }
 
 } // namespace cudasep
