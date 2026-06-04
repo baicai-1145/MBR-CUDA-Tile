@@ -4,6 +4,7 @@
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
+#include <cstdint>
 #include <stdexcept>
 
 namespace cudasep::tensor_tile {

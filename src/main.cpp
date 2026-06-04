@@ -60,8 +60,7 @@ static void print_usage(const char* progname) {
               << "Options:\n"
               << "  --output, -o <path>       Output directory or WAV file path (default: output)\n"
               << "  --stem, -s <int>          Stem index to save (default: 0, -1 saves all)\n"
-              << "  --fp16                    Use FP16 linear weights\n"
-              << "  --bf16                    Use BF16 linear weights\n"
+              << "  --bf16                    Use BF16 linear weights (required)\n"
               << "  --chunk-batch-size <n>    Override chunk inference batch size\n"
               << "  --overlap <float>         (0,1)=overlap ratio, >=1=num_overlap\n"
               << "  --device, -d <int>        CUDA device ID (default: 0)\n"
@@ -83,6 +82,10 @@ static int run_cli(const Args& args) {
     }
     if (args.quantize_fp16 && args.quantize_bf16) {
         std::cerr << "Error: --fp16 and --bf16 are mutually exclusive" << std::endl;
+        return 1;
+    }
+    if (args.quantize_fp16 || !args.quantize_bf16) {
+        std::cerr << "Error: this fixed no-library GEMM build requires --bf16" << std::endl;
         return 1;
     }
 

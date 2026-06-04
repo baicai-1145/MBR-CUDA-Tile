@@ -151,6 +151,10 @@ void MelBandRoformer::load(const ModelWeights& weights) {
                 std::string aprefix = lprefix + ".0";
                 tw.attn_layers[l].norm_gamma = weights.get(aprefix + ".norm.gamma");
                 tw.attn_layers[l].to_qkv_w   = weights.get(aprefix + ".to_qkv.weight");
+                if (mbr_tile::linear_bkn_long_enabled()) {
+                    tw.attn_layers[l].to_qkv_w_bkn =
+                        tw.attn_layers[l].to_qkv_w.transpose(0, 1).contiguous();
+                }
                 tw.attn_layers[l].to_gates_w  = weights.get(aprefix + ".to_gates.weight");
                 tw.attn_layers[l].to_gates_b  = maybe_bf16_bias(weights.get(aprefix + ".to_gates.bias"));
                 tw.attn_layers[l].to_out_w    = weights.get(aprefix + ".to_out.0.weight");
@@ -158,8 +162,16 @@ void MelBandRoformer::load(const ModelWeights& weights) {
                 std::string fprefix = lprefix + ".1";
                 tw.ff_layers[l].norm_gamma = weights.get(fprefix + ".net.0.gamma");
                 tw.ff_layers[l].linear1_w  = weights.get(fprefix + ".net.1.weight");
+                if (mbr_tile::linear_bkn_ffn_long_enabled()) {
+                    tw.ff_layers[l].linear1_w_bkn =
+                        tw.ff_layers[l].linear1_w.transpose(0, 1).contiguous();
+                }
                 tw.ff_layers[l].linear1_b  = maybe_bf16_bias(weights.get(fprefix + ".net.1.bias"));
                 tw.ff_layers[l].linear2_w  = weights.get(fprefix + ".net.4.weight");
+                if (mbr_tile::linear_bkn_ffn_long_enabled()) {
+                    tw.ff_layers[l].linear2_w_bkn =
+                        tw.ff_layers[l].linear2_w.transpose(0, 1).contiguous();
+                }
                 tw.ff_layers[l].linear2_b  = maybe_bf16_bias(weights.get(fprefix + ".net.4.bias"));
             }
             tw.final_norm_gamma = weights.get(tprefix + ".norm.gamma");
@@ -258,17 +270,17 @@ Tensor MelBandRoformer::apply_attention(const Tensor& x, const AttentionWeights&
     // 1. RMS Norm
     Tensor normed = mbr_tile::rms_norm(x, w.norm_gamma, scale);
 
-    // 2. QKV projection: [B, N, 3*dim_inner]
-    Tensor qkv = mbr_tile::linear_no_bias_bf16_output(normed, w.to_qkv_w);
-
-    // 3-4. Split q, k, v and apply rotary embedding to q/k.
-    // qkv: [B, N, 3*heads*dim_head] -> q/k/v: [B, heads, N, dim_head]
-    int64_t B = qkv.size(0);
-    int64_t N = qkv.size(1);
+    // 2-4. QKV projection, split heads, and apply rotary embedding to q/k.
     Tensor q;
     Tensor k;
     Tensor v;
-    mbr_tile::split_qkv_heads_rotary(qkv, heads, dim_head, cos_freqs, sin_freqs, q, k, v);
+    if (!w.to_qkv_w_bkn.is_empty()) {
+        mbr_tile::linear_qkv_rotary_bf16_output_bkn(
+            normed, w.to_qkv_w, w.to_qkv_w_bkn, heads, dim_head, cos_freqs, sin_freqs, q, k, v);
+    } else {
+        mbr_tile::linear_qkv_rotary_bf16_output(
+            normed, w.to_qkv_w, heads, dim_head, cos_freqs, sin_freqs, q, k, v);
+    }
 
     // 5. Scaled dot-product attention
     float attn_scale = 1.0f / std::sqrt((float)dim_head);
@@ -299,11 +311,22 @@ Tensor MelBandRoformer::apply_feedforward(const Tensor& x, const FeedForwardWeig
     // 1. RMS Norm
     Tensor h = mbr_tile::rms_norm(x, w.norm_gamma, scale);
 
+    Tensor fused;
+    if (w.linear1_w_bkn.is_empty() && w.linear2_w_bkn.is_empty() &&
+        mbr_tile::try_feedforward_fused(
+            h, w.linear1_w, w.linear1_b, w.linear2_w, w.linear2_b, fused)) {
+        return fused;
+    }
+
     // 2. Fused Linear1 + GELU: [B, N, dim] -> [B, N, dim*4]
-    h = mbr_tile::linear_gelu(h, w.linear1_w, w.linear1_b);
+    h = !w.linear1_w_bkn.is_empty()
+        ? mbr_tile::linear_gelu_bkn(h, w.linear1_w, w.linear1_w_bkn, w.linear1_b)
+        : mbr_tile::linear_gelu(h, w.linear1_w, w.linear1_b);
 
     // 3. Linear2: [B, N, dim*4] -> [B, N, dim]
-    h = mbr_tile::linear(h, w.linear2_w, w.linear2_b);
+    h = !w.linear2_w_bkn.is_empty()
+        ? mbr_tile::linear_bkn(h, w.linear2_w, w.linear2_w_bkn, w.linear2_b)
+        : mbr_tile::linear(h, w.linear2_w, w.linear2_b);
 
     return h;
 }

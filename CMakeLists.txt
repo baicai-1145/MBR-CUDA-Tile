@@ -16,7 +16,9 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 # CUDA architectures — use "-real" to embed SASS only (no PTX), keeping
 # the last arch with PTX for forward-compatibility via JIT.
 # Override with -DCMAKE_CUDA_ARCHITECTURES=... for local single-GPU builds.
-set(CMAKE_CUDA_ARCHITECTURES "80-real;86-real;89")
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+    set(CMAKE_CUDA_ARCHITECTURES "80-real;86-real;89")
+endif()
 
 # CMake may read stale toolkit metadata on CUDA preview installs; use the
 # actual nvcc version for the CUDA Tile requirement.
@@ -50,6 +52,8 @@ set(ALL_SOURCES
     src/cuda_context.cu
     src/chunk_cuda_tile.cu
     src/mbr_cuda_tile.cu
+    src/mbr_ffn12_cutile.cu
+    src/mbr_time_attention_cutile.cu
     src/stft_cuda_tile.cu
     src/model_mel_band_roformer.cu
 )
@@ -58,11 +62,41 @@ set(ALL_SOURCES
 add_executable(cudasep_infer ${ALL_SOURCES})
 
 target_link_libraries(cudasep_infer PRIVATE
-    CUDA::cublas
-    CUDA::cufft
     CUDA::cudart
 )
 
 target_include_directories(cudasep_infer PRIVATE
     ${CMAKE_SOURCE_DIR}/src
+)
+
+add_executable(bench_bf16_cutile_mma_gemm
+    bench/bf16_cutile_mma_gemm.cu
+)
+
+target_link_libraries(bench_bf16_cutile_mma_gemm PRIVATE
+    CUDA::cudart
+)
+
+add_executable(bench_bf16_time_attention_cutile
+    bench/bf16_time_attention_cutile.cu
+)
+
+target_link_libraries(bench_bf16_time_attention_cutile PRIVATE
+    CUDA::cudart
+)
+
+add_executable(bench_bf16_freq_attention_cutile
+    bench/bf16_freq_attention_cutile.cu
+)
+
+target_link_libraries(bench_bf16_freq_attention_cutile PRIVATE
+    CUDA::cudart
+)
+
+add_executable(bench_bf16_ffn12_cutile
+    bench/bf16_ffn12_cutile.cu
+)
+
+target_link_libraries(bench_bf16_ffn12_cutile PRIVATE
+    CUDA::cudart
 )

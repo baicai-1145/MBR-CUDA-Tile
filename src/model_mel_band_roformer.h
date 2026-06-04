@@ -75,6 +75,7 @@ private:
     struct AttentionWeights {
         Tensor norm_gamma;     // RMSNorm before attention
         Tensor to_qkv_w;      // [3*dim_inner, dim] no bias
+        Tensor to_qkv_w_bkn;  // [dim, 3*dim_inner] opt-in B(K,N) layout
         Tensor to_gates_w;    // [heads, dim]
         Tensor to_gates_b;    // [heads]
         Tensor to_out_w;      // [dim, dim_inner] no bias
@@ -83,8 +84,10 @@ private:
     struct FeedForwardWeights {
         Tensor norm_gamma;     // RMSNorm
         Tensor linear1_w;     // [dim_inner, dim]
+        Tensor linear1_w_bkn; // [dim, dim_inner] opt-in B(K,N) layout
         Tensor linear1_b;     // [dim_inner]
         Tensor linear2_w;     // [dim, dim_inner]
+        Tensor linear2_w_bkn; // [dim_inner, dim] opt-in B(K,N) layout
         Tensor linear2_b;     // [dim]
     };
 
