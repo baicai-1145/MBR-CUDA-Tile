@@ -15,6 +15,10 @@ bool residual_bf16_enabled();
 
 bool bias_bf16_enabled();
 
+bool norm_gamma_bf16_enabled();
+
+bool rotary_freqs_bf16_enabled();
+
 bool linear_bkn_long_enabled();
 
 bool linear_bkn_ffn_long_enabled();
@@ -24,10 +28,29 @@ Tensor apply_gates_and_merge_heads(const Tensor& attn, const Tensor& gates,
 
 Tensor rms_norm(const Tensor& x, const Tensor& gamma, float scale);
 
+bool try_residual_add_rms_norm(const Tensor& residual,
+                               const Tensor& update,
+                               const Tensor& gamma,
+                               float scale,
+                               Tensor& residual_out,
+                               Tensor& normed);
+
 Tensor scaled_dot_product_attention(const Tensor& q,
                                     const Tensor& k,
                                     const Tensor& v,
                                     float scale);
+
+Tensor scaled_dot_product_attention_time_split_contig(const Tensor& q,
+                                                      const Tensor& k,
+                                                      const Tensor& v,
+                                                      float scale);
+
+Tensor scaled_dot_product_attention_time_split_contig_q_rotary(const Tensor& q,
+                                                               const Tensor& k,
+                                                               const Tensor& v,
+                                                               const Tensor& cos_freqs,
+                                                               const Tensor& sin_freqs,
+                                                               float scale);
 
 Tensor linear(const Tensor& x, const Tensor& weight, const Tensor& bias);
 
@@ -46,15 +69,46 @@ bool try_feedforward_fused(const Tensor& x,
                            const Tensor& linear2_b,
                            Tensor& out);
 
+bool try_feedforward_fused_residual(const Tensor& x,
+                                    const Tensor& linear1_w,
+                                    const Tensor& linear1_b,
+                                    const Tensor& linear2_w,
+                                    const Tensor& linear2_b,
+                                    const Tensor& residual,
+                                    Tensor& out);
+
+bool time_qkv_split_contig_path_enabled();
+
+bool time_qkv_fused_rotary_producer_enabled();
+
+bool time_qkv_pair_rotary_producer_enabled();
+
+bool time_q_rotary_in_attention_enabled();
+
 void launch_ffn12_fused256_cutile(int gelu_mode,
                                   bool full_bf16,
                                   bool split2_output,
+                                  bool split2_pairh32,
+                                  bool split2_pairh32_tk64,
                                   const Tensor& x,
                                   const Tensor& linear1_w,
                                   const Tensor& linear1_b,
                                   const Tensor& linear2_w,
                                   const Tensor& linear2_b,
                                   Tensor& out);
+
+void launch_ffn12_fused256_residual_cutile(int gelu_mode,
+                                           bool full_bf16,
+                                           bool split2_output,
+                                           bool split2_pairh32,
+                                           bool split2_pairh32_tk64,
+                                           const Tensor& x,
+                                           const Tensor& linear1_w,
+                                           const Tensor& linear1_b,
+                                           const Tensor& linear2_w,
+                                           const Tensor& linear2_b,
+                                           const Tensor& residual,
+                                           Tensor& out);
 
 void launch_time_attention1301_split_tail_cutile(const Tensor& q,
                                                  const Tensor& k,
@@ -65,6 +119,45 @@ void launch_time_attention1301_split_tail_cutile(const Tensor& q,
                                                  bool use_k32,
                                                  bool use_tail_q32,
                                                  bool use_exp2);
+
+void launch_time_attention1301_split_contig_main_cutile(const Tensor& q,
+                                                        const Tensor& k,
+                                                        const Tensor& v,
+                                                        Tensor& out,
+                                                        float scale,
+                                                        bool use_exp2,
+                                                        bool skip_keytail);
+
+void launch_time_attention1301_split_contig_qrot_main_cutile(const Tensor& q,
+                                                             const Tensor& k,
+                                                             const Tensor& v,
+                                                             const Tensor& cos_freqs,
+                                                             const Tensor& sin_freqs,
+                                                             Tensor& out,
+                                                             float scale,
+                                                             bool full_bf16,
+                                                             bool use_q32,
+                                                             bool use_exp2,
+                                                             bool skip_keytail);
+
+void launch_time_attention1301_split_contig_tail_cutile(const Tensor& q,
+                                                        const Tensor& k,
+                                                        const Tensor& v,
+                                                        Tensor& out,
+                                                        float scale,
+                                                        bool use_tail_q32,
+                                                        bool use_exp2);
+
+void launch_time_attention1301_split_contig_qrot_tail_cutile(const Tensor& q,
+                                                             const Tensor& k,
+                                                             const Tensor& v,
+                                                             const Tensor& cos_freqs,
+                                                             const Tensor& sin_freqs,
+                                                             Tensor& out,
+                                                             float scale,
+                                                             bool full_bf16,
+                                                             bool use_tail_q32,
+                                                             bool use_exp2);
 
 void launch_time_attention1301_full_cutile(const Tensor& q,
                                            const Tensor& k,
@@ -81,6 +174,11 @@ Tensor linear_no_bias_bkn(const Tensor& x, const Tensor& weight, const Tensor& w
 
 Tensor linear_no_bias_bf16_output(const Tensor& x, const Tensor& weight);
 
+bool try_linear_no_bias_residual_bf16_output(const Tensor& x,
+                                             const Tensor& weight,
+                                             const Tensor& residual,
+                                             Tensor& out);
+
 void linear_qkv_rotary_bf16_output(const Tensor& x, const Tensor& weight,
                                    int heads, int dim_head,
                                    const Tensor& cos_freqs, const Tensor& sin_freqs,
@@ -96,6 +194,39 @@ void linear_qkv_rotary_bf16_output_bkn(const Tensor& x,
                                        Tensor& q,
                                        Tensor& k,
                                        Tensor& v);
+
+void linear_qkv_bkn_split_contig_time(const Tensor& x,
+                                      const Tensor& weight,
+                                      const Tensor& weight_bkn,
+                                      Tensor& q,
+                                      Tensor& k,
+                                      Tensor& v);
+
+void linear_qkv_bkn_rotary_split_contig_time(const Tensor& x,
+                                             const Tensor& weight,
+                                             const Tensor& weight_bkn,
+                                             const Tensor& cos_freqs,
+                                             const Tensor& sin_freqs,
+                                             Tensor& q,
+                                             Tensor& k,
+                                             Tensor& v);
+
+void linear_qkv_pair_rotary_split_contig_time(const Tensor& x,
+                                             const Tensor& weight,
+                                             const Tensor& cos_freqs,
+                                             const Tensor& sin_freqs,
+                                             Tensor& q,
+                                             Tensor& k,
+                                             Tensor& v);
+
+void apply_rotary_time_split_contig_inplace(Tensor& q,
+                                            Tensor& k,
+                                            const Tensor& cos_freqs,
+                                            const Tensor& sin_freqs);
+
+void apply_rotary_time_split_contig_k_only_inplace(Tensor& k,
+                                                   const Tensor& cos_freqs,
+                                                   const Tensor& sin_freqs);
 
 Tensor linear_sigmoid(const Tensor& x, const Tensor& weight, const Tensor& bias);
 

@@ -100,3 +100,23 @@ add_executable(bench_bf16_ffn12_cutile
 target_link_libraries(bench_bf16_ffn12_cutile PRIVATE
     CUDA::cudart
 )
+
+add_executable(bench_bf16_ffn12_candidates_cutile
+    bench/bf16_ffn12_cutile.cu
+)
+
+target_compile_definitions(bench_bf16_ffn12_candidates_cutile PRIVATE
+    CUDASEP_FFN12_CANDIDATES_ONLY=1
+)
+
+target_link_libraries(bench_bf16_ffn12_candidates_cutile PRIVATE
+    CUDA::cudart
+)
+
+add_executable(bench_cutile_tile_layout_probe
+    bench/cutile_tile_layout_probe.cu
+)
+
+target_link_libraries(bench_cutile_tile_layout_probe PRIVATE
+    CUDA::cudart
+)

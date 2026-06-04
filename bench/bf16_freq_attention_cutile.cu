@@ -40,6 +40,7 @@ struct Options {
     int iters = 5;
     std::string variant = "all";
     bool validate = false;
+    bool compare_baseline = false;
 };
 
 int ceildiv(int a, int b) {
@@ -70,6 +71,8 @@ Options parse_args(int argc, char** argv) {
             opts.iters = parse_int_arg(argv[i], need_value(argv[i]));
         } else if (std::strcmp(argv[i], "--variant") == 0) {
             opts.variant = need_value(argv[i]);
+        } else if (std::strcmp(argv[i], "--compare-baseline") == 0) {
+            opts.compare_baseline = true;
         } else if (std::strcmp(argv[i], "--validate") == 0) {
             opts.validate = true;
         } else if (std::strcmp(argv[i], "--help") == 0) {
@@ -77,10 +80,11 @@ Options parse_args(int argc, char** argv) {
                 "Usage: bench_bf16_freq_attention_cutile [options]\n"
                 "  --variant NAME  all, q8, q16, q32, q64, q128, q8m, q16m, q32m,\n"
                 "                  q64m, q128m, q8p, q16p, q32p, q64p, q128p,\n"
-                "                  q8s, q16s, q32s, q64s, q128s, q16sc,\n"
+                "                  q8s, q16s, q16sb, q16sc, q32s, q64s, q128s,\n"
                 "                  default all\n"
                 "  --warmup N      warmup launches, default 1\n"
                 "  --iters N       measured launches, default 5\n"
+                "  --compare-baseline  compare source-like output against qrows baseline\n"
                 "  --validate      compare BH=0 output against CPU reference\n");
             std::exit(0);
         } else {
@@ -493,7 +497,37 @@ void validate_unpadded(const __nv_bfloat16* d_q,
     std::printf("  validate BH0 max_abs=%.8g rms=%.8g\n", max_abs, rms);
 }
 
-template <int QRows, bool ConstNegInf = false>
+void compare_outputs_to_baseline(const __nv_bfloat16* d_ref,
+                                 const __nv_bfloat16* d_out,
+                                 std::size_t elems) {
+    std::vector<__nv_bfloat16> ref(elems);
+    std::vector<__nv_bfloat16> out(elems);
+    CUDA_CHECK(cudaMemcpy(ref.data(), d_ref, elems * sizeof(__nv_bfloat16),
+                          cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(out.data(), d_out, elems * sizeof(__nv_bfloat16),
+                          cudaMemcpyDeviceToHost));
+
+    double max_abs = 0.0;
+    double sum_sq = 0.0;
+    double ref_sum_sq = 0.0;
+    for (std::size_t i = 0; i < elems; ++i) {
+        double ref_v = static_cast<double>(__bfloat162float(ref[i]));
+        double out_v = static_cast<double>(__bfloat162float(out[i]));
+        double diff = out_v - ref_v;
+        double abs_diff = std::abs(diff);
+        max_abs = std::max(max_abs, abs_diff);
+        sum_sq += diff * diff;
+        ref_sum_sq += ref_v * ref_v;
+    }
+
+    double rms = std::sqrt(sum_sq / static_cast<double>(elems));
+    double ref_rms = std::sqrt(ref_sum_sq / static_cast<double>(elems));
+    double rel_rms = ref_rms > 0.0 ? rms / ref_rms : 0.0;
+    std::printf("  compare_vs_qrows_baseline elems=%zu max_abs=%.9g rms=%.9g ref_rms=%.9g rel_rms=%.9g\n",
+                elems, max_abs, rms, ref_rms, rel_rms);
+}
+
+template <int QRows, bool SumBF16Denom = false, bool ConstNegInf = false>
 void run_padded_out60_source_variant(const Options& opts, const char* name) {
     size_t in_elems = static_cast<size_t>(kBH) * kN * kD;
     size_t pad_elems = static_cast<size_t>(kBH) * kNPad * kD;
@@ -504,17 +538,28 @@ void run_padded_out60_source_variant(const Options& opts, const char* name) {
     __nv_bfloat16* d_k = nullptr;
     __nv_bfloat16* d_v = nullptr;
     __nv_bfloat16* d_out = nullptr;
+    __nv_bfloat16* d_ref = nullptr;
     CUDA_CHECK(cudaMalloc(&d_q, pad_elems * sizeof(__nv_bfloat16)));
     CUDA_CHECK(cudaMalloc(&d_k, pad_elems * sizeof(__nv_bfloat16)));
     CUDA_CHECK(cudaMalloc(&d_v, pad_elems * sizeof(__nv_bfloat16)));
     CUDA_CHECK(cudaMalloc(&d_out, in_elems * sizeof(__nv_bfloat16)));
+    if (opts.compare_baseline) {
+        CUDA_CHECK(cudaMalloc(&d_ref, in_elems * sizeof(__nv_bfloat16)));
+    }
     init_bf16(d_q, pad_elems);
     init_bf16(d_k, pad_elems);
     init_bf16(d_v, pad_elems);
     CUDA_CHECK(cudaDeviceSynchronize());
 
+    if (opts.compare_baseline) {
+        launch_cutile_padded_out60<QRows, false, false>(d_q, d_k, d_v, d_ref);
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaDeviceSynchronize());
+    }
+
     for (int i = 0; i < opts.warmup; ++i) {
-        launch_cutile_padded_out60<QRows, false, ConstNegInf>(d_q, d_k, d_v, d_out);
+        launch_cutile_padded_out60<QRows, SumBF16Denom, ConstNegInf>(
+            d_q, d_k, d_v, d_out);
     }
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -527,7 +572,8 @@ void run_padded_out60_source_variant(const Options& opts, const char* name) {
     times_ms.reserve(opts.iters);
     for (int i = 0; i < opts.iters; ++i) {
         CUDA_CHECK(cudaEventRecord(start));
-        launch_cutile_padded_out60<QRows, false, ConstNegInf>(d_q, d_k, d_v, d_out);
+        launch_cutile_padded_out60<QRows, SumBF16Denom, ConstNegInf>(
+            d_q, d_k, d_v, d_out);
         CUDA_CHECK(cudaEventRecord(stop));
         CUDA_CHECK(cudaEventSynchronize(stop));
         CUDA_CHECK(cudaGetLastError());
@@ -539,6 +585,9 @@ void run_padded_out60_source_variant(const Options& opts, const char* name) {
     if (opts.validate) {
         validate_unpadded(d_q, d_k, d_v, d_out, false);
     }
+    if (opts.compare_baseline) {
+        compare_outputs_to_baseline(d_ref, d_out, in_elems);
+    }
 
     __nv_bfloat16 checksum{};
     CUDA_CHECK(cudaMemcpy(&checksum, d_out, sizeof(checksum), cudaMemcpyDeviceToHost));
@@ -548,6 +597,9 @@ void run_padded_out60_source_variant(const Options& opts, const char* name) {
     CUDA_CHECK(cudaFree(d_k));
     CUDA_CHECK(cudaFree(d_v));
     CUDA_CHECK(cudaFree(d_out));
+    if (d_ref) {
+        CUDA_CHECK(cudaFree(d_ref));
+    }
 
     double flops = 4.0 * kBH * kN * kN * kD;
     float best_ms = *std::min_element(times_ms.begin(), times_ms.end());
@@ -774,6 +826,9 @@ void run_padded_pipeline_variant(const Options& opts, const char* name) {
 int main(int argc, char** argv) {
     try {
         Options opts = parse_args(argc, argv);
+        if (opts.compare_baseline && opts.variant == "all") {
+            throw std::runtime_error("--compare-baseline requires --variant NAME");
+        }
         if (opts.variant == "all" || opts.variant == "q8") {
             run_variant<8>(opts, "q8");
         }
@@ -825,8 +880,11 @@ int main(int argc, char** argv) {
         if (opts.variant == "all" || opts.variant == "q16s") {
             run_padded_out60_source_variant<16>(opts, "q16s");
         }
+        if (opts.variant == "all" || opts.variant == "q16sb") {
+            run_padded_out60_source_variant<16, true>(opts, "q16sb");
+        }
         if (opts.variant == "all" || opts.variant == "q16sc") {
-            run_padded_out60_source_variant<16, true>(opts, "q16sc");
+            run_padded_out60_source_variant<16, false, true>(opts, "q16sc");
         }
         if (opts.variant == "all" || opts.variant == "q32s") {
             run_padded_out60_source_variant<32>(opts, "q32s");

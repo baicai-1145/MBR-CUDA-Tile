@@ -4,6 +4,7 @@
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
+#include <cstdlib>
 #include <cstdint>
 #include <stdexcept>
 
@@ -28,6 +29,22 @@ static inline int64_t ceildiv(int64_t a, int64_t b) {
 
 static inline int grid_size(int64_t n) {
     return (int)ceildiv(n, kTile);
+}
+
+template <int TileSize>
+static inline int grid_size_for(int64_t n) {
+    return (int)ceildiv(n, TileSize);
+}
+
+static int binary_inplace_bf16_tile_size() {
+    static int tile = []() {
+        const char* raw = std::getenv("CUDASEP_BINARY_INPLACE_BF16_TILE");
+        if (!raw || !raw[0]) return 256;
+        int parsed = std::atoi(raw);
+        if (parsed == 128 || parsed == 512 || parsed == 1024) return parsed;
+        return 256;
+    }();
+    return tile;
 }
 
 template <typename T>
@@ -273,44 +290,112 @@ __tile_global__ void max_reduce_last_dim_kernel(const float* __restrict__ src,
     ct::store_masked(dst + row + ct::iota<ct::tile<long long, ct::shape<1>>>(), m, true);
 }
 
-template <typename T>
+template <BinaryOp Op, int TileSize, typename T>
 __tile_global__ void binary_same_shape_kernel(const T* __restrict__ a,
                                               const T* __restrict__ b,
                                               T* __restrict__ out,
-                                              BinaryOp op,
                                               long long total) {
     a = ct::assume_aligned(a, 16_ic);
     b = ct::assume_aligned(b, 16_ic);
     out = ct::assume_aligned(out, 16_ic);
 
-    I64Tile idx = (long long)ct::bid().x * kTile + ct::iota<I64Tile>();
+    using BinaryI64Tile = ct::tile<long long, ct::shape<TileSize>>;
+    BinaryI64Tile idx = (long long)ct::bid().x * TileSize + ct::iota<BinaryI64Tile>();
     auto in_bounds = idx < total;
     auto av = ct::load_masked(a + idx, in_bounds);
     auto bv = ct::load_masked(b + idx, in_bounds);
     auto value = av + bv;
-    value = ct::select(op == BinaryOp::Sub, av - bv, value);
-    value = ct::select(op == BinaryOp::Mul, av * bv, value);
-    value = ct::select(op == BinaryOp::Div, av / bv, value);
+    if constexpr (Op == BinaryOp::Sub) {
+        value = av - bv;
+    } else if constexpr (Op == BinaryOp::Mul) {
+        value = av * bv;
+    } else if constexpr (Op == BinaryOp::Div) {
+        value = av / bv;
+    }
     ct::store_masked(out + idx, value, in_bounds);
 }
 
-template <typename T>
+template <BinaryOp Op, int TileSize, typename T>
 __tile_global__ void binary_inplace_same_shape_kernel(T* __restrict__ a,
                                                       const T* __restrict__ b,
-                                                      BinaryOp op,
                                                       long long total) {
     a = ct::assume_aligned(a, 16_ic);
     b = ct::assume_aligned(b, 16_ic);
 
-    I64Tile idx = (long long)ct::bid().x * kTile + ct::iota<I64Tile>();
+    using BinaryI64Tile = ct::tile<long long, ct::shape<TileSize>>;
+    BinaryI64Tile idx = (long long)ct::bid().x * TileSize + ct::iota<BinaryI64Tile>();
     auto in_bounds = idx < total;
     auto av = ct::load_masked(a + idx, in_bounds);
     auto bv = ct::load_masked(b + idx, in_bounds);
     auto value = av + bv;
-    value = ct::select(op == BinaryOp::Sub, av - bv, value);
-    value = ct::select(op == BinaryOp::Mul, av * bv, value);
-    value = ct::select(op == BinaryOp::Div, av / bv, value);
+    if constexpr (Op == BinaryOp::Sub) {
+        value = av - bv;
+    } else if constexpr (Op == BinaryOp::Mul) {
+        value = av * bv;
+    } else if constexpr (Op == BinaryOp::Div) {
+        value = av / bv;
+    }
     ct::store_masked(a + idx, value, in_bounds);
+}
+
+template <BinaryOp Op, int TileSize = kTile>
+static void launch_binary_same_shape(const Tensor& a, const Tensor& b, Tensor& out) {
+    int grid = grid_size_for<TileSize>(out.numel());
+    if (out.dtype() == DType::Float32) {
+        binary_same_shape_kernel<Op, TileSize><<<grid, 1>>>(a.data_f32(), b.data_f32(),
+                                                            out.data_f32(), out.numel());
+    } else if (out.dtype() == DType::Float16) {
+        binary_same_shape_kernel<Op, TileSize><<<grid, 1>>>((const __half*)a.data_ptr(),
+                                                            (const __half*)b.data_ptr(),
+                                                            out.data_f16(), out.numel());
+    } else if (out.dtype() == DType::BFloat16) {
+        binary_same_shape_kernel<Op, TileSize><<<grid, 1>>>((const __nv_bfloat16*)a.data_ptr(),
+                                                            (const __nv_bfloat16*)b.data_ptr(),
+                                                            out.data_bf16(), out.numel());
+    } else {
+        throw std::runtime_error("binary op: unsupported dtype");
+    }
+}
+
+template <BinaryOp Op, int TileSize>
+static void launch_binary_inplace_same_shape_tiled(Tensor& a, const Tensor& b) {
+    int grid = grid_size_for<TileSize>(a.numel());
+    if (a.dtype() == DType::Float32) {
+        binary_inplace_same_shape_kernel<Op, TileSize><<<grid, 1>>>(a.data_f32(),
+                                                                    b.data_f32(),
+                                                                    a.numel());
+    } else if (a.dtype() == DType::Float16) {
+        binary_inplace_same_shape_kernel<Op, TileSize><<<grid, 1>>>(a.data_f16(),
+                                                                    (const __half*)b.data_ptr(),
+                                                                    a.numel());
+    } else if (a.dtype() == DType::BFloat16) {
+        binary_inplace_same_shape_kernel<Op, TileSize><<<grid, 1>>>(
+            a.data_bf16(), (const __nv_bfloat16*)b.data_ptr(), a.numel());
+    } else {
+        throw std::runtime_error("inplace binary op: unsupported dtype");
+    }
+}
+
+template <BinaryOp Op>
+static void launch_binary_inplace_same_shape(Tensor& a, const Tensor& b) {
+    if (a.dtype() == DType::BFloat16) {
+        switch (binary_inplace_bf16_tile_size()) {
+            case 128:
+                launch_binary_inplace_same_shape_tiled<Op, 128>(a, b);
+                break;
+            case 512:
+                launch_binary_inplace_same_shape_tiled<Op, 512>(a, b);
+                break;
+            case 1024:
+                launch_binary_inplace_same_shape_tiled<Op, 1024>(a, b);
+                break;
+            default:
+                launch_binary_inplace_same_shape_tiled<Op, 256>(a, b);
+                break;
+        }
+        return;
+    }
+    launch_binary_inplace_same_shape_tiled<Op, 256>(a, b);
 }
 
 }  // namespace
@@ -455,40 +540,38 @@ void greater_than(const Tensor& src, Tensor& dst, float value) {
 
 void binary_same_shape(const Tensor& a, const Tensor& b, Tensor& out, BinaryOp op) {
     if (out.numel() == 0) return;
-    int grid = grid_size(out.numel());
-    if (out.dtype() == DType::Float32) {
-        binary_same_shape_kernel<<<grid, 1>>>(a.data_f32(), b.data_f32(), out.data_f32(),
-                                              op, out.numel());
-    } else if (out.dtype() == DType::Float16) {
-        binary_same_shape_kernel<<<grid, 1>>>((const __half*)a.data_ptr(),
-                                              (const __half*)b.data_ptr(),
-                                              out.data_f16(), op, out.numel());
-    } else if (out.dtype() == DType::BFloat16) {
-        binary_same_shape_kernel<<<grid, 1>>>((const __nv_bfloat16*)a.data_ptr(),
-                                              (const __nv_bfloat16*)b.data_ptr(),
-                                              out.data_bf16(), op, out.numel());
-    } else {
-        throw std::runtime_error("binary op: unsupported dtype");
+    switch (op) {
+        case BinaryOp::Add:
+            launch_binary_same_shape<BinaryOp::Add>(a, b, out);
+            break;
+        case BinaryOp::Sub:
+            launch_binary_same_shape<BinaryOp::Sub>(a, b, out);
+            break;
+        case BinaryOp::Mul:
+            launch_binary_same_shape<BinaryOp::Mul>(a, b, out);
+            break;
+        case BinaryOp::Div:
+            launch_binary_same_shape<BinaryOp::Div>(a, b, out);
+            break;
     }
     CUDA_CHECK(cudaGetLastError());
 }
 
 void binary_inplace_same_shape(Tensor& a, const Tensor& b, BinaryOp op) {
     if (a.numel() == 0) return;
-    int grid = grid_size(a.numel());
-    if (a.dtype() == DType::Float32) {
-        binary_inplace_same_shape_kernel<<<grid, 1>>>(a.data_f32(), b.data_f32(),
-                                                      op, a.numel());
-    } else if (a.dtype() == DType::Float16) {
-        binary_inplace_same_shape_kernel<<<grid, 1>>>(a.data_f16(),
-                                                      (const __half*)b.data_ptr(),
-                                                      op, a.numel());
-    } else if (a.dtype() == DType::BFloat16) {
-        binary_inplace_same_shape_kernel<<<grid, 1>>>(a.data_bf16(),
-                                                      (const __nv_bfloat16*)b.data_ptr(),
-                                                      op, a.numel());
-    } else {
-        throw std::runtime_error("inplace binary op: unsupported dtype");
+    switch (op) {
+        case BinaryOp::Add:
+            launch_binary_inplace_same_shape<BinaryOp::Add>(a, b);
+            break;
+        case BinaryOp::Sub:
+            launch_binary_inplace_same_shape<BinaryOp::Sub>(a, b);
+            break;
+        case BinaryOp::Mul:
+            launch_binary_inplace_same_shape<BinaryOp::Mul>(a, b);
+            break;
+        case BinaryOp::Div:
+            launch_binary_inplace_same_shape<BinaryOp::Div>(a, b);
+            break;
     }
     CUDA_CHECK(cudaGetLastError());
 }

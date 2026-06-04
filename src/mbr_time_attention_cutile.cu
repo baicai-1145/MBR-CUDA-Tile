@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -17,6 +18,8 @@ using namespace ct::literals;
 
 constexpr int kTimeAttnN = 1301;
 constexpr int kTimeAttnD = 64;
+constexpr int kTimeAttnHeads = 8;
+constexpr int kTimeAttnHeadStride = kTimeAttnHeads * kTimeAttnD;
 constexpr int kTimeAttnMainN = 1280;
 constexpr int kTimeAttnCutileQRows16 = 16;
 constexpr int kTimeAttnCutileQRows32 = 32;
@@ -37,6 +40,48 @@ static __tile__ auto softmax_exp(TileT x) {
         return ct::exp2(x * kLog2E);
     }
     return ct::exp(x);
+}
+
+template <typename T>
+static __tile__ auto bf16_round(T value) {
+    return ct::element_cast<float>(ct::element_cast<__nv_bfloat16>(value));
+}
+
+template <int QRows, typename QTile>
+static __tile__ auto rotate_q_tile_for_attention(QTile q_tile,
+                                                 const float* __restrict__ cos_f,
+                                                 const float* __restrict__ sin_f,
+                                                 long long q_block,
+                                                 bool full_bf16) {
+    constexpr int kHalfDim = kTimeAttnD / 2;
+    using Q4Tile = ct::tile<float, ct::shape<QRows, kHalfDim, 2>>;
+    using PairTile = ct::tile<float, ct::shape<QRows, kHalfDim, 1>>;
+    using I64PairTile = ct::tile<long long, ct::shape<QRows, kHalfDim, 1>>;
+
+    Q4Tile q4 = ct::reshape(ct::element_cast<float>(q_tile),
+                            ct::shape<QRows, kHalfDim, 2>{});
+    PairTile even = ct::extract(q4, ct::shape<QRows, kHalfDim, 1>{}, 0, 0, 0);
+    PairTile odd = ct::extract(q4, ct::shape<QRows, kHalfDim, 1>{}, 0, 0, 1);
+    even = ct::select(full_bf16, bf16_round(even), even);
+    odd = ct::select(full_bf16, bf16_round(odd), odd);
+
+    I64PairTile local = ct::iota<I64PairTile>();
+    auto rows = q_block * (long long)QRows + local / kHalfDim;
+    auto row_valid = rows < kTimeAttnN;
+    auto safe_rows = ct::select(row_valid, rows, rows * 0LL);
+    auto pair = local % kHalfDim;
+    auto c = ct::load_masked(cos_f + safe_rows * kHalfDim + pair, row_valid);
+    auto s = ct::load_masked(sin_f + safe_rows * kHalfDim + pair, row_valid);
+    c = ct::select(full_bf16, bf16_round(c), c);
+    s = ct::select(full_bf16, bf16_round(s), s);
+
+    auto rot_even = even * c - odd * s;
+    auto rot_odd = even * s + odd * c;
+    rot_even = ct::select(full_bf16, bf16_round(rot_even), rot_even);
+    rot_odd = ct::select(full_bf16, bf16_round(rot_odd), rot_odd);
+    auto rotated = ct::reshape(ct::cat<2>(rot_even, rot_odd),
+                               ct::shape<QRows, kTimeAttnD>{});
+    return ct::element_cast<__nv_bfloat16>(rotated);
 }
 
 template <int QRows, int KTile, int QBlockOffset = 0, bool UseExp2 = false>
@@ -220,6 +265,432 @@ __tile_global__ void time_attention1301_main1280_cutile_kernel(
     out_view.store(ct::element_cast<__nv_bfloat16>(out_acc / row_l), q_block, 0);
 }
 
+template <int QRows, int KTile, bool UseExp2 = false, bool IncludeKeyTail = true>
+__tile_global__ void time_attention1301_main1280_split_contig_input_kernel(
+    const __nv_bfloat16* __restrict__ q,
+    const __nv_bfloat16* __restrict__ k,
+    const __nv_bfloat16* __restrict__ v,
+    __nv_bfloat16* __restrict__ out,
+    float scale) {
+    constexpr int FullKTiles = kTimeAttnMainN / KTile;
+    using ScoreTile = ct::tile<float, ct::shape<QRows, KTile>>;
+    using OutTile = ct::tile<float, ct::shape<QRows, kTimeAttnD>>;
+    using I64ScoreTile = ct::tile<long long, ct::shape<QRows, KTile>>;
+    using RowTile = ct::tile<float, ct::shape<QRows, 1>>;
+    using NDShape = ct::shape<kTimeAttnN, kTimeAttnD>;
+    using DNShape = ct::shape<kTimeAttnD, kTimeAttnN>;
+    using NDStrides = ct::shape<kTimeAttnHeadStride, 1>;
+    using DNStrides = ct::shape<1, kTimeAttnHeadStride>;
+    using NDLayout = ct::layout_strided<NDStrides>;
+    using DNLayout = ct::layout_strided<DNStrides>;
+    using NDMapping = typename NDLayout::template mapping<NDShape>;
+    using DNMapping = typename DNLayout::template mapping<DNShape>;
+
+    q = ct::assume_aligned(q, 16_ic);
+    k = ct::assume_aligned(k, 16_ic);
+    v = ct::assume_aligned(v, 16_ic);
+    out = ct::assume_aligned(out, 16_ic);
+
+    auto [q_block, bh_raw, tile_z] = ct::bid();
+    (void)tile_z;
+    int bh = static_cast<int>(bh_raw);
+    int b = bh / kTimeAttnHeads;
+    int h = bh - b * kTimeAttnHeads;
+    const std::size_t split_base =
+        (static_cast<std::size_t>(b) * kTimeAttnN * kTimeAttnHeads + h) *
+        kTimeAttnD;
+    const __nv_bfloat16* q_batch = q + split_base;
+    const __nv_bfloat16* k_batch = k + split_base;
+    const __nv_bfloat16* v_batch = v + split_base;
+    __nv_bfloat16* out_batch =
+        out + static_cast<std::size_t>(bh) * kTimeAttnN * kTimeAttnD;
+
+    auto q_view = ct::partition_view{
+        ct::tensor_span{q_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<QRows, kTimeAttnD>{}
+    };
+    auto k_t_view = ct::partition_view{
+        ct::tensor_span{k_batch, DNMapping{DNShape{}, DNStrides{}}},
+        ct::shape<kTimeAttnD, KTile>{}
+    };
+    auto v_view = ct::partition_view{
+        ct::tensor_span{v_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<KTile, kTimeAttnD>{}
+    };
+    auto out_view = ct::partition_view{
+        ct::tensor_span{out_batch, ct::shape<kTimeAttnN, kTimeAttnD>{}},
+        ct::shape<QRows, kTimeAttnD>{}
+    };
+
+    auto q_tile = q_view.load(q_block, 0);
+    RowTile row_m = ct::full<RowTile>(-3.402823466e38f);
+    RowTile row_l = ct::full<RowTile>(0.0f);
+    OutTile out_acc = ct::full<OutTile>(0.0f);
+
+    for (auto kt : ct::irange(std::size_t{0}, std::size_t{FullKTiles})) {
+        auto scores = ct::mma(q_tile,
+                              k_t_view.load(0, kt),
+                              ct::full<ScoreTile>(0.0f)) * scale;
+        auto tile_m = ct::reduce_max<1>(scores);
+        auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+        auto alpha = softmax_exp<UseExp2>(row_m - new_m);
+        auto probs_f32 = softmax_exp<UseExp2>(scores - new_m);
+        auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+        auto tile_l = ct::sum<1>(probs_f32);
+
+        out_acc = out_acc * alpha +
+                  ct::mma(probs_bf16,
+                          v_view.load(kt, 0),
+                          ct::full<OutTile>(0.0f));
+        row_l = row_l * alpha + tile_l;
+        row_m = new_m;
+    }
+
+    if constexpr (IncludeKeyTail) {
+        I64ScoreTile score_local = ct::iota<I64ScoreTile>();
+        auto key_cols = static_cast<long long>(FullKTiles) * KTile + score_local % KTile;
+        auto valid = key_cols < kTimeAttnN;
+        auto scores = ct::mma(q_tile,
+                              k_t_view.load_masked(0, FullKTiles),
+                              ct::full<ScoreTile>(0.0f));
+        auto neg_inf = scores * 0.0f - 3.402823466e38f;
+        scores = ct::select(valid, scores * scale, neg_inf);
+        auto tile_m = ct::reduce_max<1>(scores);
+        auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+        auto alpha = softmax_exp<UseExp2>(row_m - new_m);
+        auto probs_f32 = ct::select(valid, softmax_exp<UseExp2>(scores - new_m), scores * 0.0f);
+        auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+        auto tile_l = ct::sum<1>(probs_f32);
+        out_acc = out_acc * alpha +
+                  ct::mma(probs_bf16,
+                          v_view.load_masked(FullKTiles, 0),
+                          ct::full<OutTile>(0.0f));
+        row_l = row_l * alpha + tile_l;
+    }
+
+    out_view.store(ct::element_cast<__nv_bfloat16>(out_acc / row_l), q_block, 0);
+}
+
+template <int QRows, int KTile, bool UseExp2 = false, bool IncludeKeyTail = true>
+__tile_global__ void time_attention1301_main1280_split_contig_qrot_input_kernel(
+    const __nv_bfloat16* __restrict__ q,
+    const __nv_bfloat16* __restrict__ k,
+    const __nv_bfloat16* __restrict__ v,
+    const float* __restrict__ cos_f,
+    const float* __restrict__ sin_f,
+    __nv_bfloat16* __restrict__ out,
+    float scale,
+    bool full_bf16) {
+    constexpr int FullKTiles = kTimeAttnMainN / KTile;
+    using ScoreTile = ct::tile<float, ct::shape<QRows, KTile>>;
+    using OutTile = ct::tile<float, ct::shape<QRows, kTimeAttnD>>;
+    using I64ScoreTile = ct::tile<long long, ct::shape<QRows, KTile>>;
+    using RowTile = ct::tile<float, ct::shape<QRows, 1>>;
+    using NDShape = ct::shape<kTimeAttnN, kTimeAttnD>;
+    using DNShape = ct::shape<kTimeAttnD, kTimeAttnN>;
+    using NDStrides = ct::shape<kTimeAttnHeadStride, 1>;
+    using DNStrides = ct::shape<1, kTimeAttnHeadStride>;
+    using NDLayout = ct::layout_strided<NDStrides>;
+    using DNLayout = ct::layout_strided<DNStrides>;
+    using NDMapping = typename NDLayout::template mapping<NDShape>;
+    using DNMapping = typename DNLayout::template mapping<DNShape>;
+
+    q = ct::assume_aligned(q, 16_ic);
+    k = ct::assume_aligned(k, 16_ic);
+    v = ct::assume_aligned(v, 16_ic);
+    cos_f = ct::assume_aligned(cos_f, 16_ic);
+    sin_f = ct::assume_aligned(sin_f, 16_ic);
+    out = ct::assume_aligned(out, 16_ic);
+
+    auto [q_block, bh_raw, tile_z] = ct::bid();
+    (void)tile_z;
+    int bh = static_cast<int>(bh_raw);
+    int b = bh / kTimeAttnHeads;
+    int h = bh - b * kTimeAttnHeads;
+    const std::size_t split_base =
+        (static_cast<std::size_t>(b) * kTimeAttnN * kTimeAttnHeads + h) *
+        kTimeAttnD;
+    const __nv_bfloat16* q_batch = q + split_base;
+    const __nv_bfloat16* k_batch = k + split_base;
+    const __nv_bfloat16* v_batch = v + split_base;
+    __nv_bfloat16* out_batch =
+        out + static_cast<std::size_t>(bh) * kTimeAttnN * kTimeAttnD;
+
+    auto q_view = ct::partition_view{
+        ct::tensor_span{q_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<QRows, kTimeAttnD>{}
+    };
+    auto k_t_view = ct::partition_view{
+        ct::tensor_span{k_batch, DNMapping{DNShape{}, DNStrides{}}},
+        ct::shape<kTimeAttnD, KTile>{}
+    };
+    auto v_view = ct::partition_view{
+        ct::tensor_span{v_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<KTile, kTimeAttnD>{}
+    };
+    auto out_view = ct::partition_view{
+        ct::tensor_span{out_batch, ct::shape<kTimeAttnN, kTimeAttnD>{}},
+        ct::shape<QRows, kTimeAttnD>{}
+    };
+
+    auto q_tile = rotate_q_tile_for_attention<QRows>(
+        q_view.load(q_block, 0), cos_f, sin_f, static_cast<long long>(q_block), full_bf16);
+    RowTile row_m = ct::full<RowTile>(-3.402823466e38f);
+    RowTile row_l = ct::full<RowTile>(0.0f);
+    OutTile out_acc = ct::full<OutTile>(0.0f);
+
+    for (auto kt : ct::irange(std::size_t{0}, std::size_t{FullKTiles})) {
+        auto scores = ct::mma(q_tile,
+                              k_t_view.load(0, kt),
+                              ct::full<ScoreTile>(0.0f)) * scale;
+        auto tile_m = ct::reduce_max<1>(scores);
+        auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+        auto alpha = softmax_exp<UseExp2>(row_m - new_m);
+        auto probs_f32 = softmax_exp<UseExp2>(scores - new_m);
+        auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+        auto tile_l = ct::sum<1>(probs_f32);
+
+        out_acc = out_acc * alpha +
+                  ct::mma(probs_bf16,
+                          v_view.load(kt, 0),
+                          ct::full<OutTile>(0.0f));
+        row_l = row_l * alpha + tile_l;
+        row_m = new_m;
+    }
+
+    if constexpr (IncludeKeyTail) {
+        I64ScoreTile score_local = ct::iota<I64ScoreTile>();
+        auto key_cols = static_cast<long long>(FullKTiles) * KTile + score_local % KTile;
+        auto valid = key_cols < kTimeAttnN;
+        auto scores = ct::mma(q_tile,
+                              k_t_view.load_masked(0, FullKTiles),
+                              ct::full<ScoreTile>(0.0f));
+        auto neg_inf = scores * 0.0f - 3.402823466e38f;
+        scores = ct::select(valid, scores * scale, neg_inf);
+        auto tile_m = ct::reduce_max<1>(scores);
+        auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+        auto alpha = softmax_exp<UseExp2>(row_m - new_m);
+        auto probs_f32 = ct::select(valid, softmax_exp<UseExp2>(scores - new_m), scores * 0.0f);
+        auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+        auto tile_l = ct::sum<1>(probs_f32);
+        out_acc = out_acc * alpha +
+                  ct::mma(probs_bf16,
+                          v_view.load_masked(FullKTiles, 0),
+                          ct::full<OutTile>(0.0f));
+        row_l = row_l * alpha + tile_l;
+    }
+
+    out_view.store(ct::element_cast<__nv_bfloat16>(out_acc / row_l), q_block, 0);
+}
+
+template <int QRows, int KTile, int QBlockOffset, bool UseExp2 = false>
+__tile_global__ void time_attention1301_split_contig_tail_kernel(
+    const __nv_bfloat16* __restrict__ q,
+    const __nv_bfloat16* __restrict__ k,
+    const __nv_bfloat16* __restrict__ v,
+    __nv_bfloat16* __restrict__ out,
+    float scale) {
+    constexpr int KTiles = (kTimeAttnN + KTile - 1) / KTile;
+    using ScoreTile = ct::tile<float, ct::shape<QRows, KTile>>;
+    using OutTile = ct::tile<float, ct::shape<QRows, kTimeAttnD>>;
+    using I64ScoreTile = ct::tile<long long, ct::shape<QRows, KTile>>;
+    using I64OutTile = ct::tile<long long, ct::shape<QRows, kTimeAttnD>>;
+    using RowTile = ct::tile<float, ct::shape<QRows, 1>>;
+    using NDShape = ct::shape<kTimeAttnN, kTimeAttnD>;
+    using DNShape = ct::shape<kTimeAttnD, kTimeAttnN>;
+    using NDStrides = ct::shape<kTimeAttnHeadStride, 1>;
+    using DNStrides = ct::shape<1, kTimeAttnHeadStride>;
+    using NDLayout = ct::layout_strided<NDStrides>;
+    using DNLayout = ct::layout_strided<DNStrides>;
+    using NDMapping = typename NDLayout::template mapping<NDShape>;
+    using DNMapping = typename DNLayout::template mapping<DNShape>;
+
+    q = ct::assume_aligned(q, 16_ic);
+    k = ct::assume_aligned(k, 16_ic);
+    v = ct::assume_aligned(v, 16_ic);
+    out = ct::assume_aligned(out, 16_ic);
+
+    auto [q_block_local, bh_raw, tile_z] = ct::bid();
+    (void)tile_z;
+    auto q_block = q_block_local + QBlockOffset;
+    int bh = static_cast<int>(bh_raw);
+    int b = bh / kTimeAttnHeads;
+    int h = bh - b * kTimeAttnHeads;
+    const std::size_t split_base =
+        (static_cast<std::size_t>(b) * kTimeAttnN * kTimeAttnHeads + h) *
+        kTimeAttnD;
+    const __nv_bfloat16* q_batch = q + split_base;
+    const __nv_bfloat16* k_batch = k + split_base;
+    const __nv_bfloat16* v_batch = v + split_base;
+    __nv_bfloat16* out_batch =
+        out + static_cast<std::size_t>(bh) * kTimeAttnN * kTimeAttnD;
+
+    auto q_view = ct::partition_view{
+        ct::tensor_span{q_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<QRows, kTimeAttnD>{}
+    };
+    auto k_t_view = ct::partition_view{
+        ct::tensor_span{k_batch, DNMapping{DNShape{}, DNStrides{}}},
+        ct::shape<kTimeAttnD, KTile>{}
+    };
+    auto v_view = ct::partition_view{
+        ct::tensor_span{v_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<KTile, kTimeAttnD>{}
+    };
+
+    auto q_tile = q_view.load_masked(q_block, 0);
+    RowTile row_m = ct::full<RowTile>(-3.402823466e38f);
+    RowTile row_l = ct::full<RowTile>(0.0f);
+    OutTile out_acc = ct::full<OutTile>(0.0f);
+
+    I64ScoreTile score_local = ct::iota<I64ScoreTile>();
+    auto score_rows =
+        static_cast<long long>(q_block) * QRows + score_local / KTile;
+    auto score_cols_local = score_local % KTile;
+
+    for (auto kt : ct::irange(std::size_t{0}, std::size_t{KTiles})) {
+        auto key_cols =
+            static_cast<long long>(kt) * KTile + score_cols_local;
+        auto valid = (score_rows < kTimeAttnN) && (key_cols < kTimeAttnN);
+        auto scores = ct::mma(q_tile,
+                              k_t_view.load_masked(0, kt),
+                              ct::full<ScoreTile>(0.0f));
+        auto neg_inf = scores * 0.0f - 3.402823466e38f;
+        scores = ct::select(valid, scores * scale, neg_inf);
+
+        auto tile_m = ct::reduce_max<1>(scores);
+        auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+        auto alpha = softmax_exp<UseExp2>(row_m - new_m);
+        auto probs_f32 = ct::select(valid, softmax_exp<UseExp2>(scores - new_m), scores * 0.0f);
+        auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+        auto tile_l = ct::sum<1>(probs_f32);
+
+        out_acc = out_acc * alpha +
+                  ct::mma(probs_bf16,
+                          v_view.load_masked(kt, 0),
+                          ct::full<OutTile>(0.0f));
+        row_l = row_l * alpha + tile_l;
+        row_m = new_m;
+    }
+
+    out_acc = out_acc / row_l;
+    I64OutTile out_local = ct::iota<I64OutTile>();
+    auto out_rows = static_cast<long long>(q_block) * QRows + out_local / kTimeAttnD;
+    auto out_cols = out_local % kTimeAttnD;
+    auto out_valid = out_rows < kTimeAttnN;
+    auto safe_rows = ct::select(out_valid, out_rows, out_rows * 0LL);
+    ct::store_masked(out_batch + safe_rows * kTimeAttnD + out_cols,
+                     ct::element_cast<__nv_bfloat16>(out_acc),
+                     out_valid);
+}
+
+template <int QRows, int KTile, int QBlockOffset, bool UseExp2 = false>
+__tile_global__ void time_attention1301_split_contig_qrot_tail_kernel(
+    const __nv_bfloat16* __restrict__ q,
+    const __nv_bfloat16* __restrict__ k,
+    const __nv_bfloat16* __restrict__ v,
+    const float* __restrict__ cos_f,
+    const float* __restrict__ sin_f,
+    __nv_bfloat16* __restrict__ out,
+    float scale,
+    bool full_bf16) {
+    constexpr int KTiles = (kTimeAttnN + KTile - 1) / KTile;
+    using ScoreTile = ct::tile<float, ct::shape<QRows, KTile>>;
+    using OutTile = ct::tile<float, ct::shape<QRows, kTimeAttnD>>;
+    using I64ScoreTile = ct::tile<long long, ct::shape<QRows, KTile>>;
+    using I64OutTile = ct::tile<long long, ct::shape<QRows, kTimeAttnD>>;
+    using RowTile = ct::tile<float, ct::shape<QRows, 1>>;
+    using NDShape = ct::shape<kTimeAttnN, kTimeAttnD>;
+    using DNShape = ct::shape<kTimeAttnD, kTimeAttnN>;
+    using NDStrides = ct::shape<kTimeAttnHeadStride, 1>;
+    using DNStrides = ct::shape<1, kTimeAttnHeadStride>;
+    using NDLayout = ct::layout_strided<NDStrides>;
+    using DNLayout = ct::layout_strided<DNStrides>;
+    using NDMapping = typename NDLayout::template mapping<NDShape>;
+    using DNMapping = typename DNLayout::template mapping<DNShape>;
+
+    q = ct::assume_aligned(q, 16_ic);
+    k = ct::assume_aligned(k, 16_ic);
+    v = ct::assume_aligned(v, 16_ic);
+    cos_f = ct::assume_aligned(cos_f, 16_ic);
+    sin_f = ct::assume_aligned(sin_f, 16_ic);
+    out = ct::assume_aligned(out, 16_ic);
+
+    auto [q_block_local, bh_raw, tile_z] = ct::bid();
+    (void)tile_z;
+    auto q_block = q_block_local + QBlockOffset;
+    int bh = static_cast<int>(bh_raw);
+    int b = bh / kTimeAttnHeads;
+    int h = bh - b * kTimeAttnHeads;
+    const std::size_t split_base =
+        (static_cast<std::size_t>(b) * kTimeAttnN * kTimeAttnHeads + h) *
+        kTimeAttnD;
+    const __nv_bfloat16* q_batch = q + split_base;
+    const __nv_bfloat16* k_batch = k + split_base;
+    const __nv_bfloat16* v_batch = v + split_base;
+    __nv_bfloat16* out_batch =
+        out + static_cast<std::size_t>(bh) * kTimeAttnN * kTimeAttnD;
+
+    auto q_view = ct::partition_view{
+        ct::tensor_span{q_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<QRows, kTimeAttnD>{}
+    };
+    auto k_t_view = ct::partition_view{
+        ct::tensor_span{k_batch, DNMapping{DNShape{}, DNStrides{}}},
+        ct::shape<kTimeAttnD, KTile>{}
+    };
+    auto v_view = ct::partition_view{
+        ct::tensor_span{v_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<KTile, kTimeAttnD>{}
+    };
+
+    auto q_tile = rotate_q_tile_for_attention<QRows>(
+        q_view.load_masked(q_block, 0), cos_f, sin_f, static_cast<long long>(q_block), full_bf16);
+    RowTile row_m = ct::full<RowTile>(-3.402823466e38f);
+    RowTile row_l = ct::full<RowTile>(0.0f);
+    OutTile out_acc = ct::full<OutTile>(0.0f);
+
+    I64ScoreTile score_local = ct::iota<I64ScoreTile>();
+    auto score_rows =
+        static_cast<long long>(q_block) * QRows + score_local / KTile;
+    auto score_cols_local = score_local % KTile;
+
+    for (auto kt : ct::irange(std::size_t{0}, std::size_t{KTiles})) {
+        auto key_cols =
+            static_cast<long long>(kt) * KTile + score_cols_local;
+        auto valid = (score_rows < kTimeAttnN) && (key_cols < kTimeAttnN);
+        auto scores = ct::mma(q_tile,
+                              k_t_view.load_masked(0, kt),
+                              ct::full<ScoreTile>(0.0f));
+        auto neg_inf = scores * 0.0f - 3.402823466e38f;
+        scores = ct::select(valid, scores * scale, neg_inf);
+
+        auto tile_m = ct::reduce_max<1>(scores);
+        auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+        auto alpha = softmax_exp<UseExp2>(row_m - new_m);
+        auto probs_f32 = ct::select(valid, softmax_exp<UseExp2>(scores - new_m), scores * 0.0f);
+        auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+        auto tile_l = ct::sum<1>(probs_f32);
+
+        out_acc = out_acc * alpha +
+                  ct::mma(probs_bf16,
+                          v_view.load_masked(kt, 0),
+                          ct::full<OutTile>(0.0f));
+        row_l = row_l * alpha + tile_l;
+        row_m = new_m;
+    }
+
+    out_acc = out_acc / row_l;
+    I64OutTile out_local = ct::iota<I64OutTile>();
+    auto out_rows = static_cast<long long>(q_block) * QRows + out_local / kTimeAttnD;
+    auto out_cols = out_local % kTimeAttnD;
+    auto out_valid = out_rows < kTimeAttnN;
+    auto safe_rows = ct::select(out_valid, out_rows, out_rows * 0LL);
+    ct::store_masked(out_batch + safe_rows * kTimeAttnD + out_cols,
+                     ct::element_cast<__nv_bfloat16>(out_acc),
+                     out_valid);
+}
+
 }  // namespace
 
 void launch_time_attention1301_split_tail_cutile(const Tensor& q,
@@ -294,6 +765,320 @@ void launch_time_attention1301_split_tail_cutile(const Tensor& q,
                                                        20>
             <<<grid_tail_q64, 1>>>(q.data_bf16(), k.data_bf16(), v.data_bf16(),
                                    out.data_bf16(), scale);
+    }
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void launch_time_attention1301_split_contig_main_cutile(const Tensor& q,
+                                                        const Tensor& k,
+                                                        const Tensor& v,
+                                                        Tensor& out,
+                                                        float scale,
+                                                        bool use_exp2,
+                                                        bool skip_keytail) {
+    if (q.dtype() != DType::BFloat16 || k.dtype() != DType::BFloat16 ||
+        v.dtype() != DType::BFloat16 || out.dtype() != DType::BFloat16) {
+        throw std::runtime_error("time split-contig CUDA Tile: expected BF16 tensors");
+    }
+    if (q.ndim() != 4 || k.ndim() != 4 || v.ndim() != 4 ||
+        q.size(1) != kTimeAttnN || q.size(2) != kTimeAttnHeads ||
+        q.size(3) != kTimeAttnD ||
+        k.shape() != q.shape() || v.shape() != q.shape()) {
+        throw std::runtime_error(
+            "time split-contig CUDA Tile: expected q/k/v [B,1301,8,64]");
+    }
+    int64_t batches = q.size(0);
+    int64_t bh = batches * kTimeAttnHeads;
+    if (out.ndim() != 3 || out.size(0) != bh || out.size(1) != kTimeAttnN ||
+        out.size(2) != kTimeAttnD) {
+        throw std::runtime_error(
+            "time split-contig CUDA Tile: expected out [B*8,1301,64]");
+    }
+    if (batches <= 0 || bh > std::numeric_limits<unsigned int>::max()) {
+        throw std::runtime_error("time split-contig CUDA Tile: invalid batch count");
+    }
+
+    dim3 grid(kTimeAttnMainN / kTimeAttnCutileQRows64,
+              static_cast<unsigned int>(bh));
+    if (skip_keytail && use_exp2) {
+        time_attention1301_main1280_split_contig_input_kernel<kTimeAttnCutileQRows64,
+                                                              kTimeAttnCutileKTile32,
+                                                              true,
+                                                              false>
+            <<<grid, 1>>>(q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                          out.data_bf16(), scale);
+    } else if (skip_keytail) {
+        time_attention1301_main1280_split_contig_input_kernel<kTimeAttnCutileQRows64,
+                                                              kTimeAttnCutileKTile32,
+                                                              false,
+                                                              false>
+            <<<grid, 1>>>(q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                          out.data_bf16(), scale);
+    } else if (use_exp2) {
+        time_attention1301_main1280_split_contig_input_kernel<kTimeAttnCutileQRows64,
+                                                              kTimeAttnCutileKTile32,
+                                                              true>
+            <<<grid, 1>>>(q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                          out.data_bf16(), scale);
+    } else {
+        time_attention1301_main1280_split_contig_input_kernel<kTimeAttnCutileQRows64,
+                                                              kTimeAttnCutileKTile32>
+            <<<grid, 1>>>(q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                          out.data_bf16(), scale);
+    }
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void launch_time_attention1301_split_contig_qrot_main_cutile(const Tensor& q,
+                                                             const Tensor& k,
+                                                             const Tensor& v,
+                                                             const Tensor& cos_freqs,
+                                                             const Tensor& sin_freqs,
+                                                             Tensor& out,
+                                                             float scale,
+                                                             bool full_bf16,
+                                                             bool use_q32,
+                                                             bool use_exp2,
+                                                             bool skip_keytail) {
+    if (q.dtype() != DType::BFloat16 || k.dtype() != DType::BFloat16 ||
+        v.dtype() != DType::BFloat16 || out.dtype() != DType::BFloat16 ||
+        cos_freqs.dtype() != DType::Float32 || sin_freqs.dtype() != DType::Float32) {
+        throw std::runtime_error("time split-contig qrot CUDA Tile: expected BF16 q/k/v/out and F32 cos/sin");
+    }
+    if (q.ndim() != 4 || k.ndim() != 4 || v.ndim() != 4 ||
+        q.size(1) != kTimeAttnN || q.size(2) != kTimeAttnHeads ||
+        q.size(3) != kTimeAttnD ||
+        k.shape() != q.shape() || v.shape() != q.shape()) {
+        throw std::runtime_error(
+            "time split-contig qrot CUDA Tile: expected q/k/v [B,1301,8,64]");
+    }
+    if (cos_freqs.ndim() != 2 || sin_freqs.ndim() != 2 ||
+        cos_freqs.size(0) != kTimeAttnN || sin_freqs.size(0) != kTimeAttnN ||
+        cos_freqs.size(1) != kTimeAttnD / 2 || sin_freqs.size(1) != kTimeAttnD / 2) {
+        throw std::runtime_error(
+            "time split-contig qrot CUDA Tile: expected cos/sin [1301,32]");
+    }
+    int64_t batches = q.size(0);
+    int64_t bh = batches * kTimeAttnHeads;
+    if (out.ndim() != 3 || out.size(0) != bh || out.size(1) != kTimeAttnN ||
+        out.size(2) != kTimeAttnD) {
+        throw std::runtime_error(
+            "time split-contig qrot CUDA Tile: expected out [B*8,1301,64]");
+    }
+    if (batches <= 0 || bh > std::numeric_limits<unsigned int>::max()) {
+        throw std::runtime_error("time split-contig qrot CUDA Tile: invalid batch count");
+    }
+
+    dim3 grid_q64(kTimeAttnMainN / kTimeAttnCutileQRows64,
+                  static_cast<unsigned int>(bh));
+    dim3 grid_q32(kTimeAttnMainN / kTimeAttnCutileQRows32,
+                  static_cast<unsigned int>(bh));
+    if (use_q32 && use_exp2 && skip_keytail) {
+        time_attention1301_main1280_split_contig_qrot_input_kernel<kTimeAttnCutileQRows32,
+                                                                   kTimeAttnCutileKTile32,
+                                                                   true,
+                                                                   false>
+            <<<grid_q32, 1>>>(q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                              cos_freqs.data_f32(), sin_freqs.data_f32(),
+                              out.data_bf16(), scale, full_bf16);
+    } else if (use_q32 && skip_keytail) {
+        time_attention1301_main1280_split_contig_qrot_input_kernel<kTimeAttnCutileQRows32,
+                                                                   kTimeAttnCutileKTile32,
+                                                                   false,
+                                                                   false>
+            <<<grid_q32, 1>>>(q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                              cos_freqs.data_f32(), sin_freqs.data_f32(),
+                              out.data_bf16(), scale, full_bf16);
+    } else if (use_exp2 && skip_keytail) {
+        time_attention1301_main1280_split_contig_qrot_input_kernel<kTimeAttnCutileQRows64,
+                                                                   kTimeAttnCutileKTile32,
+                                                                   true,
+                                                                   false>
+            <<<grid_q64, 1>>>(q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                              cos_freqs.data_f32(), sin_freqs.data_f32(),
+                              out.data_bf16(), scale, full_bf16);
+    } else if (skip_keytail) {
+        time_attention1301_main1280_split_contig_qrot_input_kernel<kTimeAttnCutileQRows64,
+                                                                   kTimeAttnCutileKTile32,
+                                                                   false,
+                                                                   false>
+            <<<grid_q64, 1>>>(q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                              cos_freqs.data_f32(), sin_freqs.data_f32(),
+                              out.data_bf16(), scale, full_bf16);
+    } else if (use_q32 && use_exp2) {
+        time_attention1301_main1280_split_contig_qrot_input_kernel<kTimeAttnCutileQRows32,
+                                                                   kTimeAttnCutileKTile32,
+                                                                   true>
+            <<<grid_q32, 1>>>(q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                              cos_freqs.data_f32(), sin_freqs.data_f32(),
+                              out.data_bf16(), scale, full_bf16);
+    } else if (use_q32) {
+        time_attention1301_main1280_split_contig_qrot_input_kernel<kTimeAttnCutileQRows32,
+                                                                   kTimeAttnCutileKTile32>
+            <<<grid_q32, 1>>>(q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                              cos_freqs.data_f32(), sin_freqs.data_f32(),
+                              out.data_bf16(), scale, full_bf16);
+    } else if (use_exp2) {
+        time_attention1301_main1280_split_contig_qrot_input_kernel<kTimeAttnCutileQRows64,
+                                                                   kTimeAttnCutileKTile32,
+                                                                   true>
+            <<<grid_q64, 1>>>(q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                              cos_freqs.data_f32(), sin_freqs.data_f32(),
+                              out.data_bf16(), scale, full_bf16);
+    } else {
+        time_attention1301_main1280_split_contig_qrot_input_kernel<kTimeAttnCutileQRows64,
+                                                                   kTimeAttnCutileKTile32>
+            <<<grid_q64, 1>>>(q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                              cos_freqs.data_f32(), sin_freqs.data_f32(),
+                              out.data_bf16(), scale, full_bf16);
+    }
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void launch_time_attention1301_split_contig_tail_cutile(const Tensor& q,
+                                                        const Tensor& k,
+                                                        const Tensor& v,
+                                                        Tensor& out,
+                                                        float scale,
+                                                        bool use_tail_q32,
+                                                        bool use_exp2) {
+    if (q.dtype() != DType::BFloat16 || k.dtype() != DType::BFloat16 ||
+        v.dtype() != DType::BFloat16 || out.dtype() != DType::BFloat16) {
+        throw std::runtime_error("time split-contig tail CUDA Tile: expected BF16 tensors");
+    }
+    if (q.ndim() != 4 || k.ndim() != 4 || v.ndim() != 4 ||
+        q.size(1) != kTimeAttnN || q.size(2) != kTimeAttnHeads ||
+        q.size(3) != kTimeAttnD ||
+        k.shape() != q.shape() || v.shape() != q.shape()) {
+        throw std::runtime_error(
+            "time split-contig tail CUDA Tile: expected q/k/v [B,1301,8,64]");
+    }
+    int64_t batches = q.size(0);
+    int64_t bh = batches * kTimeAttnHeads;
+    if (out.ndim() != 3 || out.size(0) != bh || out.size(1) != kTimeAttnN ||
+        out.size(2) != kTimeAttnD) {
+        throw std::runtime_error(
+            "time split-contig tail CUDA Tile: expected out [B*8,1301,64]");
+    }
+    if (batches <= 0 || bh > std::numeric_limits<unsigned int>::max()) {
+        throw std::runtime_error("time split-contig tail CUDA Tile: invalid batch count");
+    }
+
+    dim3 grid_tail_q64(1, static_cast<unsigned int>(bh));
+    dim3 grid_tail_q32(
+        static_cast<unsigned int>(ceildiv(kTimeAttnN - kTimeAttnMainN,
+                                          kTimeAttnCutileQRows32)),
+        static_cast<unsigned int>(bh));
+
+    if (use_tail_q32) {
+        if (use_exp2) {
+            time_attention1301_split_contig_tail_kernel<kTimeAttnCutileQRows32,
+                                                        kTimeAttnCutileKTile32,
+                                                        40,
+                                                        true>
+                <<<grid_tail_q32, 1>>>(q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                                       out.data_bf16(), scale);
+        } else {
+            time_attention1301_split_contig_tail_kernel<kTimeAttnCutileQRows32,
+                                                        kTimeAttnCutileKTile32,
+                                                        40>
+                <<<grid_tail_q32, 1>>>(q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                                       out.data_bf16(), scale);
+        }
+    } else if (use_exp2) {
+        time_attention1301_split_contig_tail_kernel<kTimeAttnCutileQRows64,
+                                                    kTimeAttnCutileKTile64,
+                                                    20,
+                                                    true>
+            <<<grid_tail_q64, 1>>>(q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                                   out.data_bf16(), scale);
+    } else {
+        time_attention1301_split_contig_tail_kernel<kTimeAttnCutileQRows64,
+                                                    kTimeAttnCutileKTile64,
+                                                    20>
+            <<<grid_tail_q64, 1>>>(q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                                   out.data_bf16(), scale);
+    }
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void launch_time_attention1301_split_contig_qrot_tail_cutile(const Tensor& q,
+                                                             const Tensor& k,
+                                                             const Tensor& v,
+                                                             const Tensor& cos_freqs,
+                                                             const Tensor& sin_freqs,
+                                                             Tensor& out,
+                                                             float scale,
+                                                             bool full_bf16,
+                                                             bool use_tail_q32,
+                                                             bool use_exp2) {
+    if (q.dtype() != DType::BFloat16 || k.dtype() != DType::BFloat16 ||
+        v.dtype() != DType::BFloat16 || out.dtype() != DType::BFloat16 ||
+        cos_freqs.dtype() != DType::Float32 || sin_freqs.dtype() != DType::Float32) {
+        throw std::runtime_error("time split-contig qrot tail CUDA Tile: expected BF16 q/k/v/out and F32 cos/sin");
+    }
+    if (q.ndim() != 4 || k.ndim() != 4 || v.ndim() != 4 ||
+        q.size(1) != kTimeAttnN || q.size(2) != kTimeAttnHeads ||
+        q.size(3) != kTimeAttnD ||
+        k.shape() != q.shape() || v.shape() != q.shape()) {
+        throw std::runtime_error(
+            "time split-contig qrot tail CUDA Tile: expected q/k/v [B,1301,8,64]");
+    }
+    if (cos_freqs.ndim() != 2 || sin_freqs.ndim() != 2 ||
+        cos_freqs.size(0) != kTimeAttnN || sin_freqs.size(0) != kTimeAttnN ||
+        cos_freqs.size(1) != kTimeAttnD / 2 || sin_freqs.size(1) != kTimeAttnD / 2) {
+        throw std::runtime_error(
+            "time split-contig qrot tail CUDA Tile: expected cos/sin [1301,32]");
+    }
+    int64_t batches = q.size(0);
+    int64_t bh = batches * kTimeAttnHeads;
+    if (out.ndim() != 3 || out.size(0) != bh || out.size(1) != kTimeAttnN ||
+        out.size(2) != kTimeAttnD) {
+        throw std::runtime_error(
+            "time split-contig qrot tail CUDA Tile: expected out [B*8,1301,64]");
+    }
+    if (batches <= 0 || bh > std::numeric_limits<unsigned int>::max()) {
+        throw std::runtime_error("time split-contig qrot tail CUDA Tile: invalid batch count");
+    }
+
+    dim3 grid_tail_q64(1, static_cast<unsigned int>(bh));
+    dim3 grid_tail_q32(
+        static_cast<unsigned int>(ceildiv(kTimeAttnN - kTimeAttnMainN,
+                                          kTimeAttnCutileQRows32)),
+        static_cast<unsigned int>(bh));
+
+    if (use_tail_q32) {
+        if (use_exp2) {
+            time_attention1301_split_contig_qrot_tail_kernel<kTimeAttnCutileQRows32,
+                                                             kTimeAttnCutileKTile32,
+                                                             40,
+                                                             true>
+                <<<grid_tail_q32, 1>>>(q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                                       cos_freqs.data_f32(), sin_freqs.data_f32(),
+                                       out.data_bf16(), scale, full_bf16);
+        } else {
+            time_attention1301_split_contig_qrot_tail_kernel<kTimeAttnCutileQRows32,
+                                                             kTimeAttnCutileKTile32,
+                                                             40>
+                <<<grid_tail_q32, 1>>>(q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                                       cos_freqs.data_f32(), sin_freqs.data_f32(),
+                                       out.data_bf16(), scale, full_bf16);
+        }
+    } else if (use_exp2) {
+        time_attention1301_split_contig_qrot_tail_kernel<kTimeAttnCutileQRows64,
+                                                         kTimeAttnCutileKTile64,
+                                                         20,
+                                                         true>
+            <<<grid_tail_q64, 1>>>(q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                                   cos_freqs.data_f32(), sin_freqs.data_f32(),
+                                   out.data_bf16(), scale, full_bf16);
+    } else {
+        time_attention1301_split_contig_qrot_tail_kernel<kTimeAttnCutileQRows64,
+                                                         kTimeAttnCutileKTile64,
+                                                         20>
+            <<<grid_tail_q64, 1>>>(q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                                   cos_freqs.data_f32(), sin_freqs.data_f32(),
+                                   out.data_bf16(), scale, full_bf16);
     }
     CUDA_CHECK(cudaGetLastError());
 }

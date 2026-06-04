@@ -40,6 +40,8 @@ constexpr int kGeluTanh = 3;
 constexpr int kGeluErfPoly5L25 = 4;
 constexpr int kGeluErfPoly7L25 = 5;
 constexpr int kGeluErfPoly9L30 = 6;
+constexpr int kGeluIdentity = 7;
+constexpr int kGeluErfPoly9TinyBlend = 8;
 
 using I64InitTile = ct::tile<long long, ct::shape<kInitTile>>;
 using F32InitTile = ct::tile<float, ct::shape<kInitTile>>;
@@ -88,7 +90,64 @@ Options parse_args(int argc, char** argv) {
                 "                  fused_h32_poly9, fused_h32_poly9_128,\n"
                 "                  fused_h32_poly9_64,\n"
                 "                  fused_h16_poly9_split2,\n"
+                "                  fused_m16_h16_poly9_split2,\n"
+                "                  fused_m16_h32_poly9_split2,\n"
+                "                  fused_m16_h64_poly9_split2,\n"
                 "                  fused_h32_poly9_split2,\n"
+                "                  fused_h32_identity_split2,\n"
+                "                  fused_h32_identity_nooutbias_split2,\n"
+                "                  fused_h32_rawhidden_split2,\n"
+                "                  fused_h32_poly9_split2_pairh32,\n"
+                "                  fused_h32_poly9_split2_pairh32_tk16,\n"
+                "                  fused_h32_poly9_split2_pairh32_tk64,\n"
+#ifdef CUDASEP_FFN12_CANDIDATES_ONLY
+                "                  fused_h32_poly9_split2_tk64,\n"
+                "                  fused_h32_poly9_split2_pairh32_tk64_bkn,\n"
+		                "                  fused_m8_h32_poly9_split2_pairh32_tk64,\n"
+		                "                  fused_h32_poly9_split2_pairh32_tk128,\n"
+		                "                  fused_h32_poly9_split2_pairh32_tk256,\n"
+		                "                  fused_h64_poly9_split2_pairh64_tk64,\n"
+	                "                  fused_h64_poly9_split2_pairh64_tk64_idx32,\n"
+	                "                  fused_h64_poly9_split2_pairh64_tk64_outnoround,\n"
+	                "                  fused_h64_poly9_split2_pairh64_tk64_idx32_outnoround,\n"
+	                "                  fused_h32_poly9_split2_pairh32_tk64_halfout,\n"
+	                "                  fused_h32_poly9_split2_pairh32_tk64_quarterout,\n"
+	                "                  fused_h32_poly9_split2_pairh32_tk64_quarterout_w1w2lat2,\n"
+	                "                  fused_h32_poly9_split2_pairh32_tk64_outseq,\n"
+                "                  fused_h32_poly9_split2_pairh32_tk64_noround,\n"
+                "                  fused_h32_poly9_split2_pairh32_tk64_outnoround,\n"
+                "                  fused_h32_poly9_split2_pairh32_tk64_idx32,\n"
+                "                  fused_h32_poly9_split2_pairh32_tk64_idx32_outnoround,\n"
+	                "                  fused_h32_poly9_split2_pairh32_tk64_nooutbias,\n"
+		                "                  fused_h32_poly9_split2_pairh32_tk64_nobias,\n"
+		                "                  fused_h32_poly9_split2_pairh32_tk64_w1lat8,\n"
+		                "                  fused_h32_poly9_split2_pairh32_tk64_w1lat2,\n"
+		                "                  fused_h32_poly9_split2_pairh32_tk64_w1batched2,\n"
+		                "                  fused_h32_poly9_split2_pairh32_tk64_w2batched2,\n"
+		                "                  fused_h32_poly9_split2_pairh32_tk64_hsplit2_partial,\n"
+		                "                  fused_h32_poly9_split2_pairh32_tk64_hsplit4_partial,\n"
+		                "                  fused_h32_poly9_split2_pairh32_tk64_stagedhidden,\n"
+		                "                  fused_h32_poly9_split4_pairh32_tk64,\n"
+#endif
+                "                  fused_h32_poly9_split2_pairh32_tk64_accgroup,\n"
+                "                  fused_h32_poly9_split2_pairh32_tk64_w2lat8,\n"
+                "                  fused_h32_poly9_split2_pairh32_tk64_w2lat2,\n"
+                "                  fused_h32_poly9_split2_pairh32_tk64_w1w2lat2,\n"
+                "                  fused_h32_poly9_split2_pairh32_tk64_w2temp,\n"
+                "                  fused_h32_poly9_split2_pairh32_tk64_w2splitspan,\n"
+                "                  fused_h32_poly9_split2_pairh32_tk64_w2manual,\n"
+                "                  fused_h32_poly9_split2_pairh32_tk64_occ2,\n"
+                "                  fused_h16_poly9_split2_pairh16_tk64,\n"
+                "                  fused_h64_poly9_split2_pairh64_tk64,\n"
+                "                  fused_m16_h32_poly9_split2_pairh32,\n"
+                "                  fused_m16_h32_poly9_split2_pairh32_tk64,\n"
+                "                  fused_h32_poly9_tinyblend_split2_pairh32,\n"
+                "                  fused_h32_poly9_tinyblend_split2_pairh32_tk64,\n"
+                "                  fused_h32_identity_split2_pairh32,\n"
+                "                  fused_h32_identity_split2_pairh32_tk64,\n"
+                "                  fused_h32_poly9_split2_pairh32_source_style,\n"
+                "                  fused_h32_poly9_split4_pairh32,\n"
+                "                  fused_h32_poly9_split2_quadh32,\n"
                 "                  fused_h64_poly9_split2,\n"
                 "                  fused_h32_poly9_split4,\n"
                 "                  fused_m16_h32_256, fused_h16_256,\n"
@@ -115,6 +174,14 @@ float percentile(std::vector<float> values, float q) {
 template <typename T>
 static __tile__ auto bf16_round(T value) {
     return ct::element_cast<float>(ct::element_cast<__nv_bfloat16>(value));
+}
+
+template <bool FullBF16, typename T>
+static __tile__ auto bf16_round_if(T value) {
+    if constexpr (FullBF16) {
+        return bf16_round(value);
+    }
+    return value;
 }
 
 template <typename TileT>
@@ -196,10 +263,20 @@ static __tile__ auto gelu_erf_poly9_l30(TileT x) {
     return 0.5f * x * (one + erf_approx);
 }
 
+template <typename TileT>
+static __tile__ auto gelu_erf_poly9_tinyblend_l30(TileT x) {
+    auto gelu = gelu_erf_poly9_l30(x);
+    return x + 0.0009765625f * (gelu - x);
+}
+
 template <int GeluMode, typename TileT>
 static __tile__ auto gelu_selected(TileT x) {
-    if constexpr (GeluMode == kGeluErfPoly9L30) {
+    if constexpr (GeluMode == kGeluIdentity) {
+        return x;
+    } else if constexpr (GeluMode == kGeluErfPoly9L30) {
         return gelu_erf_poly9_l30(x);
+    } else if constexpr (GeluMode == kGeluErfPoly9TinyBlend) {
+        return gelu_erf_poly9_tinyblend_l30(x);
     } else if constexpr (GeluMode == kGeluErfPoly7L25) {
         return gelu_erf_poly7_l25(x);
     } else if constexpr (GeluMode == kGeluErfPoly5L25) {
@@ -216,6 +293,36 @@ static __tile__ auto gelu_selected(TileT x) {
     }
 }
 
+template <bool FullBF16, typename TileT>
+static __tile__ auto gelu_erf_poly9_l30_source_style(TileT x) {
+    auto zero = x * 0.0f;
+    auto one = zero + 1.0f;
+    auto ax = ct::select(x < zero, zero - x, x);
+    auto z = ax * ax;
+    z = bf16_round_if<FullBF16>(z);
+    auto p = ((((((((0.00000005422539767f * z - 0.000002440964777f) * z +
+                    0.00004855766724f) * z - 0.0005709642654f) * z +
+                  0.004507274577f) * z - 0.02579950512f) * z +
+                0.1120213868f) * z - 0.3758834075f) * z +
+              1.128367753f);
+    p = bf16_round_if<FullBF16>(p);
+    auto erf_abs = ct::min(ct::max(ax * p, zero), one);
+    erf_abs = bf16_round_if<FullBF16>(erf_abs);
+    auto erf_approx = ct::select(x < zero, zero - erf_abs, erf_abs);
+    auto gelu = 0.5f * x * (one + erf_approx);
+    return bf16_round_if<FullBF16>(gelu);
+}
+
+template <int GeluMode, bool FullBF16, typename TileT>
+static __tile__ auto gelu_selected_source_style(TileT x) {
+    if constexpr (GeluMode == kGeluErfPoly9L30) {
+        return gelu_erf_poly9_l30_source_style<FullBF16>(x);
+    } else {
+        static_assert(GeluMode == kGeluErfPoly9L30);
+        return x;
+    }
+}
+
 __tile_global__ void fill_bf16_kernel(__nv_bfloat16* __restrict__ dst, long long total) {
     dst = ct::assume_aligned(dst, 16_ic);
     I64InitTile idx = (long long)ct::bid().x * kInitTile + ct::iota<I64InitTile>();
@@ -224,6 +331,23 @@ __tile_global__ void fill_bf16_kernel(__nv_bfloat16* __restrict__ dst, long long
         0.125f + ct::element_cast<float>((idx * 17LL) & 1023LL) * 0.000244140625f;
     ct::store_masked(dst + idx, ct::element_cast<__nv_bfloat16>(values), in_bounds);
 }
+
+#ifdef CUDASEP_FFN12_CANDIDATES_ONLY
+__tile_global__ void nt_layout_left_to_bkn_kernel(const __nv_bfloat16* __restrict__ src_nt,
+                                                  __nv_bfloat16* __restrict__ dst_bkn,
+                                                  long long k,
+                                                  long long n,
+                                                  long long total) {
+    src_nt = ct::assume_aligned(src_nt, 16_ic);
+    dst_bkn = ct::assume_aligned(dst_bkn, 16_ic);
+    I64InitTile idx = (long long)ct::bid().x * kInitTile + ct::iota<I64InitTile>();
+    auto in_bounds = idx < total;
+    auto row = idx / n;
+    auto col = idx - row * n;
+    ct::store_masked(dst_bkn + idx, ct::load_masked(src_nt + row + col * k, in_bounds),
+                     in_bounds);
+}
+#endif
 
 template <int TM, int TN, int TK, int M, int N, int K>
 __tile_global__ void ffn1_gelu_bf16_kernel(const __nv_bfloat16* __restrict__ a,
@@ -409,7 +533,12 @@ __tile_global__ void ffn12_fused_recompute_bf16_occ4_kernel(
         a, w1_nt, b1, w2_nt, b2, out);
 }
 
-template <int TM, int THidden, int GeluMode = kGeluErf>
+template <int TM,
+          int THidden,
+          int GeluMode = kGeluErf,
+          bool UseHiddenBias = true,
+          bool UseOutBias = true,
+          int TK = kTileK>
 __tile_global__ void ffn12_fused_split2_bf16_kernel(
     const __nv_bfloat16* __restrict__ a,
     const __nv_bfloat16* __restrict__ w1_nt,
@@ -417,6 +546,1178 @@ __tile_global__ void ffn12_fused_split2_bf16_kernel(
     const __nv_bfloat16* __restrict__ w2_nt,
     const __nv_bfloat16* __restrict__ b2,
     __nv_bfloat16* __restrict__ out) {
+    constexpr int OutHalf = kOut / 2;
+    static_assert(kIn % TK == 0);
+    using HiddenAccTile = ct::tile<float, ct::shape<TM, THidden>>;
+    using OutAccTile = ct::tile<float, ct::shape<TM, OutHalf>>;
+    using I64HiddenTile = ct::tile<long long, ct::shape<TM, THidden>>;
+    using I64OutTile = ct::tile<long long, ct::shape<TM, OutHalf>>;
+
+    a = ct::assume_aligned(a, 16_ic);
+    w1_nt = ct::assume_aligned(w1_nt, 16_ic);
+    b1 = ct::assume_aligned(b1, 16_ic);
+    w2_nt = ct::assume_aligned(w2_nt, 16_ic);
+    b2 = ct::assume_aligned(b2, 16_ic);
+    out = ct::assume_aligned(out, 16_ic);
+
+    auto a_view = ct::partition_view{
+        ct::tensor_span{a, ct::shape<kM, kIn>{}},
+        ct::shape<TM, TK>{}
+    };
+    auto w1_view = ct::partition_view{
+        ct::tensor_span{w1_nt, ct::shape<kIn, kHidden>{}, ct::layout_left{}},
+        ct::shape<TK, THidden>{}
+    };
+    auto w2_view = ct::partition_view{
+        ct::tensor_span{w2_nt, ct::shape<kHidden, kOut>{}, ct::layout_left{}},
+        ct::shape<THidden, OutHalf>{}
+    };
+    auto out_view = ct::partition_view{
+        ct::tensor_span{out, ct::shape<kM, kOut>{}},
+        ct::shape<TM, OutHalf>{}
+    };
+
+    auto [tile_m, tile_n, tile_z] = ct::bid();
+    (void)tile_n;
+    (void)tile_z;
+
+    auto out_acc0 = ct::full<OutAccTile>(0.0f);
+    auto out_acc1 = ct::full<OutAccTile>(0.0f);
+    I64HiddenTile hidden_local = ct::iota<I64HiddenTile>();
+    for (auto hidden_tile : ct::irange(std::size_t{0}, std::size_t{kHidden / THidden})) {
+        auto hidden_acc = ct::full<HiddenAccTile>(0.0f);
+        for (auto kk : ct::irange(std::size_t{0}, std::size_t{kIn / TK})) {
+            hidden_acc = ct::mma(a_view.load(tile_m, kk),
+                                 w1_view.load(kk, hidden_tile),
+                                 hidden_acc);
+        }
+        auto hidden_cols =
+            static_cast<long long>(hidden_tile) * THidden + (hidden_local % THidden);
+        auto hidden_value = bf16_round(hidden_acc);
+        if constexpr (UseHiddenBias) {
+            auto hidden_bias = ct::element_cast<float>(ct::load(b1 + hidden_cols));
+            hidden_value = hidden_value + hidden_bias;
+        } else {
+            (void)hidden_cols;
+        }
+        hidden_value = gelu_selected<GeluMode>(hidden_value);
+        auto hidden_bf16 = ct::element_cast<__nv_bfloat16>(hidden_value);
+        out_acc0 = ct::mma(hidden_bf16, w2_view.load(hidden_tile, 0), out_acc0);
+        out_acc1 = ct::mma(hidden_bf16, w2_view.load(hidden_tile, 1), out_acc1);
+    }
+
+    I64OutTile out_local = ct::iota<I64OutTile>();
+    auto out_cols = out_local % OutHalf;
+    auto value0 = bf16_round(out_acc0);
+    auto value1 = bf16_round(out_acc1);
+    if constexpr (UseOutBias) {
+        auto out_bias0 = ct::element_cast<float>(ct::load(b2 + out_cols));
+        auto out_bias1 = ct::element_cast<float>(ct::load(b2 + OutHalf + out_cols));
+        value0 = value0 + out_bias0;
+        value1 = value1 + out_bias1;
+    }
+    out_view.store(ct::element_cast<__nv_bfloat16>(value0), tile_m, 0);
+    out_view.store(ct::element_cast<__nv_bfloat16>(value1), tile_m, 1);
+}
+
+template <int TM,
+          int GeluMode = kGeluErf,
+          int TK = kTileK,
+          int THidden = 32,
+	          bool W2LatencyHint = false,
+	          bool GroupOutputOrder = false,
+	          bool UseHiddenBias = true,
+	          bool UseOutBias = true,
+	          bool W1LatencyHint = false,
+          bool RoundHiddenAcc = true,
+	          bool RoundOutAcc = RoundHiddenAcc,
+	          typename IndexElement = long long,
+	          bool StagedHiddenEpilogue = false,
+	          bool W2TempLoads = false,
+	          bool W1BatchedMMA = false,
+	          bool W2BatchedMMA = false,
+	          int MemoryLatency = 8>
+static __tile__ void ffn12_fused_split2_pairh32_bf16_body(
+    const __nv_bfloat16* __restrict__ a,
+    const __nv_bfloat16* __restrict__ w1_nt,
+    const __nv_bfloat16* __restrict__ b1,
+    const __nv_bfloat16* __restrict__ w2_nt,
+    const __nv_bfloat16* __restrict__ b2,
+    __nv_bfloat16* __restrict__ out) {
+    constexpr int OutHalf = kOut / 2;
+    static_assert(kIn % TK == 0);
+    static_assert(kHidden % (2 * THidden) == 0);
+    using HiddenAccTile = ct::tile<float, ct::shape<TM, THidden>>;
+    using OutAccTile = ct::tile<float, ct::shape<TM, OutHalf>>;
+    using ATile = ct::tile<__nv_bfloat16, ct::shape<TM, TK>>;
+    using W1Tile = ct::tile<__nv_bfloat16, ct::shape<TK, THidden>>;
+    using W2Tile = ct::tile<__nv_bfloat16, ct::shape<THidden, OutHalf>>;
+    using HiddenPairAccTile = ct::tile<float, ct::shape<2, TM, THidden>>;
+    using OutPairAccTile = ct::tile<float, ct::shape<2, TM, OutHalf>>;
+    using W1PairTile = ct::tile<__nv_bfloat16, ct::shape<2, TK, THidden>>;
+    using W2PairTile = ct::tile<__nv_bfloat16, ct::shape<2, THidden, OutHalf>>;
+    using IndexHiddenTile = ct::tile<IndexElement, ct::shape<TM, THidden>>;
+    using IndexOutTile = ct::tile<IndexElement, ct::shape<TM, OutHalf>>;
+    static_assert(!W2BatchedMMA || (!W2LatencyHint && !GroupOutputOrder &&
+                                    !StagedHiddenEpilogue && !W2TempLoads));
+
+    a = ct::assume_aligned(a, 16_ic);
+    w1_nt = ct::assume_aligned(w1_nt, 16_ic);
+    b1 = ct::assume_aligned(b1, 16_ic);
+    w2_nt = ct::assume_aligned(w2_nt, 16_ic);
+    b2 = ct::assume_aligned(b2, 16_ic);
+    out = ct::assume_aligned(out, 16_ic);
+
+    auto a_view = ct::partition_view{
+        ct::tensor_span{a, ct::shape<kM, kIn>{}},
+        ct::shape<TM, TK>{}
+    };
+    auto w1_view = ct::partition_view{
+        ct::tensor_span{w1_nt, ct::shape<kIn, kHidden>{}, ct::layout_left{}},
+        ct::shape<TK, THidden>{}
+    };
+    auto w2_view = ct::partition_view{
+        ct::tensor_span{w2_nt, ct::shape<kHidden, kOut>{}, ct::layout_left{}},
+        ct::shape<THidden, OutHalf>{}
+    };
+    auto out_view = ct::partition_view{
+        ct::tensor_span{out, ct::shape<kM, kOut>{}},
+        ct::shape<TM, OutHalf>{}
+    };
+
+    auto [tile_m, tile_n, tile_z] = ct::bid();
+    (void)tile_n;
+    (void)tile_z;
+
+    auto out_acc0 = ct::full<OutAccTile>(0.0f);
+    auto out_acc1 = ct::full<OutAccTile>(0.0f);
+    auto out_pair_acc = ct::full<OutPairAccTile>(0.0f);
+    IndexHiddenTile hidden_local = ct::iota<IndexHiddenTile>();
+    for (auto hidden_pair : ct::irange(std::size_t{0},
+                                       std::size_t{kHidden / (2 * THidden)})) {
+        auto hidden_tile0 = hidden_pair * 2;
+        auto hidden_tile1 = hidden_tile0 + 1;
+        auto hidden_acc0 = ct::full<HiddenAccTile>(0.0f);
+        auto hidden_acc1 = ct::full<HiddenAccTile>(0.0f);
+        if constexpr (W1BatchedMMA) {
+            static_assert(!W1LatencyHint);
+            auto hidden_pair_acc = ct::full<HiddenPairAccTile>(0.0f);
+            for (auto kk : ct::irange(std::size_t{0}, std::size_t{kIn / TK})) {
+                auto a_tile = a_view.load(tile_m, kk);
+                auto a_pair = ct::reshape(a_tile, ct::shape<1, TM, TK>{});
+                W1PairTile w1_pair = ct::reshape(
+                    ct::cat<0>(w1_view.load(kk, hidden_tile0),
+                               w1_view.load(kk, hidden_tile1)),
+                    ct::shape<2, TK, THidden>{});
+                hidden_pair_acc = ct::mma(a_pair, w1_pair, hidden_pair_acc);
+            }
+            hidden_acc0 = ct::reshape(
+                ct::extract(hidden_pair_acc, ct::shape<1, TM, THidden>{}, 0, 0, 0),
+                ct::shape<TM, THidden>{});
+            hidden_acc1 = ct::reshape(
+                ct::extract(hidden_pair_acc, ct::shape<1, TM, THidden>{}, 1, 0, 0),
+                ct::shape<TM, THidden>{});
+        } else {
+            for (auto kk : ct::irange(std::size_t{0}, std::size_t{kIn / TK})) {
+                if constexpr (W1LatencyHint) {
+                    ATile a_tile;
+                    W1Tile w1_0;
+                    W1Tile w1_1;
+                    [[cutile::hint(0, latency=MemoryLatency)]]
+                    a_tile = a_view.load(tile_m, kk);
+                    [[cutile::hint(0, latency=MemoryLatency)]]
+                    w1_0 = w1_view.load(kk, hidden_tile0);
+                    [[cutile::hint(0, latency=MemoryLatency)]]
+                    w1_1 = w1_view.load(kk, hidden_tile1);
+                    hidden_acc0 = ct::mma(a_tile, w1_0, hidden_acc0);
+                    hidden_acc1 = ct::mma(a_tile, w1_1, hidden_acc1);
+                } else {
+                    auto a_tile = a_view.load(tile_m, kk);
+                    hidden_acc0 = ct::mma(a_tile, w1_view.load(kk, hidden_tile0), hidden_acc0);
+                    hidden_acc1 = ct::mma(a_tile, w1_view.load(kk, hidden_tile1), hidden_acc1);
+                }
+            }
+        }
+
+        auto hidden_cols0 =
+            static_cast<IndexElement>(hidden_tile0) * THidden + (hidden_local % THidden);
+        auto hidden_cols1 =
+            static_cast<IndexElement>(hidden_tile1) * THidden + (hidden_local % THidden);
+        if constexpr (StagedHiddenEpilogue) {
+            static_assert(!GroupOutputOrder);
+            auto hidden_value0 = bf16_round_if<RoundHiddenAcc>(hidden_acc0);
+            if constexpr (UseHiddenBias) {
+                auto hidden_bias0 = ct::element_cast<float>(ct::load(b1 + hidden_cols0));
+                hidden_value0 = hidden_value0 + hidden_bias0;
+            } else {
+                (void)hidden_cols0;
+            }
+            hidden_value0 = gelu_selected<GeluMode>(hidden_value0);
+            auto hidden_bf16_0 = ct::element_cast<__nv_bfloat16>(hidden_value0);
+            if constexpr (W2LatencyHint || W2TempLoads) {
+                W2Tile w2_00;
+                W2Tile w2_01;
+                if constexpr (W2LatencyHint) {
+                    [[cutile::hint(0, latency=MemoryLatency)]]
+                    w2_00 = w2_view.load(hidden_tile0, 0);
+                    [[cutile::hint(0, latency=MemoryLatency)]]
+                    w2_01 = w2_view.load(hidden_tile0, 1);
+                } else {
+                    w2_00 = w2_view.load(hidden_tile0, 0);
+                    w2_01 = w2_view.load(hidden_tile0, 1);
+                }
+                out_acc0 = ct::mma(hidden_bf16_0, w2_00, out_acc0);
+                out_acc1 = ct::mma(hidden_bf16_0, w2_01, out_acc1);
+            } else {
+                out_acc0 = ct::mma(hidden_bf16_0, w2_view.load(hidden_tile0, 0), out_acc0);
+                out_acc1 = ct::mma(hidden_bf16_0, w2_view.load(hidden_tile0, 1), out_acc1);
+            }
+
+            auto hidden_value1 = bf16_round_if<RoundHiddenAcc>(hidden_acc1);
+            if constexpr (UseHiddenBias) {
+                auto hidden_bias1 = ct::element_cast<float>(ct::load(b1 + hidden_cols1));
+                hidden_value1 = hidden_value1 + hidden_bias1;
+            } else {
+                (void)hidden_cols1;
+            }
+            hidden_value1 = gelu_selected<GeluMode>(hidden_value1);
+            auto hidden_bf16_1 = ct::element_cast<__nv_bfloat16>(hidden_value1);
+            if constexpr (W2LatencyHint || W2TempLoads) {
+                W2Tile w2_10;
+                W2Tile w2_11;
+                if constexpr (W2LatencyHint) {
+                    [[cutile::hint(0, latency=MemoryLatency)]]
+                    w2_10 = w2_view.load(hidden_tile1, 0);
+                    [[cutile::hint(0, latency=MemoryLatency)]]
+                    w2_11 = w2_view.load(hidden_tile1, 1);
+                } else {
+                    w2_10 = w2_view.load(hidden_tile1, 0);
+                    w2_11 = w2_view.load(hidden_tile1, 1);
+                }
+                out_acc0 = ct::mma(hidden_bf16_1, w2_10, out_acc0);
+                out_acc1 = ct::mma(hidden_bf16_1, w2_11, out_acc1);
+            } else {
+                out_acc0 = ct::mma(hidden_bf16_1, w2_view.load(hidden_tile1, 0), out_acc0);
+                out_acc1 = ct::mma(hidden_bf16_1, w2_view.load(hidden_tile1, 1), out_acc1);
+            }
+        } else {
+            auto hidden_value0 = bf16_round_if<RoundHiddenAcc>(hidden_acc0);
+            auto hidden_value1 = bf16_round_if<RoundHiddenAcc>(hidden_acc1);
+            if constexpr (UseHiddenBias) {
+                auto hidden_bias0 = ct::element_cast<float>(ct::load(b1 + hidden_cols0));
+                auto hidden_bias1 = ct::element_cast<float>(ct::load(b1 + hidden_cols1));
+                hidden_value0 = hidden_value0 + hidden_bias0;
+                hidden_value1 = hidden_value1 + hidden_bias1;
+            } else {
+                (void)hidden_cols0;
+                (void)hidden_cols1;
+            }
+            hidden_value0 = gelu_selected<GeluMode>(hidden_value0);
+            hidden_value1 = gelu_selected<GeluMode>(hidden_value1);
+            auto hidden_bf16_0 = ct::element_cast<__nv_bfloat16>(hidden_value0);
+            auto hidden_bf16_1 = ct::element_cast<__nv_bfloat16>(hidden_value1);
+            if constexpr (W2BatchedMMA) {
+                auto hidden_pair0 = ct::reshape(hidden_bf16_0,
+                                                ct::shape<1, TM, THidden>{});
+                auto hidden_pair1 = ct::reshape(hidden_bf16_1,
+                                                ct::shape<1, TM, THidden>{});
+                W2PairTile w2_pair0 = ct::reshape(
+                    ct::cat<0>(w2_view.load(hidden_tile0, 0),
+                               w2_view.load(hidden_tile0, 1)),
+                    ct::shape<2, THidden, OutHalf>{});
+                W2PairTile w2_pair1 = ct::reshape(
+                    ct::cat<0>(w2_view.load(hidden_tile1, 0),
+                               w2_view.load(hidden_tile1, 1)),
+                    ct::shape<2, THidden, OutHalf>{});
+                out_pair_acc = ct::mma(hidden_pair0, w2_pair0, out_pair_acc);
+                out_pair_acc = ct::mma(hidden_pair1, w2_pair1, out_pair_acc);
+            } else if constexpr (W2LatencyHint || W2TempLoads) {
+                W2Tile w2_00;
+                W2Tile w2_01;
+                W2Tile w2_10;
+                W2Tile w2_11;
+                if constexpr (W2LatencyHint) {
+                    [[cutile::hint(0, latency=MemoryLatency)]]
+                    w2_00 = w2_view.load(hidden_tile0, 0);
+                    [[cutile::hint(0, latency=MemoryLatency)]]
+                    w2_01 = w2_view.load(hidden_tile0, 1);
+                    [[cutile::hint(0, latency=MemoryLatency)]]
+                    w2_10 = w2_view.load(hidden_tile1, 0);
+                    [[cutile::hint(0, latency=MemoryLatency)]]
+                    w2_11 = w2_view.load(hidden_tile1, 1);
+                } else {
+                    w2_00 = w2_view.load(hidden_tile0, 0);
+                    w2_01 = w2_view.load(hidden_tile0, 1);
+                    w2_10 = w2_view.load(hidden_tile1, 0);
+                    w2_11 = w2_view.load(hidden_tile1, 1);
+                }
+                out_acc0 = ct::mma(hidden_bf16_0, w2_00, out_acc0);
+                out_acc1 = ct::mma(hidden_bf16_0, w2_01, out_acc1);
+                out_acc0 = ct::mma(hidden_bf16_1, w2_10, out_acc0);
+                out_acc1 = ct::mma(hidden_bf16_1, w2_11, out_acc1);
+            } else if constexpr (GroupOutputOrder) {
+                out_acc0 = ct::mma(hidden_bf16_0, w2_view.load(hidden_tile0, 0), out_acc0);
+                out_acc0 = ct::mma(hidden_bf16_1, w2_view.load(hidden_tile1, 0), out_acc0);
+                out_acc1 = ct::mma(hidden_bf16_0, w2_view.load(hidden_tile0, 1), out_acc1);
+                out_acc1 = ct::mma(hidden_bf16_1, w2_view.load(hidden_tile1, 1), out_acc1);
+            } else {
+                out_acc0 = ct::mma(hidden_bf16_0, w2_view.load(hidden_tile0, 0), out_acc0);
+                out_acc1 = ct::mma(hidden_bf16_0, w2_view.load(hidden_tile0, 1), out_acc1);
+                out_acc0 = ct::mma(hidden_bf16_1, w2_view.load(hidden_tile1, 0), out_acc0);
+                out_acc1 = ct::mma(hidden_bf16_1, w2_view.load(hidden_tile1, 1), out_acc1);
+            }
+        }
+    }
+
+    if constexpr (W2BatchedMMA) {
+        out_acc0 = ct::reshape(
+            ct::extract(out_pair_acc, ct::shape<1, TM, OutHalf>{}, 0, 0, 0),
+            ct::shape<TM, OutHalf>{});
+        out_acc1 = ct::reshape(
+            ct::extract(out_pair_acc, ct::shape<1, TM, OutHalf>{}, 1, 0, 0),
+            ct::shape<TM, OutHalf>{});
+    }
+    IndexOutTile out_local = ct::iota<IndexOutTile>();
+    auto out_cols = out_local % OutHalf;
+    auto value0 = bf16_round_if<RoundOutAcc>(out_acc0);
+    auto value1 = bf16_round_if<RoundOutAcc>(out_acc1);
+    if constexpr (UseOutBias) {
+        auto out_bias0 = ct::element_cast<float>(ct::load(b2 + out_cols));
+        auto out_bias1 = ct::element_cast<float>(ct::load(b2 + OutHalf + out_cols));
+        value0 = value0 + out_bias0;
+        value1 = value1 + out_bias1;
+    } else {
+        (void)out_cols;
+    }
+    out_view.store(ct::element_cast<__nv_bfloat16>(value0), tile_m, 0);
+    out_view.store(ct::element_cast<__nv_bfloat16>(value1), tile_m, 1);
+}
+
+template <int TM,
+          int GeluMode = kGeluErf,
+          int TK = kTileK,
+          int THidden = 32,
+	          bool W2LatencyHint = false,
+	          bool GroupOutputOrder = false,
+	          bool UseHiddenBias = true,
+	          bool UseOutBias = true,
+	          bool W1LatencyHint = false,
+          bool RoundHiddenAcc = true,
+	          bool RoundOutAcc = RoundHiddenAcc,
+	          typename IndexElement = long long,
+	          bool StagedHiddenEpilogue = false,
+	          bool W2TempLoads = false,
+	          bool W1BatchedMMA = false,
+	          bool W2BatchedMMA = false,
+	          int MemoryLatency = 8>
+__tile_global__ void ffn12_fused_split2_pairh32_bf16_kernel(
+    const __nv_bfloat16* __restrict__ a,
+    const __nv_bfloat16* __restrict__ w1_nt,
+    const __nv_bfloat16* __restrict__ b1,
+    const __nv_bfloat16* __restrict__ w2_nt,
+    const __nv_bfloat16* __restrict__ b2,
+    __nv_bfloat16* __restrict__ out) {
+    ffn12_fused_split2_pairh32_bf16_body
+        <TM, GeluMode, TK, THidden, W2LatencyHint, GroupOutputOrder,
+	         UseHiddenBias, UseOutBias, W1LatencyHint, RoundHiddenAcc, RoundOutAcc,
+	         IndexElement, StagedHiddenEpilogue, W2TempLoads, W1BatchedMMA,
+	         W2BatchedMMA, MemoryLatency>(
+	        a, w1_nt, b1, w2_nt, b2, out);
+}
+
+template <int TM,
+          int GeluMode = kGeluErf,
+          int TK = kTileK,
+          int THidden = 32,
+	          bool W2LatencyHint = false,
+	          bool GroupOutputOrder = false,
+	          bool UseHiddenBias = true,
+	          bool UseOutBias = true,
+	          bool W1LatencyHint = false,
+          bool RoundHiddenAcc = true,
+	          bool RoundOutAcc = RoundHiddenAcc,
+	          typename IndexElement = long long,
+	          bool StagedHiddenEpilogue = false,
+	          bool W2TempLoads = false,
+	          bool W1BatchedMMA = false,
+	          bool W2BatchedMMA = false,
+	          int MemoryLatency = 8>
+[[cutile::hint(860, occupancy=2)]]
+__tile_global__ void ffn12_fused_split2_pairh32_occ2_bf16_kernel(
+    const __nv_bfloat16* __restrict__ a,
+    const __nv_bfloat16* __restrict__ w1_nt,
+    const __nv_bfloat16* __restrict__ b1,
+    const __nv_bfloat16* __restrict__ w2_nt,
+    const __nv_bfloat16* __restrict__ b2,
+    __nv_bfloat16* __restrict__ out) {
+    ffn12_fused_split2_pairh32_bf16_body
+        <TM, GeluMode, TK, THidden, W2LatencyHint, GroupOutputOrder,
+	         UseHiddenBias, UseOutBias, W1LatencyHint, RoundHiddenAcc, RoundOutAcc,
+	         IndexElement, StagedHiddenEpilogue, W2TempLoads, W1BatchedMMA,
+	         W2BatchedMMA, MemoryLatency>(
+	        a, w1_nt, b1, w2_nt, b2, out);
+}
+
+#ifdef CUDASEP_FFN12_CANDIDATES_ONLY
+template <int TM, int GeluMode = kGeluErfPoly9L30, int TK = 64, int THidden = 32>
+__tile_global__ void ffn12_fused_split2_pairh32_bkn_bf16_kernel(
+    const __nv_bfloat16* __restrict__ a,
+    const __nv_bfloat16* __restrict__ w1_bkn,
+    const __nv_bfloat16* __restrict__ b1,
+    const __nv_bfloat16* __restrict__ w2_bkn,
+    const __nv_bfloat16* __restrict__ b2,
+    __nv_bfloat16* __restrict__ out) {
+    constexpr int OutHalf = kOut / 2;
+    static_assert(kIn % TK == 0);
+    static_assert(kHidden % (2 * THidden) == 0);
+    using HiddenAccTile = ct::tile<float, ct::shape<TM, THidden>>;
+    using OutAccTile = ct::tile<float, ct::shape<TM, OutHalf>>;
+    using ATile = ct::tile<__nv_bfloat16, ct::shape<TM, TK>>;
+    using I64HiddenTile = ct::tile<long long, ct::shape<TM, THidden>>;
+    using I64OutTile = ct::tile<long long, ct::shape<TM, OutHalf>>;
+
+    a = ct::assume_aligned(a, 16_ic);
+    w1_bkn = ct::assume_aligned(w1_bkn, 16_ic);
+    b1 = ct::assume_aligned(b1, 16_ic);
+    w2_bkn = ct::assume_aligned(w2_bkn, 16_ic);
+    b2 = ct::assume_aligned(b2, 16_ic);
+    out = ct::assume_aligned(out, 16_ic);
+
+    auto a_view = ct::partition_view{
+        ct::tensor_span{a, ct::shape<kM, kIn>{}},
+        ct::shape<TM, TK>{}
+    };
+    auto w1_view = ct::partition_view{
+        ct::tensor_span{w1_bkn, ct::shape<kIn, kHidden>{}},
+        ct::shape<TK, THidden>{}
+    };
+    auto w2_view = ct::partition_view{
+        ct::tensor_span{w2_bkn, ct::shape<kHidden, kOut>{}},
+        ct::shape<THidden, OutHalf>{}
+    };
+    auto out_view = ct::partition_view{
+        ct::tensor_span{out, ct::shape<kM, kOut>{}},
+        ct::shape<TM, OutHalf>{}
+    };
+
+    auto [tile_m, tile_n, tile_z] = ct::bid();
+    (void)tile_n;
+    (void)tile_z;
+
+    auto out_acc0 = ct::full<OutAccTile>(0.0f);
+    auto out_acc1 = ct::full<OutAccTile>(0.0f);
+    I64HiddenTile hidden_local = ct::iota<I64HiddenTile>();
+    for (auto hidden_pair : ct::irange(std::size_t{0},
+                                       std::size_t{kHidden / (2 * THidden)})) {
+        auto hidden_tile0 = hidden_pair * 2;
+        auto hidden_tile1 = hidden_tile0 + 1;
+        auto hidden_acc0 = ct::full<HiddenAccTile>(0.0f);
+        auto hidden_acc1 = ct::full<HiddenAccTile>(0.0f);
+        for (auto kk : ct::irange(std::size_t{0}, std::size_t{kIn / TK})) {
+            ATile a_tile = a_view.load(tile_m, kk);
+            hidden_acc0 = ct::mma(a_tile, w1_view.load(kk, hidden_tile0), hidden_acc0);
+            hidden_acc1 = ct::mma(a_tile, w1_view.load(kk, hidden_tile1), hidden_acc1);
+        }
+
+        auto hidden_cols0 =
+            static_cast<long long>(hidden_tile0) * THidden + (hidden_local % THidden);
+        auto hidden_cols1 =
+            static_cast<long long>(hidden_tile1) * THidden + (hidden_local % THidden);
+        auto hidden_bias0 = ct::element_cast<float>(ct::load(b1 + hidden_cols0));
+        auto hidden_bias1 = ct::element_cast<float>(ct::load(b1 + hidden_cols1));
+        auto hidden_value0 = gelu_selected<GeluMode>(bf16_round(hidden_acc0) + hidden_bias0);
+        auto hidden_value1 = gelu_selected<GeluMode>(bf16_round(hidden_acc1) + hidden_bias1);
+        auto hidden_bf16_0 = ct::element_cast<__nv_bfloat16>(hidden_value0);
+        auto hidden_bf16_1 = ct::element_cast<__nv_bfloat16>(hidden_value1);
+        out_acc0 = ct::mma(hidden_bf16_0, w2_view.load(hidden_tile0, 0), out_acc0);
+        out_acc1 = ct::mma(hidden_bf16_0, w2_view.load(hidden_tile0, 1), out_acc1);
+        out_acc0 = ct::mma(hidden_bf16_1, w2_view.load(hidden_tile1, 0), out_acc0);
+        out_acc1 = ct::mma(hidden_bf16_1, w2_view.load(hidden_tile1, 1), out_acc1);
+    }
+
+    I64OutTile out_local = ct::iota<I64OutTile>();
+    auto out_cols = out_local % OutHalf;
+    auto out_bias0 = ct::element_cast<float>(ct::load(b2 + out_cols));
+    auto out_bias1 = ct::element_cast<float>(ct::load(b2 + OutHalf + out_cols));
+    auto value0 = bf16_round(out_acc0) + out_bias0;
+    auto value1 = bf16_round(out_acc1) + out_bias1;
+    out_view.store(ct::element_cast<__nv_bfloat16>(value0), tile_m, 0);
+    out_view.store(ct::element_cast<__nv_bfloat16>(value1), tile_m, 1);
+}
+
+template <int TM, int GeluMode = kGeluErfPoly9L30, int TK = 64, int THidden = 32>
+__tile_global__ void ffn12_fused_split2_pairh32_w2splitspan_bf16_kernel(
+    const __nv_bfloat16* __restrict__ a,
+    const __nv_bfloat16* __restrict__ w1_nt,
+    const __nv_bfloat16* __restrict__ b1,
+    const __nv_bfloat16* __restrict__ w2_nt,
+    const __nv_bfloat16* __restrict__ b2,
+    __nv_bfloat16* __restrict__ out) {
+    constexpr int OutHalf = kOut / 2;
+    static_assert(kIn % TK == 0);
+    static_assert(kHidden % (2 * THidden) == 0);
+    using HiddenAccTile = ct::tile<float, ct::shape<TM, THidden>>;
+    using OutAccTile = ct::tile<float, ct::shape<TM, OutHalf>>;
+    using ATile = ct::tile<__nv_bfloat16, ct::shape<TM, TK>>;
+    using I64HiddenTile = ct::tile<long long, ct::shape<TM, THidden>>;
+    using I64OutTile = ct::tile<long long, ct::shape<TM, OutHalf>>;
+
+    a = ct::assume_aligned(a, 16_ic);
+    w1_nt = ct::assume_aligned(w1_nt, 16_ic);
+    b1 = ct::assume_aligned(b1, 16_ic);
+    w2_nt = ct::assume_aligned(w2_nt, 16_ic);
+    auto w2_nt_1 = ct::assume_aligned(w2_nt + static_cast<long long>(OutHalf) * kHidden,
+                                      16_ic);
+    b2 = ct::assume_aligned(b2, 16_ic);
+    out = ct::assume_aligned(out, 16_ic);
+
+    auto a_view = ct::partition_view{
+        ct::tensor_span{a, ct::shape<kM, kIn>{}},
+        ct::shape<TM, TK>{}
+    };
+    auto w1_view = ct::partition_view{
+        ct::tensor_span{w1_nt, ct::shape<kIn, kHidden>{}, ct::layout_left{}},
+        ct::shape<TK, THidden>{}
+    };
+    auto w2_view0 = ct::partition_view{
+        ct::tensor_span{w2_nt, ct::shape<kHidden, OutHalf>{}, ct::layout_left{}},
+        ct::shape<THidden, OutHalf>{}
+    };
+    auto w2_view1 = ct::partition_view{
+        ct::tensor_span{w2_nt_1, ct::shape<kHidden, OutHalf>{}, ct::layout_left{}},
+        ct::shape<THidden, OutHalf>{}
+    };
+    auto out_view = ct::partition_view{
+        ct::tensor_span{out, ct::shape<kM, kOut>{}},
+        ct::shape<TM, OutHalf>{}
+    };
+
+    auto [tile_m, tile_n, tile_z] = ct::bid();
+    (void)tile_n;
+    (void)tile_z;
+
+    auto out_acc0 = ct::full<OutAccTile>(0.0f);
+    auto out_acc1 = ct::full<OutAccTile>(0.0f);
+    I64HiddenTile hidden_local = ct::iota<I64HiddenTile>();
+    for (auto hidden_pair : ct::irange(std::size_t{0},
+                                       std::size_t{kHidden / (2 * THidden)})) {
+        auto hidden_tile0 = hidden_pair * 2;
+        auto hidden_tile1 = hidden_tile0 + 1;
+        auto hidden_acc0 = ct::full<HiddenAccTile>(0.0f);
+        auto hidden_acc1 = ct::full<HiddenAccTile>(0.0f);
+        for (auto kk : ct::irange(std::size_t{0}, std::size_t{kIn / TK})) {
+            ATile a_tile = a_view.load(tile_m, kk);
+            hidden_acc0 = ct::mma(a_tile, w1_view.load(kk, hidden_tile0), hidden_acc0);
+            hidden_acc1 = ct::mma(a_tile, w1_view.load(kk, hidden_tile1), hidden_acc1);
+        }
+
+        auto hidden_cols0 =
+            static_cast<long long>(hidden_tile0) * THidden + (hidden_local % THidden);
+        auto hidden_cols1 =
+            static_cast<long long>(hidden_tile1) * THidden + (hidden_local % THidden);
+        auto hidden_bias0 = ct::element_cast<float>(ct::load(b1 + hidden_cols0));
+        auto hidden_bias1 = ct::element_cast<float>(ct::load(b1 + hidden_cols1));
+        auto hidden_value0 = gelu_selected<GeluMode>(bf16_round(hidden_acc0) + hidden_bias0);
+        auto hidden_value1 = gelu_selected<GeluMode>(bf16_round(hidden_acc1) + hidden_bias1);
+        auto hidden_bf16_0 = ct::element_cast<__nv_bfloat16>(hidden_value0);
+        auto hidden_bf16_1 = ct::element_cast<__nv_bfloat16>(hidden_value1);
+        out_acc0 = ct::mma(hidden_bf16_0, w2_view0.load(hidden_tile0, 0), out_acc0);
+        out_acc1 = ct::mma(hidden_bf16_0, w2_view1.load(hidden_tile0, 0), out_acc1);
+        out_acc0 = ct::mma(hidden_bf16_1, w2_view0.load(hidden_tile1, 0), out_acc0);
+        out_acc1 = ct::mma(hidden_bf16_1, w2_view1.load(hidden_tile1, 0), out_acc1);
+    }
+
+    I64OutTile out_local = ct::iota<I64OutTile>();
+    auto out_cols = out_local % OutHalf;
+    auto out_bias0 = ct::element_cast<float>(ct::load(b2 + out_cols));
+    auto out_bias1 = ct::element_cast<float>(ct::load(b2 + OutHalf + out_cols));
+    auto value0 = bf16_round(out_acc0) + out_bias0;
+    auto value1 = bf16_round(out_acc1) + out_bias1;
+    out_view.store(ct::element_cast<__nv_bfloat16>(value0), tile_m, 0);
+    out_view.store(ct::element_cast<__nv_bfloat16>(value1), tile_m, 1);
+}
+
+template <int TM, int GeluMode = kGeluErfPoly9L30, int TK = 64, int THidden = 32>
+__tile_global__ void ffn12_fused_split2_pairh32_w2manual_bf16_kernel(
+    const __nv_bfloat16* __restrict__ a,
+    const __nv_bfloat16* __restrict__ w1_nt,
+    const __nv_bfloat16* __restrict__ b1,
+    const __nv_bfloat16* __restrict__ w2_nt,
+    const __nv_bfloat16* __restrict__ b2,
+    __nv_bfloat16* __restrict__ out) {
+    constexpr int OutHalf = kOut / 2;
+    static_assert(kIn % TK == 0);
+    static_assert(kHidden % (2 * THidden) == 0);
+    using HiddenAccTile = ct::tile<float, ct::shape<TM, THidden>>;
+    using OutAccTile = ct::tile<float, ct::shape<TM, OutHalf>>;
+    using ATile = ct::tile<__nv_bfloat16, ct::shape<TM, TK>>;
+    using W2Tile = ct::tile<__nv_bfloat16, ct::shape<THidden, OutHalf>>;
+    using I64HiddenTile = ct::tile<long long, ct::shape<TM, THidden>>;
+    using I64OutTile = ct::tile<long long, ct::shape<TM, OutHalf>>;
+    using I64W2Tile = ct::tile<long long, ct::shape<THidden, OutHalf>>;
+
+    a = ct::assume_aligned(a, 16_ic);
+    w1_nt = ct::assume_aligned(w1_nt, 16_ic);
+    b1 = ct::assume_aligned(b1, 16_ic);
+    w2_nt = ct::assume_aligned(w2_nt, 16_ic);
+    b2 = ct::assume_aligned(b2, 16_ic);
+    out = ct::assume_aligned(out, 16_ic);
+
+    auto a_view = ct::partition_view{
+        ct::tensor_span{a, ct::shape<kM, kIn>{}},
+        ct::shape<TM, TK>{}
+    };
+    auto w1_view = ct::partition_view{
+        ct::tensor_span{w1_nt, ct::shape<kIn, kHidden>{}, ct::layout_left{}},
+        ct::shape<TK, THidden>{}
+    };
+    auto out_view = ct::partition_view{
+        ct::tensor_span{out, ct::shape<kM, kOut>{}},
+        ct::shape<TM, OutHalf>{}
+    };
+
+    auto [tile_m, tile_n, tile_z] = ct::bid();
+    (void)tile_n;
+    (void)tile_z;
+
+    auto out_acc0 = ct::full<OutAccTile>(0.0f);
+    auto out_acc1 = ct::full<OutAccTile>(0.0f);
+    I64HiddenTile hidden_local = ct::iota<I64HiddenTile>();
+    I64W2Tile w2_local = ct::iota<I64W2Tile>();
+    auto w2_row = w2_local / OutHalf;
+    auto w2_col = w2_local - w2_row * OutHalf;
+    for (auto hidden_pair : ct::irange(std::size_t{0},
+                                       std::size_t{kHidden / (2 * THidden)})) {
+        auto hidden_tile0 = hidden_pair * 2;
+        auto hidden_tile1 = hidden_tile0 + 1;
+        auto hidden_acc0 = ct::full<HiddenAccTile>(0.0f);
+        auto hidden_acc1 = ct::full<HiddenAccTile>(0.0f);
+        for (auto kk : ct::irange(std::size_t{0}, std::size_t{kIn / TK})) {
+            ATile a_tile = a_view.load(tile_m, kk);
+            hidden_acc0 = ct::mma(a_tile, w1_view.load(kk, hidden_tile0), hidden_acc0);
+            hidden_acc1 = ct::mma(a_tile, w1_view.load(kk, hidden_tile1), hidden_acc1);
+        }
+
+        auto hidden_cols0 =
+            static_cast<long long>(hidden_tile0) * THidden + (hidden_local % THidden);
+        auto hidden_cols1 =
+            static_cast<long long>(hidden_tile1) * THidden + (hidden_local % THidden);
+        auto hidden_bias0 = ct::element_cast<float>(ct::load(b1 + hidden_cols0));
+        auto hidden_bias1 = ct::element_cast<float>(ct::load(b1 + hidden_cols1));
+        auto hidden_value0 = gelu_selected<GeluMode>(bf16_round(hidden_acc0) + hidden_bias0);
+        auto hidden_value1 = gelu_selected<GeluMode>(bf16_round(hidden_acc1) + hidden_bias1);
+        auto hidden_bf16_0 = ct::element_cast<__nv_bfloat16>(hidden_value0);
+        auto hidden_bf16_1 = ct::element_cast<__nv_bfloat16>(hidden_value1);
+
+        auto hidden_base0 = static_cast<long long>(hidden_tile0) * THidden;
+        auto hidden_base1 = static_cast<long long>(hidden_tile1) * THidden;
+        W2Tile w2_00 = ct::load(w2_nt + hidden_base0 + w2_row + w2_col * kHidden);
+        W2Tile w2_01 =
+            ct::load(w2_nt + hidden_base0 + w2_row + (OutHalf + w2_col) * kHidden);
+        W2Tile w2_10 = ct::load(w2_nt + hidden_base1 + w2_row + w2_col * kHidden);
+        W2Tile w2_11 =
+            ct::load(w2_nt + hidden_base1 + w2_row + (OutHalf + w2_col) * kHidden);
+        out_acc0 = ct::mma(hidden_bf16_0, w2_00, out_acc0);
+        out_acc1 = ct::mma(hidden_bf16_0, w2_01, out_acc1);
+        out_acc0 = ct::mma(hidden_bf16_1, w2_10, out_acc0);
+        out_acc1 = ct::mma(hidden_bf16_1, w2_11, out_acc1);
+    }
+
+    I64OutTile out_local = ct::iota<I64OutTile>();
+    auto out_cols = out_local % OutHalf;
+    auto out_bias0 = ct::element_cast<float>(ct::load(b2 + out_cols));
+    auto out_bias1 = ct::element_cast<float>(ct::load(b2 + OutHalf + out_cols));
+    auto value0 = bf16_round(out_acc0) + out_bias0;
+    auto value1 = bf16_round(out_acc1) + out_bias1;
+    out_view.store(ct::element_cast<__nv_bfloat16>(value0), tile_m, 0);
+    out_view.store(ct::element_cast<__nv_bfloat16>(value1), tile_m, 1);
+}
+#endif
+
+template <int Groups,
+          int TM = 32,
+          int GeluMode = kGeluErfPoly9L30,
+          int TK = 64,
+          int THidden = 32>
+__tile_global__ void ffn12_fused_split2_pairh32_hsplit_partial_bf16_kernel(
+    const __nv_bfloat16* __restrict__ a,
+    const __nv_bfloat16* __restrict__ w1_nt,
+    const __nv_bfloat16* __restrict__ b1,
+    const __nv_bfloat16* __restrict__ w2_nt,
+    __nv_bfloat16* __restrict__ partial) {
+    constexpr int OutHalf = kOut / 2;
+    constexpr int PairsPerGroup = kHidden / (Groups * 2 * THidden);
+    static_assert(kIn % TK == 0);
+    static_assert(kHidden % (Groups * 2 * THidden) == 0);
+    using HiddenAccTile = ct::tile<float, ct::shape<TM, THidden>>;
+    using OutAccTile = ct::tile<float, ct::shape<TM, OutHalf>>;
+    using I64HiddenTile = ct::tile<long long, ct::shape<TM, THidden>>;
+
+    a = ct::assume_aligned(a, 16_ic);
+    w1_nt = ct::assume_aligned(w1_nt, 16_ic);
+    b1 = ct::assume_aligned(b1, 16_ic);
+    w2_nt = ct::assume_aligned(w2_nt, 16_ic);
+    partial = ct::assume_aligned(partial, 16_ic);
+
+    auto a_view = ct::partition_view{
+        ct::tensor_span{a, ct::shape<kM, kIn>{}},
+        ct::shape<TM, TK>{}
+    };
+    auto w1_view = ct::partition_view{
+        ct::tensor_span{w1_nt, ct::shape<kIn, kHidden>{}, ct::layout_left{}},
+        ct::shape<TK, THidden>{}
+    };
+    auto w2_view = ct::partition_view{
+        ct::tensor_span{w2_nt, ct::shape<kHidden, kOut>{}, ct::layout_left{}},
+        ct::shape<THidden, OutHalf>{}
+    };
+
+    auto [tile_m, tile_group, tile_z] = ct::bid();
+    (void)tile_z;
+    auto partial_base =
+        partial + static_cast<long long>(tile_group) * static_cast<long long>(kM) * kOut;
+    auto partial_view = ct::partition_view{
+        ct::tensor_span{partial_base, ct::shape<kM, kOut>{}},
+        ct::shape<TM, OutHalf>{}
+    };
+
+    auto out_acc0 = ct::full<OutAccTile>(0.0f);
+    auto out_acc1 = ct::full<OutAccTile>(0.0f);
+    I64HiddenTile hidden_local = ct::iota<I64HiddenTile>();
+    for (auto hidden_pair : ct::irange(std::size_t{0}, std::size_t{PairsPerGroup})) {
+        auto hidden_tile0 = tile_group * (PairsPerGroup * 2) + hidden_pair * 2;
+        auto hidden_tile1 = hidden_tile0 + 1;
+        auto hidden_acc0 = ct::full<HiddenAccTile>(0.0f);
+        auto hidden_acc1 = ct::full<HiddenAccTile>(0.0f);
+        for (auto kk : ct::irange(std::size_t{0}, std::size_t{kIn / TK})) {
+            auto a_tile = a_view.load(tile_m, kk);
+            hidden_acc0 = ct::mma(a_tile, w1_view.load(kk, hidden_tile0), hidden_acc0);
+            hidden_acc1 = ct::mma(a_tile, w1_view.load(kk, hidden_tile1), hidden_acc1);
+        }
+
+        auto hidden_cols0 =
+            static_cast<long long>(hidden_tile0) * THidden + (hidden_local % THidden);
+        auto hidden_cols1 =
+            static_cast<long long>(hidden_tile1) * THidden + (hidden_local % THidden);
+        auto hidden_bias0 = ct::element_cast<float>(ct::load(b1 + hidden_cols0));
+        auto hidden_bias1 = ct::element_cast<float>(ct::load(b1 + hidden_cols1));
+        auto hidden_value0 = gelu_selected<GeluMode>(bf16_round(hidden_acc0) + hidden_bias0);
+        auto hidden_value1 = gelu_selected<GeluMode>(bf16_round(hidden_acc1) + hidden_bias1);
+        auto hidden_bf16_0 = ct::element_cast<__nv_bfloat16>(hidden_value0);
+        auto hidden_bf16_1 = ct::element_cast<__nv_bfloat16>(hidden_value1);
+        out_acc0 = ct::mma(hidden_bf16_0, w2_view.load(hidden_tile0, 0), out_acc0);
+        out_acc1 = ct::mma(hidden_bf16_0, w2_view.load(hidden_tile0, 1), out_acc1);
+        out_acc0 = ct::mma(hidden_bf16_1, w2_view.load(hidden_tile1, 0), out_acc0);
+        out_acc1 = ct::mma(hidden_bf16_1, w2_view.load(hidden_tile1, 1), out_acc1);
+    }
+
+    partial_view.store(ct::element_cast<__nv_bfloat16>(bf16_round(out_acc0)), tile_m, 0);
+    partial_view.store(ct::element_cast<__nv_bfloat16>(bf16_round(out_acc1)), tile_m, 1);
+}
+
+template <int Groups, int TM = 32>
+__tile_global__ void ffn12_hsplit_partial_reduce_bf16_kernel(
+    const __nv_bfloat16* __restrict__ partial,
+    const __nv_bfloat16* __restrict__ b2,
+    __nv_bfloat16* __restrict__ out) {
+    constexpr int OutHalf = kOut / 2;
+    using OutAccTile = ct::tile<float, ct::shape<TM, OutHalf>>;
+    using I64OutTile = ct::tile<long long, ct::shape<TM, OutHalf>>;
+
+    partial = ct::assume_aligned(partial, 16_ic);
+    b2 = ct::assume_aligned(b2, 16_ic);
+    out = ct::assume_aligned(out, 16_ic);
+
+    auto out_view = ct::partition_view{
+        ct::tensor_span{out, ct::shape<kM, kOut>{}},
+        ct::shape<TM, OutHalf>{}
+    };
+
+    auto [tile_m, tile_n, tile_z] = ct::bid();
+    (void)tile_n;
+    (void)tile_z;
+
+    auto acc0 = ct::full<OutAccTile>(0.0f);
+    auto acc1 = ct::full<OutAccTile>(0.0f);
+    for (auto group : ct::irange(std::size_t{0}, std::size_t{Groups})) {
+        auto partial_base =
+            partial + static_cast<long long>(group) * static_cast<long long>(kM) * kOut;
+        auto partial_view = ct::partition_view{
+            ct::tensor_span{partial_base, ct::shape<kM, kOut>{}},
+            ct::shape<TM, OutHalf>{}
+        };
+        acc0 = acc0 + ct::element_cast<float>(partial_view.load(tile_m, 0));
+        acc1 = acc1 + ct::element_cast<float>(partial_view.load(tile_m, 1));
+    }
+
+    I64OutTile out_local = ct::iota<I64OutTile>();
+    auto out_cols = out_local % OutHalf;
+    auto out_bias0 = ct::element_cast<float>(ct::load(b2 + out_cols));
+    auto out_bias1 = ct::element_cast<float>(ct::load(b2 + OutHalf + out_cols));
+    auto value0 = bf16_round(acc0) + out_bias0;
+    auto value1 = bf16_round(acc1) + out_bias1;
+    out_view.store(ct::element_cast<__nv_bfloat16>(value0), tile_m, 0);
+    out_view.store(ct::element_cast<__nv_bfloat16>(value1), tile_m, 1);
+}
+
+template <int TM,
+          int GeluMode = kGeluErf,
+          int TK = kTileK,
+          int THidden = 32>
+__tile_global__ void ffn12_fused_split2_pairh32_quarterout_bf16_kernel(
+    const __nv_bfloat16* __restrict__ a,
+    const __nv_bfloat16* __restrict__ w1_nt,
+    const __nv_bfloat16* __restrict__ b1,
+    const __nv_bfloat16* __restrict__ w2_nt,
+    const __nv_bfloat16* __restrict__ b2,
+    __nv_bfloat16* __restrict__ out) {
+    constexpr int OutQuarter = kOut / 4;
+    static_assert(kIn % TK == 0);
+    static_assert(kHidden % (2 * THidden) == 0);
+    using HiddenAccTile = ct::tile<float, ct::shape<TM, THidden>>;
+    using OutAccTile = ct::tile<float, ct::shape<TM, OutQuarter>>;
+    using I64HiddenTile = ct::tile<long long, ct::shape<TM, THidden>>;
+    using I64OutTile = ct::tile<long long, ct::shape<TM, OutQuarter>>;
+
+    a = ct::assume_aligned(a, 16_ic);
+    w1_nt = ct::assume_aligned(w1_nt, 16_ic);
+    b1 = ct::assume_aligned(b1, 16_ic);
+    w2_nt = ct::assume_aligned(w2_nt, 16_ic);
+    b2 = ct::assume_aligned(b2, 16_ic);
+    out = ct::assume_aligned(out, 16_ic);
+
+    auto a_view = ct::partition_view{
+        ct::tensor_span{a, ct::shape<kM, kIn>{}},
+        ct::shape<TM, TK>{}
+    };
+    auto w1_view = ct::partition_view{
+        ct::tensor_span{w1_nt, ct::shape<kIn, kHidden>{}, ct::layout_left{}},
+        ct::shape<TK, THidden>{}
+    };
+    auto w2_view = ct::partition_view{
+        ct::tensor_span{w2_nt, ct::shape<kHidden, kOut>{}, ct::layout_left{}},
+        ct::shape<THidden, OutQuarter>{}
+    };
+    auto out_view = ct::partition_view{
+        ct::tensor_span{out, ct::shape<kM, kOut>{}},
+        ct::shape<TM, OutQuarter>{}
+    };
+
+    auto [tile_m, tile_n, tile_z] = ct::bid();
+    (void)tile_z;
+
+    auto out_acc = ct::full<OutAccTile>(0.0f);
+    I64HiddenTile hidden_local = ct::iota<I64HiddenTile>();
+    for (auto hidden_pair : ct::irange(std::size_t{0},
+                                       std::size_t{kHidden / (2 * THidden)})) {
+        auto hidden_tile0 = hidden_pair * 2;
+        auto hidden_tile1 = hidden_tile0 + 1;
+        auto hidden_acc0 = ct::full<HiddenAccTile>(0.0f);
+        auto hidden_acc1 = ct::full<HiddenAccTile>(0.0f);
+        for (auto kk : ct::irange(std::size_t{0}, std::size_t{kIn / TK})) {
+            auto a_tile = a_view.load(tile_m, kk);
+            hidden_acc0 = ct::mma(a_tile, w1_view.load(kk, hidden_tile0), hidden_acc0);
+            hidden_acc1 = ct::mma(a_tile, w1_view.load(kk, hidden_tile1), hidden_acc1);
+        }
+
+        auto hidden_cols0 =
+            static_cast<long long>(hidden_tile0) * THidden + (hidden_local % THidden);
+        auto hidden_cols1 =
+            static_cast<long long>(hidden_tile1) * THidden + (hidden_local % THidden);
+        auto hidden_bias0 = ct::element_cast<float>(ct::load(b1 + hidden_cols0));
+        auto hidden_bias1 = ct::element_cast<float>(ct::load(b1 + hidden_cols1));
+        auto hidden_value0 = gelu_selected<GeluMode>(bf16_round(hidden_acc0) + hidden_bias0);
+        auto hidden_value1 = gelu_selected<GeluMode>(bf16_round(hidden_acc1) + hidden_bias1);
+        auto hidden_bf16_0 = ct::element_cast<__nv_bfloat16>(hidden_value0);
+        auto hidden_bf16_1 = ct::element_cast<__nv_bfloat16>(hidden_value1);
+        out_acc = ct::mma(hidden_bf16_0, w2_view.load(hidden_tile0, tile_n), out_acc);
+        out_acc = ct::mma(hidden_bf16_1, w2_view.load(hidden_tile1, tile_n), out_acc);
+    }
+
+    I64OutTile out_local = ct::iota<I64OutTile>();
+    auto out_cols = static_cast<long long>(tile_n) * OutQuarter + (out_local % OutQuarter);
+    auto out_bias = ct::element_cast<float>(ct::load(b2 + out_cols));
+    auto value = bf16_round(out_acc) + out_bias;
+    out_view.store(ct::element_cast<__nv_bfloat16>(value), tile_m, tile_n);
+}
+
+template <int TM,
+          int GeluMode = kGeluErf,
+          int TK = kTileK,
+          int THidden = 32,
+          int MemoryLatency = 2>
+__tile_global__ void ffn12_fused_split2_pairh32_quarterout_lat2_bf16_kernel(
+    const __nv_bfloat16* __restrict__ a,
+    const __nv_bfloat16* __restrict__ w1_nt,
+    const __nv_bfloat16* __restrict__ b1,
+    const __nv_bfloat16* __restrict__ w2_nt,
+    const __nv_bfloat16* __restrict__ b2,
+    __nv_bfloat16* __restrict__ out) {
+    constexpr int OutQuarter = kOut / 4;
+    static_assert(kIn % TK == 0);
+    static_assert(kHidden % (2 * THidden) == 0);
+    using HiddenAccTile = ct::tile<float, ct::shape<TM, THidden>>;
+    using OutAccTile = ct::tile<float, ct::shape<TM, OutQuarter>>;
+    using ATile = ct::tile<__nv_bfloat16, ct::shape<TM, TK>>;
+    using W1Tile = ct::tile<__nv_bfloat16, ct::shape<TK, THidden>>;
+    using W2Tile = ct::tile<__nv_bfloat16, ct::shape<THidden, OutQuarter>>;
+    using I64HiddenTile = ct::tile<long long, ct::shape<TM, THidden>>;
+    using I64OutTile = ct::tile<long long, ct::shape<TM, OutQuarter>>;
+
+    a = ct::assume_aligned(a, 16_ic);
+    w1_nt = ct::assume_aligned(w1_nt, 16_ic);
+    b1 = ct::assume_aligned(b1, 16_ic);
+    w2_nt = ct::assume_aligned(w2_nt, 16_ic);
+    b2 = ct::assume_aligned(b2, 16_ic);
+    out = ct::assume_aligned(out, 16_ic);
+
+    auto a_view = ct::partition_view{
+        ct::tensor_span{a, ct::shape<kM, kIn>{}},
+        ct::shape<TM, TK>{}
+    };
+    auto w1_view = ct::partition_view{
+        ct::tensor_span{w1_nt, ct::shape<kIn, kHidden>{}, ct::layout_left{}},
+        ct::shape<TK, THidden>{}
+    };
+    auto w2_view = ct::partition_view{
+        ct::tensor_span{w2_nt, ct::shape<kHidden, kOut>{}, ct::layout_left{}},
+        ct::shape<THidden, OutQuarter>{}
+    };
+    auto out_view = ct::partition_view{
+        ct::tensor_span{out, ct::shape<kM, kOut>{}},
+        ct::shape<TM, OutQuarter>{}
+    };
+
+    auto [tile_m, tile_n, tile_z] = ct::bid();
+    (void)tile_z;
+
+    auto out_acc = ct::full<OutAccTile>(0.0f);
+    I64HiddenTile hidden_local = ct::iota<I64HiddenTile>();
+    for (auto hidden_pair : ct::irange(std::size_t{0},
+                                       std::size_t{kHidden / (2 * THidden)})) {
+        auto hidden_tile0 = hidden_pair * 2;
+        auto hidden_tile1 = hidden_tile0 + 1;
+        auto hidden_acc0 = ct::full<HiddenAccTile>(0.0f);
+        auto hidden_acc1 = ct::full<HiddenAccTile>(0.0f);
+        for (auto kk : ct::irange(std::size_t{0}, std::size_t{kIn / TK})) {
+            ATile a_tile;
+            W1Tile w1_0;
+            W1Tile w1_1;
+            [[cutile::hint(0, latency=MemoryLatency)]]
+            a_tile = a_view.load(tile_m, kk);
+            [[cutile::hint(0, latency=MemoryLatency)]]
+            w1_0 = w1_view.load(kk, hidden_tile0);
+            [[cutile::hint(0, latency=MemoryLatency)]]
+            w1_1 = w1_view.load(kk, hidden_tile1);
+            hidden_acc0 = ct::mma(a_tile, w1_0, hidden_acc0);
+            hidden_acc1 = ct::mma(a_tile, w1_1, hidden_acc1);
+        }
+
+        auto hidden_cols0 =
+            static_cast<long long>(hidden_tile0) * THidden + (hidden_local % THidden);
+        auto hidden_cols1 =
+            static_cast<long long>(hidden_tile1) * THidden + (hidden_local % THidden);
+        auto hidden_bias0 = ct::element_cast<float>(ct::load(b1 + hidden_cols0));
+        auto hidden_bias1 = ct::element_cast<float>(ct::load(b1 + hidden_cols1));
+        auto hidden_value0 = gelu_selected<GeluMode>(bf16_round(hidden_acc0) + hidden_bias0);
+        auto hidden_value1 = gelu_selected<GeluMode>(bf16_round(hidden_acc1) + hidden_bias1);
+        auto hidden_bf16_0 = ct::element_cast<__nv_bfloat16>(hidden_value0);
+        auto hidden_bf16_1 = ct::element_cast<__nv_bfloat16>(hidden_value1);
+        W2Tile w2_0;
+        W2Tile w2_1;
+        [[cutile::hint(0, latency=MemoryLatency)]]
+        w2_0 = w2_view.load(hidden_tile0, tile_n);
+        [[cutile::hint(0, latency=MemoryLatency)]]
+        w2_1 = w2_view.load(hidden_tile1, tile_n);
+        out_acc = ct::mma(hidden_bf16_0, w2_0, out_acc);
+        out_acc = ct::mma(hidden_bf16_1, w2_1, out_acc);
+    }
+
+    I64OutTile out_local = ct::iota<I64OutTile>();
+    auto out_cols = static_cast<long long>(tile_n) * OutQuarter + (out_local % OutQuarter);
+    auto out_bias = ct::element_cast<float>(ct::load(b2 + out_cols));
+    auto value = bf16_round(out_acc) + out_bias;
+    out_view.store(ct::element_cast<__nv_bfloat16>(value), tile_m, tile_n);
+}
+
+template <int TM,
+          int GeluMode = kGeluErf,
+          int TK = kTileK,
+          int THidden = 32>
+__tile_global__ void ffn12_fused_split2_pairh32_halfout_bf16_kernel(
+    const __nv_bfloat16* __restrict__ a,
+    const __nv_bfloat16* __restrict__ w1_nt,
+    const __nv_bfloat16* __restrict__ b1,
+    const __nv_bfloat16* __restrict__ w2_nt,
+    const __nv_bfloat16* __restrict__ b2,
+    __nv_bfloat16* __restrict__ out) {
+    constexpr int OutHalf = kOut / 2;
+    static_assert(kIn % TK == 0);
+    static_assert(kHidden % (2 * THidden) == 0);
+    using HiddenAccTile = ct::tile<float, ct::shape<TM, THidden>>;
+    using OutAccTile = ct::tile<float, ct::shape<TM, OutHalf>>;
+    using I64HiddenTile = ct::tile<long long, ct::shape<TM, THidden>>;
+    using I64OutTile = ct::tile<long long, ct::shape<TM, OutHalf>>;
+
+    a = ct::assume_aligned(a, 16_ic);
+    w1_nt = ct::assume_aligned(w1_nt, 16_ic);
+    b1 = ct::assume_aligned(b1, 16_ic);
+    w2_nt = ct::assume_aligned(w2_nt, 16_ic);
+    b2 = ct::assume_aligned(b2, 16_ic);
+    out = ct::assume_aligned(out, 16_ic);
+
+    auto a_view = ct::partition_view{
+        ct::tensor_span{a, ct::shape<kM, kIn>{}},
+        ct::shape<TM, TK>{}
+    };
+    auto w1_view = ct::partition_view{
+        ct::tensor_span{w1_nt, ct::shape<kIn, kHidden>{}, ct::layout_left{}},
+        ct::shape<TK, THidden>{}
+    };
+    auto w2_view = ct::partition_view{
+        ct::tensor_span{w2_nt, ct::shape<kHidden, kOut>{}, ct::layout_left{}},
+        ct::shape<THidden, OutHalf>{}
+    };
+    auto out_view = ct::partition_view{
+        ct::tensor_span{out, ct::shape<kM, kOut>{}},
+        ct::shape<TM, OutHalf>{}
+    };
+
+    auto [tile_m, tile_n, tile_z] = ct::bid();
+    (void)tile_z;
+
+    auto out_acc = ct::full<OutAccTile>(0.0f);
+    I64HiddenTile hidden_local = ct::iota<I64HiddenTile>();
+    for (auto hidden_pair : ct::irange(std::size_t{0},
+                                       std::size_t{kHidden / (2 * THidden)})) {
+        auto hidden_tile0 = hidden_pair * 2;
+        auto hidden_tile1 = hidden_tile0 + 1;
+        auto hidden_acc0 = ct::full<HiddenAccTile>(0.0f);
+        auto hidden_acc1 = ct::full<HiddenAccTile>(0.0f);
+        for (auto kk : ct::irange(std::size_t{0}, std::size_t{kIn / TK})) {
+            auto a_tile = a_view.load(tile_m, kk);
+            hidden_acc0 = ct::mma(a_tile, w1_view.load(kk, hidden_tile0), hidden_acc0);
+            hidden_acc1 = ct::mma(a_tile, w1_view.load(kk, hidden_tile1), hidden_acc1);
+        }
+
+        auto hidden_cols0 =
+            static_cast<long long>(hidden_tile0) * THidden + (hidden_local % THidden);
+        auto hidden_cols1 =
+            static_cast<long long>(hidden_tile1) * THidden + (hidden_local % THidden);
+        auto hidden_bias0 = ct::element_cast<float>(ct::load(b1 + hidden_cols0));
+        auto hidden_bias1 = ct::element_cast<float>(ct::load(b1 + hidden_cols1));
+        auto hidden_value0 = gelu_selected<GeluMode>(bf16_round(hidden_acc0) + hidden_bias0);
+        auto hidden_value1 = gelu_selected<GeluMode>(bf16_round(hidden_acc1) + hidden_bias1);
+        auto hidden_bf16_0 = ct::element_cast<__nv_bfloat16>(hidden_value0);
+        auto hidden_bf16_1 = ct::element_cast<__nv_bfloat16>(hidden_value1);
+        out_acc = ct::mma(hidden_bf16_0, w2_view.load(hidden_tile0, tile_n), out_acc);
+        out_acc = ct::mma(hidden_bf16_1, w2_view.load(hidden_tile1, tile_n), out_acc);
+    }
+
+    I64OutTile out_local = ct::iota<I64OutTile>();
+    auto out_cols = static_cast<long long>(tile_n) * OutHalf + (out_local % OutHalf);
+    auto out_bias = ct::element_cast<float>(ct::load(b2 + out_cols));
+    auto value = bf16_round(out_acc) + out_bias;
+    out_view.store(ct::element_cast<__nv_bfloat16>(value), tile_m, tile_n);
+}
+
+#ifdef CUDASEP_FFN12_CANDIDATES_ONLY
+template <int TM,
+          int GeluMode = kGeluErf,
+          int TK = kTileK,
+          int THidden = 32>
+__tile_global__ void ffn12_fused_split2_pairh32_outseq_bf16_kernel(
+    const __nv_bfloat16* __restrict__ a,
+    const __nv_bfloat16* __restrict__ w1_nt,
+    const __nv_bfloat16* __restrict__ b1,
+    const __nv_bfloat16* __restrict__ w2_nt,
+    const __nv_bfloat16* __restrict__ b2,
+    __nv_bfloat16* __restrict__ out) {
+    constexpr int OutHalf = kOut / 2;
+    static_assert(kIn % TK == 0);
+    static_assert(kHidden % (2 * THidden) == 0);
+    using HiddenAccTile = ct::tile<float, ct::shape<TM, THidden>>;
+    using OutAccTile = ct::tile<float, ct::shape<TM, OutHalf>>;
+    using I64HiddenTile = ct::tile<long long, ct::shape<TM, THidden>>;
+    using I64OutTile = ct::tile<long long, ct::shape<TM, OutHalf>>;
+
+    a = ct::assume_aligned(a, 16_ic);
+    w1_nt = ct::assume_aligned(w1_nt, 16_ic);
+    b1 = ct::assume_aligned(b1, 16_ic);
+    w2_nt = ct::assume_aligned(w2_nt, 16_ic);
+    b2 = ct::assume_aligned(b2, 16_ic);
+    out = ct::assume_aligned(out, 16_ic);
+
+    auto a_view = ct::partition_view{
+        ct::tensor_span{a, ct::shape<kM, kIn>{}},
+        ct::shape<TM, TK>{}
+    };
+    auto w1_view = ct::partition_view{
+        ct::tensor_span{w1_nt, ct::shape<kIn, kHidden>{}, ct::layout_left{}},
+        ct::shape<TK, THidden>{}
+    };
+    auto w2_view = ct::partition_view{
+        ct::tensor_span{w2_nt, ct::shape<kHidden, kOut>{}, ct::layout_left{}},
+        ct::shape<THidden, OutHalf>{}
+    };
+    auto out_view = ct::partition_view{
+        ct::tensor_span{out, ct::shape<kM, kOut>{}},
+        ct::shape<TM, OutHalf>{}
+    };
+
+    auto [tile_m, tile_n, tile_z] = ct::bid();
+    (void)tile_n;
+    (void)tile_z;
+
+    I64HiddenTile hidden_local = ct::iota<I64HiddenTile>();
+    I64OutTile out_local = ct::iota<I64OutTile>();
+    for (auto out_half : ct::irange(std::size_t{0}, std::size_t{2})) {
+        auto out_acc = ct::full<OutAccTile>(0.0f);
+        for (auto hidden_pair : ct::irange(std::size_t{0},
+                                           std::size_t{kHidden / (2 * THidden)})) {
+            auto hidden_tile0 = hidden_pair * 2;
+            auto hidden_tile1 = hidden_tile0 + 1;
+            auto hidden_acc0 = ct::full<HiddenAccTile>(0.0f);
+            auto hidden_acc1 = ct::full<HiddenAccTile>(0.0f);
+            for (auto kk : ct::irange(std::size_t{0}, std::size_t{kIn / TK})) {
+                auto a_tile = a_view.load(tile_m, kk);
+                hidden_acc0 = ct::mma(a_tile, w1_view.load(kk, hidden_tile0), hidden_acc0);
+                hidden_acc1 = ct::mma(a_tile, w1_view.load(kk, hidden_tile1), hidden_acc1);
+            }
+
+            auto hidden_cols0 =
+                static_cast<long long>(hidden_tile0) * THidden + (hidden_local % THidden);
+            auto hidden_cols1 =
+                static_cast<long long>(hidden_tile1) * THidden + (hidden_local % THidden);
+            auto hidden_bias0 = ct::element_cast<float>(ct::load(b1 + hidden_cols0));
+            auto hidden_bias1 = ct::element_cast<float>(ct::load(b1 + hidden_cols1));
+            auto hidden_value0 =
+                gelu_selected<GeluMode>(bf16_round(hidden_acc0) + hidden_bias0);
+            auto hidden_value1 =
+                gelu_selected<GeluMode>(bf16_round(hidden_acc1) + hidden_bias1);
+            auto hidden_bf16_0 = ct::element_cast<__nv_bfloat16>(hidden_value0);
+            auto hidden_bf16_1 = ct::element_cast<__nv_bfloat16>(hidden_value1);
+            out_acc = ct::mma(hidden_bf16_0, w2_view.load(hidden_tile0, out_half), out_acc);
+            out_acc = ct::mma(hidden_bf16_1, w2_view.load(hidden_tile1, out_half), out_acc);
+        }
+
+        auto out_cols = static_cast<long long>(out_half) * OutHalf + (out_local % OutHalf);
+        auto out_bias = ct::element_cast<float>(ct::load(b2 + out_cols));
+        auto value = bf16_round(out_acc) + out_bias;
+        out_view.store(ct::element_cast<__nv_bfloat16>(value), tile_m, out_half);
+    }
+}
+#endif
+
+template <int TM, int GeluMode = kGeluErf, bool FullBF16 = false>
+__tile_global__ void ffn12_fused_split2_pairh32_source_style_bf16_kernel(
+    const __nv_bfloat16* __restrict__ a,
+    const __nv_bfloat16* __restrict__ w1_nt,
+    const __nv_bfloat16* __restrict__ b1,
+    const __nv_bfloat16* __restrict__ w2_nt,
+    const __nv_bfloat16* __restrict__ b2,
+    __nv_bfloat16* __restrict__ out) {
+    constexpr int THidden = 32;
     constexpr int OutHalf = kOut / 2;
     using HiddenAccTile = ct::tile<float, ct::shape<TM, THidden>>;
     using OutAccTile = ct::tile<float, ct::shape<TM, OutHalf>>;
@@ -454,21 +1755,239 @@ __tile_global__ void ffn12_fused_split2_bf16_kernel(
     auto out_acc0 = ct::full<OutAccTile>(0.0f);
     auto out_acc1 = ct::full<OutAccTile>(0.0f);
     I64HiddenTile hidden_local = ct::iota<I64HiddenTile>();
-    for (auto hidden_tile : ct::irange(std::size_t{0}, std::size_t{kHidden / THidden})) {
-        auto hidden_acc = ct::full<HiddenAccTile>(0.0f);
+    for (auto hidden_pair : ct::irange(std::size_t{0},
+                                       std::size_t{kHidden / (2 * THidden)})) {
+        auto hidden_tile0 = hidden_pair * 2;
+        auto hidden_tile1 = hidden_tile0 + 1;
+        auto hidden_acc0 = ct::full<HiddenAccTile>(0.0f);
+        auto hidden_acc1 = ct::full<HiddenAccTile>(0.0f);
         for (auto kk : ct::irange(std::size_t{0}, std::size_t{kIn / kTileK})) {
-            hidden_acc = ct::mma(a_view.load(tile_m, kk),
-                                 w1_view.load(kk, hidden_tile),
-                                 hidden_acc);
+            auto a_tile = a_view.load(tile_m, kk);
+            hidden_acc0 = ct::mma(a_tile, w1_view.load(kk, hidden_tile0), hidden_acc0);
+            hidden_acc1 = ct::mma(a_tile, w1_view.load(kk, hidden_tile1), hidden_acc1);
         }
-        auto hidden_cols =
-            static_cast<long long>(hidden_tile) * THidden + (hidden_local % THidden);
-        auto hidden_bias = ct::element_cast<float>(ct::load(b1 + hidden_cols));
-        auto hidden_value =
-            ct::element_cast<__nv_bfloat16>(gelu_selected<GeluMode>(bf16_round(hidden_acc) +
-                                                                    hidden_bias));
-        out_acc0 = ct::mma(hidden_value, w2_view.load(hidden_tile, 0), out_acc0);
-        out_acc1 = ct::mma(hidden_value, w2_view.load(hidden_tile, 1), out_acc1);
+
+        auto hidden_cols0 =
+            static_cast<long long>(hidden_tile0) * THidden + (hidden_local % THidden);
+        auto hidden_cols1 =
+            static_cast<long long>(hidden_tile1) * THidden + (hidden_local % THidden);
+        auto hidden_bias0 = ct::element_cast<float>(ct::load(b1 + hidden_cols0));
+        auto hidden_bias1 = ct::element_cast<float>(ct::load(b1 + hidden_cols1));
+        auto hidden_value0 = bf16_round(hidden_acc0) + hidden_bias0;
+        auto hidden_value1 = bf16_round(hidden_acc1) + hidden_bias1;
+        hidden_value0 = bf16_round_if<FullBF16>(hidden_value0);
+        hidden_value1 = bf16_round_if<FullBF16>(hidden_value1);
+        hidden_value0 = gelu_selected_source_style<GeluMode, FullBF16>(hidden_value0);
+        hidden_value1 = gelu_selected_source_style<GeluMode, FullBF16>(hidden_value1);
+        auto hidden_bf16_0 = ct::element_cast<__nv_bfloat16>(hidden_value0);
+        auto hidden_bf16_1 = ct::element_cast<__nv_bfloat16>(hidden_value1);
+        out_acc0 = ct::mma(hidden_bf16_0, w2_view.load(hidden_tile0, 0), out_acc0);
+        out_acc1 = ct::mma(hidden_bf16_0, w2_view.load(hidden_tile0, 1), out_acc1);
+        out_acc0 = ct::mma(hidden_bf16_1, w2_view.load(hidden_tile1, 0), out_acc0);
+        out_acc1 = ct::mma(hidden_bf16_1, w2_view.load(hidden_tile1, 1), out_acc1);
+    }
+
+    I64OutTile out_local = ct::iota<I64OutTile>();
+    auto out_cols = out_local % OutHalf;
+    auto out_bias0 = ct::element_cast<float>(ct::load(b2 + out_cols));
+    auto out_bias1 = ct::element_cast<float>(ct::load(b2 + OutHalf + out_cols));
+    auto value0 = bf16_round(out_acc0) + out_bias0;
+    auto value1 = bf16_round(out_acc1) + out_bias1;
+    value0 = bf16_round_if<FullBF16>(value0);
+    value1 = bf16_round_if<FullBF16>(value1);
+    out_view.store(ct::element_cast<__nv_bfloat16>(value0), tile_m, 0);
+    out_view.store(ct::element_cast<__nv_bfloat16>(value1), tile_m, 1);
+}
+
+template <int TM, int GeluMode = kGeluErf, int TK = kTileK>
+__tile_global__ void ffn12_fused_split4_pairh32_bf16_kernel(
+    const __nv_bfloat16* __restrict__ a,
+    const __nv_bfloat16* __restrict__ w1_nt,
+    const __nv_bfloat16* __restrict__ b1,
+    const __nv_bfloat16* __restrict__ w2_nt,
+    const __nv_bfloat16* __restrict__ b2,
+    __nv_bfloat16* __restrict__ out) {
+    constexpr int THidden = 32;
+    constexpr int OutQuarter = kOut / 4;
+    static_assert(kIn % TK == 0);
+    using HiddenAccTile = ct::tile<float, ct::shape<TM, THidden>>;
+    using OutAccTile = ct::tile<float, ct::shape<TM, OutQuarter>>;
+    using I64HiddenTile = ct::tile<long long, ct::shape<TM, THidden>>;
+    using I64OutTile = ct::tile<long long, ct::shape<TM, OutQuarter>>;
+
+    a = ct::assume_aligned(a, 16_ic);
+    w1_nt = ct::assume_aligned(w1_nt, 16_ic);
+    b1 = ct::assume_aligned(b1, 16_ic);
+    w2_nt = ct::assume_aligned(w2_nt, 16_ic);
+    b2 = ct::assume_aligned(b2, 16_ic);
+    out = ct::assume_aligned(out, 16_ic);
+
+    auto a_view = ct::partition_view{
+        ct::tensor_span{a, ct::shape<kM, kIn>{}},
+        ct::shape<TM, TK>{}
+    };
+    auto w1_view = ct::partition_view{
+        ct::tensor_span{w1_nt, ct::shape<kIn, kHidden>{}, ct::layout_left{}},
+        ct::shape<TK, THidden>{}
+    };
+    auto w2_view = ct::partition_view{
+        ct::tensor_span{w2_nt, ct::shape<kHidden, kOut>{}, ct::layout_left{}},
+        ct::shape<THidden, OutQuarter>{}
+    };
+    auto out_view = ct::partition_view{
+        ct::tensor_span{out, ct::shape<kM, kOut>{}},
+        ct::shape<TM, OutQuarter>{}
+    };
+
+    auto [tile_m, tile_n, tile_z] = ct::bid();
+    (void)tile_n;
+    (void)tile_z;
+
+    auto out_acc0 = ct::full<OutAccTile>(0.0f);
+    auto out_acc1 = ct::full<OutAccTile>(0.0f);
+    auto out_acc2 = ct::full<OutAccTile>(0.0f);
+    auto out_acc3 = ct::full<OutAccTile>(0.0f);
+    I64HiddenTile hidden_local = ct::iota<I64HiddenTile>();
+    for (auto hidden_pair : ct::irange(std::size_t{0},
+                                       std::size_t{kHidden / (2 * THidden)})) {
+        auto hidden_tile0 = hidden_pair * 2;
+        auto hidden_tile1 = hidden_tile0 + 1;
+        auto hidden_acc0 = ct::full<HiddenAccTile>(0.0f);
+        auto hidden_acc1 = ct::full<HiddenAccTile>(0.0f);
+        for (auto kk : ct::irange(std::size_t{0}, std::size_t{kIn / TK})) {
+            auto a_tile = a_view.load(tile_m, kk);
+            hidden_acc0 = ct::mma(a_tile, w1_view.load(kk, hidden_tile0), hidden_acc0);
+            hidden_acc1 = ct::mma(a_tile, w1_view.load(kk, hidden_tile1), hidden_acc1);
+        }
+
+        auto hidden_cols0 =
+            static_cast<long long>(hidden_tile0) * THidden + (hidden_local % THidden);
+        auto hidden_cols1 =
+            static_cast<long long>(hidden_tile1) * THidden + (hidden_local % THidden);
+        auto hidden_bias0 = ct::element_cast<float>(ct::load(b1 + hidden_cols0));
+        auto hidden_bias1 = ct::element_cast<float>(ct::load(b1 + hidden_cols1));
+        auto hidden_value0 = gelu_selected<GeluMode>(bf16_round(hidden_acc0) + hidden_bias0);
+        auto hidden_value1 = gelu_selected<GeluMode>(bf16_round(hidden_acc1) + hidden_bias1);
+        auto hidden_bf16_0 = ct::element_cast<__nv_bfloat16>(hidden_value0);
+        auto hidden_bf16_1 = ct::element_cast<__nv_bfloat16>(hidden_value1);
+        out_acc0 = ct::mma(hidden_bf16_0, w2_view.load(hidden_tile0, 0), out_acc0);
+        out_acc1 = ct::mma(hidden_bf16_0, w2_view.load(hidden_tile0, 1), out_acc1);
+        out_acc2 = ct::mma(hidden_bf16_0, w2_view.load(hidden_tile0, 2), out_acc2);
+        out_acc3 = ct::mma(hidden_bf16_0, w2_view.load(hidden_tile0, 3), out_acc3);
+        out_acc0 = ct::mma(hidden_bf16_1, w2_view.load(hidden_tile1, 0), out_acc0);
+        out_acc1 = ct::mma(hidden_bf16_1, w2_view.load(hidden_tile1, 1), out_acc1);
+        out_acc2 = ct::mma(hidden_bf16_1, w2_view.load(hidden_tile1, 2), out_acc2);
+        out_acc3 = ct::mma(hidden_bf16_1, w2_view.load(hidden_tile1, 3), out_acc3);
+    }
+
+    I64OutTile out_local = ct::iota<I64OutTile>();
+    auto out_cols = out_local % OutQuarter;
+    auto out_bias0 = ct::element_cast<float>(ct::load(b2 + out_cols));
+    auto out_bias1 = ct::element_cast<float>(ct::load(b2 + OutQuarter + out_cols));
+    auto out_bias2 = ct::element_cast<float>(ct::load(b2 + 2 * OutQuarter + out_cols));
+    auto out_bias3 = ct::element_cast<float>(ct::load(b2 + 3 * OutQuarter + out_cols));
+    auto value0 = bf16_round(out_acc0) + out_bias0;
+    auto value1 = bf16_round(out_acc1) + out_bias1;
+    auto value2 = bf16_round(out_acc2) + out_bias2;
+    auto value3 = bf16_round(out_acc3) + out_bias3;
+    out_view.store(ct::element_cast<__nv_bfloat16>(value0), tile_m, 0);
+    out_view.store(ct::element_cast<__nv_bfloat16>(value1), tile_m, 1);
+    out_view.store(ct::element_cast<__nv_bfloat16>(value2), tile_m, 2);
+    out_view.store(ct::element_cast<__nv_bfloat16>(value3), tile_m, 3);
+}
+
+template <int TM, int GeluMode = kGeluErf>
+__tile_global__ void ffn12_fused_split2_quadh32_bf16_kernel(
+    const __nv_bfloat16* __restrict__ a,
+    const __nv_bfloat16* __restrict__ w1_nt,
+    const __nv_bfloat16* __restrict__ b1,
+    const __nv_bfloat16* __restrict__ w2_nt,
+    const __nv_bfloat16* __restrict__ b2,
+    __nv_bfloat16* __restrict__ out) {
+    constexpr int THidden = 32;
+    constexpr int OutHalf = kOut / 2;
+    using HiddenAccTile = ct::tile<float, ct::shape<TM, THidden>>;
+    using OutAccTile = ct::tile<float, ct::shape<TM, OutHalf>>;
+    using I64HiddenTile = ct::tile<long long, ct::shape<TM, THidden>>;
+    using I64OutTile = ct::tile<long long, ct::shape<TM, OutHalf>>;
+
+    a = ct::assume_aligned(a, 16_ic);
+    w1_nt = ct::assume_aligned(w1_nt, 16_ic);
+    b1 = ct::assume_aligned(b1, 16_ic);
+    w2_nt = ct::assume_aligned(w2_nt, 16_ic);
+    b2 = ct::assume_aligned(b2, 16_ic);
+    out = ct::assume_aligned(out, 16_ic);
+
+    auto a_view = ct::partition_view{
+        ct::tensor_span{a, ct::shape<kM, kIn>{}},
+        ct::shape<TM, kTileK>{}
+    };
+    auto w1_view = ct::partition_view{
+        ct::tensor_span{w1_nt, ct::shape<kIn, kHidden>{}, ct::layout_left{}},
+        ct::shape<kTileK, THidden>{}
+    };
+    auto w2_view = ct::partition_view{
+        ct::tensor_span{w2_nt, ct::shape<kHidden, kOut>{}, ct::layout_left{}},
+        ct::shape<THidden, OutHalf>{}
+    };
+    auto out_view = ct::partition_view{
+        ct::tensor_span{out, ct::shape<kM, kOut>{}},
+        ct::shape<TM, OutHalf>{}
+    };
+
+    auto [tile_m, tile_n, tile_z] = ct::bid();
+    (void)tile_n;
+    (void)tile_z;
+
+    auto out_acc0 = ct::full<OutAccTile>(0.0f);
+    auto out_acc1 = ct::full<OutAccTile>(0.0f);
+    I64HiddenTile hidden_local = ct::iota<I64HiddenTile>();
+    for (auto hidden_quad : ct::irange(std::size_t{0},
+                                       std::size_t{kHidden / (4 * THidden)})) {
+        auto hidden_tile0 = hidden_quad * 4;
+        auto hidden_tile1 = hidden_tile0 + 1;
+        auto hidden_tile2 = hidden_tile0 + 2;
+        auto hidden_tile3 = hidden_tile0 + 3;
+        auto hidden_acc0 = ct::full<HiddenAccTile>(0.0f);
+        auto hidden_acc1 = ct::full<HiddenAccTile>(0.0f);
+        auto hidden_acc2 = ct::full<HiddenAccTile>(0.0f);
+        auto hidden_acc3 = ct::full<HiddenAccTile>(0.0f);
+        for (auto kk : ct::irange(std::size_t{0}, std::size_t{kIn / kTileK})) {
+            auto a_tile = a_view.load(tile_m, kk);
+            hidden_acc0 = ct::mma(a_tile, w1_view.load(kk, hidden_tile0), hidden_acc0);
+            hidden_acc1 = ct::mma(a_tile, w1_view.load(kk, hidden_tile1), hidden_acc1);
+            hidden_acc2 = ct::mma(a_tile, w1_view.load(kk, hidden_tile2), hidden_acc2);
+            hidden_acc3 = ct::mma(a_tile, w1_view.load(kk, hidden_tile3), hidden_acc3);
+        }
+
+        auto hidden_cols0 =
+            static_cast<long long>(hidden_tile0) * THidden + (hidden_local % THidden);
+        auto hidden_cols1 =
+            static_cast<long long>(hidden_tile1) * THidden + (hidden_local % THidden);
+        auto hidden_cols2 =
+            static_cast<long long>(hidden_tile2) * THidden + (hidden_local % THidden);
+        auto hidden_cols3 =
+            static_cast<long long>(hidden_tile3) * THidden + (hidden_local % THidden);
+        auto hidden_bias0 = ct::element_cast<float>(ct::load(b1 + hidden_cols0));
+        auto hidden_bias1 = ct::element_cast<float>(ct::load(b1 + hidden_cols1));
+        auto hidden_bias2 = ct::element_cast<float>(ct::load(b1 + hidden_cols2));
+        auto hidden_bias3 = ct::element_cast<float>(ct::load(b1 + hidden_cols3));
+        auto hidden_value0 = gelu_selected<GeluMode>(bf16_round(hidden_acc0) + hidden_bias0);
+        auto hidden_value1 = gelu_selected<GeluMode>(bf16_round(hidden_acc1) + hidden_bias1);
+        auto hidden_value2 = gelu_selected<GeluMode>(bf16_round(hidden_acc2) + hidden_bias2);
+        auto hidden_value3 = gelu_selected<GeluMode>(bf16_round(hidden_acc3) + hidden_bias3);
+        auto hidden_bf16_0 = ct::element_cast<__nv_bfloat16>(hidden_value0);
+        auto hidden_bf16_1 = ct::element_cast<__nv_bfloat16>(hidden_value1);
+        auto hidden_bf16_2 = ct::element_cast<__nv_bfloat16>(hidden_value2);
+        auto hidden_bf16_3 = ct::element_cast<__nv_bfloat16>(hidden_value3);
+        out_acc0 = ct::mma(hidden_bf16_0, w2_view.load(hidden_tile0, 0), out_acc0);
+        out_acc1 = ct::mma(hidden_bf16_0, w2_view.load(hidden_tile0, 1), out_acc1);
+        out_acc0 = ct::mma(hidden_bf16_1, w2_view.load(hidden_tile1, 0), out_acc0);
+        out_acc1 = ct::mma(hidden_bf16_1, w2_view.load(hidden_tile1, 1), out_acc1);
+        out_acc0 = ct::mma(hidden_bf16_2, w2_view.load(hidden_tile2, 0), out_acc0);
+        out_acc1 = ct::mma(hidden_bf16_2, w2_view.load(hidden_tile2, 1), out_acc1);
+        out_acc0 = ct::mma(hidden_bf16_3, w2_view.load(hidden_tile3, 0), out_acc0);
+        out_acc1 = ct::mma(hidden_bf16_3, w2_view.load(hidden_tile3, 1), out_acc1);
     }
 
     I64OutTile out_local = ct::iota<I64OutTile>();
@@ -569,13 +2088,25 @@ void init_bf16(__nv_bfloat16* ptr, size_t elems) {
     CUDA_CHECK(cudaGetLastError());
 }
 
-void launch_separate(const __nv_bfloat16* d_a,
-                     const __nv_bfloat16* d_w1,
-                     const __nv_bfloat16* d_b1,
-                     const __nv_bfloat16* d_w2,
-                     const __nv_bfloat16* d_b2,
-                     __nv_bfloat16* d_hidden,
-                     __nv_bfloat16* d_out) {
+#ifdef CUDASEP_FFN12_CANDIDATES_ONLY
+void init_bkn_from_nt(const __nv_bfloat16* src_nt,
+                      __nv_bfloat16* dst_bkn,
+                      int k,
+                      int n) {
+    long long total = static_cast<long long>(k) * n;
+    nt_layout_left_to_bkn_kernel<<<ceildiv(static_cast<int>(total), kInitTile), 1>>>(
+        src_nt, dst_bkn, k, n, total);
+    CUDA_CHECK(cudaGetLastError());
+}
+#endif
+
+[[maybe_unused]] void launch_separate(const __nv_bfloat16* d_a,
+                                      const __nv_bfloat16* d_w1,
+                                      const __nv_bfloat16* d_b1,
+                                      const __nv_bfloat16* d_w2,
+                                      const __nv_bfloat16* d_b2,
+                                      __nv_bfloat16* d_hidden,
+                                      __nv_bfloat16* d_out) {
     dim3 ffn1_grid(kM / kTileM, kHidden / kTileHidden, 1);
     ffn1_gelu_bf16_kernel<kTileM, kTileHidden, kTileK, kM, kHidden, kIn>
         <<<ffn1_grid, 1>>>(d_a, d_w1, d_b1, d_hidden);
@@ -608,7 +2139,12 @@ void launch_fused(const __nv_bfloat16* d_a,
     }
 }
 
-template <int TM, int THidden = kTileHidden, int GeluMode = kGeluErf>
+template <int TM,
+          int THidden = kTileHidden,
+          int GeluMode = kGeluErf,
+          bool UseHiddenBias = true,
+          bool UseOutBias = true,
+          int TK = kTileK>
 void launch_fused_split2(const __nv_bfloat16* d_a,
                          const __nv_bfloat16* d_w1,
                          const __nv_bfloat16* d_b1,
@@ -616,7 +2152,7 @@ void launch_fused_split2(const __nv_bfloat16* d_a,
                          const __nv_bfloat16* d_b2,
                          __nv_bfloat16* d_out) {
     dim3 grid(kM / TM, 1, 1);
-    ffn12_fused_split2_bf16_kernel<TM, THidden, GeluMode>
+    ffn12_fused_split2_bf16_kernel<TM, THidden, GeluMode, UseHiddenBias, UseOutBias, TK>
         <<<grid, 1>>>(d_a, d_w1, d_b1, d_w2, d_b2, d_out);
 }
 
@@ -629,6 +2165,222 @@ void launch_fused_split4(const __nv_bfloat16* d_a,
                          __nv_bfloat16* d_out) {
     dim3 grid(kM / TM, 1, 1);
     ffn12_fused_split4_bf16_kernel<TM, THidden, GeluMode>
+        <<<grid, 1>>>(d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+}
+
+template <int TM,
+          int GeluMode = kGeluErf,
+          int TK = kTileK,
+          int THidden = 32,
+	          bool W2LatencyHint = false,
+	          bool GroupOutputOrder = false,
+	          bool UseHiddenBias = true,
+	          bool UseOutBias = true,
+	          bool W1LatencyHint = false,
+          bool RoundHiddenAcc = true,
+	          bool RoundOutAcc = RoundHiddenAcc,
+	          typename IndexElement = long long,
+	          bool StagedHiddenEpilogue = false,
+	          bool W2TempLoads = false,
+	          bool W1BatchedMMA = false,
+	          bool W2BatchedMMA = false,
+	          int MemoryLatency = 8>
+void launch_fused_split2_pairh32(const __nv_bfloat16* d_a,
+                                 const __nv_bfloat16* d_w1,
+                                 const __nv_bfloat16* d_b1,
+                                 const __nv_bfloat16* d_w2,
+                                 const __nv_bfloat16* d_b2,
+                                 __nv_bfloat16* d_out) {
+    dim3 grid(kM / TM, 1, 1);
+    ffn12_fused_split2_pairh32_bf16_kernel
+        <TM, GeluMode, TK, THidden, W2LatencyHint, GroupOutputOrder,
+	         UseHiddenBias, UseOutBias, W1LatencyHint, RoundHiddenAcc, RoundOutAcc,
+	         IndexElement, StagedHiddenEpilogue, W2TempLoads, W1BatchedMMA,
+	         W2BatchedMMA, MemoryLatency>
+	        <<<grid, 1>>>(d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+}
+
+template <int TM,
+          int GeluMode = kGeluErf,
+          int TK = kTileK,
+          int THidden = 32,
+	          bool W2LatencyHint = false,
+	          bool GroupOutputOrder = false,
+	          bool UseHiddenBias = true,
+	          bool UseOutBias = true,
+	          bool W1LatencyHint = false,
+          bool RoundHiddenAcc = true,
+	          bool RoundOutAcc = RoundHiddenAcc,
+	          typename IndexElement = long long,
+	          bool StagedHiddenEpilogue = false,
+	          bool W2TempLoads = false,
+	          bool W1BatchedMMA = false,
+	          bool W2BatchedMMA = false,
+	          int MemoryLatency = 8>
+void launch_fused_split2_pairh32_occ2(const __nv_bfloat16* d_a,
+                                      const __nv_bfloat16* d_w1,
+                                      const __nv_bfloat16* d_b1,
+                                      const __nv_bfloat16* d_w2,
+                                      const __nv_bfloat16* d_b2,
+                                      __nv_bfloat16* d_out) {
+    dim3 grid(kM / TM, 1, 1);
+    ffn12_fused_split2_pairh32_occ2_bf16_kernel
+        <TM, GeluMode, TK, THidden, W2LatencyHint, GroupOutputOrder,
+	         UseHiddenBias, UseOutBias, W1LatencyHint, RoundHiddenAcc, RoundOutAcc,
+	         IndexElement, StagedHiddenEpilogue, W2TempLoads, W1BatchedMMA,
+	         W2BatchedMMA, MemoryLatency>
+	        <<<grid, 1>>>(d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+}
+
+#ifdef CUDASEP_FFN12_CANDIDATES_ONLY
+template <int TM, int GeluMode = kGeluErfPoly9L30, int TK = 64, int THidden = 32>
+void launch_fused_split2_pairh32_bkn(const __nv_bfloat16* d_a,
+                                     const __nv_bfloat16* d_w1_bkn,
+                                     const __nv_bfloat16* d_b1,
+                                     const __nv_bfloat16* d_w2_bkn,
+                                     const __nv_bfloat16* d_b2,
+                                     __nv_bfloat16* d_out) {
+    dim3 grid(kM / TM, 1, 1);
+    ffn12_fused_split2_pairh32_bkn_bf16_kernel<TM, GeluMode, TK, THidden>
+        <<<grid, 1>>>(d_a, d_w1_bkn, d_b1, d_w2_bkn, d_b2, d_out);
+}
+
+template <int TM, int GeluMode = kGeluErfPoly9L30, int TK = 64, int THidden = 32>
+void launch_fused_split2_pairh32_w2splitspan(const __nv_bfloat16* d_a,
+                                             const __nv_bfloat16* d_w1,
+                                             const __nv_bfloat16* d_b1,
+                                             const __nv_bfloat16* d_w2,
+                                             const __nv_bfloat16* d_b2,
+                                             __nv_bfloat16* d_out) {
+    dim3 grid(kM / TM, 1, 1);
+    ffn12_fused_split2_pairh32_w2splitspan_bf16_kernel<TM, GeluMode, TK, THidden>
+        <<<grid, 1>>>(d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+}
+
+template <int TM, int GeluMode = kGeluErfPoly9L30, int TK = 64, int THidden = 32>
+void launch_fused_split2_pairh32_w2manual(const __nv_bfloat16* d_a,
+                                          const __nv_bfloat16* d_w1,
+                                          const __nv_bfloat16* d_b1,
+                                          const __nv_bfloat16* d_w2,
+                                          const __nv_bfloat16* d_b2,
+                                          __nv_bfloat16* d_out) {
+    dim3 grid(kM / TM, 1, 1);
+    ffn12_fused_split2_pairh32_w2manual_bf16_kernel<TM, GeluMode, TK, THidden>
+        <<<grid, 1>>>(d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+}
+#endif
+
+template <int Groups>
+void launch_fused_split2_pairh32_hsplit_partial(const __nv_bfloat16* d_a,
+                                                const __nv_bfloat16* d_w1,
+                                                const __nv_bfloat16* d_b1,
+                                                const __nv_bfloat16* d_w2,
+                                                const __nv_bfloat16* d_b2,
+                                                __nv_bfloat16* d_partial,
+                                                __nv_bfloat16* d_out) {
+    dim3 partial_grid(kM / 32, Groups, 1);
+    ffn12_fused_split2_pairh32_hsplit_partial_bf16_kernel<Groups>
+        <<<partial_grid, 1>>>(d_a, d_w1, d_b1, d_w2, d_partial);
+    dim3 reduce_grid(kM / 32, 1, 1);
+    ffn12_hsplit_partial_reduce_bf16_kernel<Groups>
+        <<<reduce_grid, 1>>>(d_partial, d_b2, d_out);
+}
+
+template <int TM,
+          int GeluMode = kGeluErf,
+          int TK = kTileK,
+          int THidden = 32>
+void launch_fused_split2_pairh32_halfout(const __nv_bfloat16* d_a,
+                                         const __nv_bfloat16* d_w1,
+                                         const __nv_bfloat16* d_b1,
+                                         const __nv_bfloat16* d_w2,
+                                         const __nv_bfloat16* d_b2,
+                                         __nv_bfloat16* d_out) {
+    dim3 grid(kM / TM, 2, 1);
+    ffn12_fused_split2_pairh32_halfout_bf16_kernel<TM, GeluMode, TK, THidden>
+        <<<grid, 1>>>(d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+}
+
+#ifdef CUDASEP_FFN12_CANDIDATES_ONLY
+template <int TM,
+          int GeluMode = kGeluErf,
+          int TK = kTileK,
+          int THidden = 32>
+void launch_fused_split2_pairh32_quarterout(const __nv_bfloat16* d_a,
+                                            const __nv_bfloat16* d_w1,
+                                            const __nv_bfloat16* d_b1,
+                                            const __nv_bfloat16* d_w2,
+                                            const __nv_bfloat16* d_b2,
+                                            __nv_bfloat16* d_out) {
+    dim3 grid(kM / TM, 4, 1);
+    ffn12_fused_split2_pairh32_quarterout_bf16_kernel<TM, GeluMode, TK, THidden>
+        <<<grid, 1>>>(d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+}
+
+template <int TM,
+          int GeluMode = kGeluErf,
+          int TK = kTileK,
+          int THidden = 32>
+void launch_fused_split2_pairh32_quarterout_lat2(const __nv_bfloat16* d_a,
+                                                 const __nv_bfloat16* d_w1,
+                                                 const __nv_bfloat16* d_b1,
+                                                 const __nv_bfloat16* d_w2,
+                                                 const __nv_bfloat16* d_b2,
+                                                 __nv_bfloat16* d_out) {
+    dim3 grid(kM / TM, 4, 1);
+    ffn12_fused_split2_pairh32_quarterout_lat2_bf16_kernel<TM, GeluMode, TK, THidden>
+        <<<grid, 1>>>(d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+}
+
+template <int TM,
+          int GeluMode = kGeluErf,
+          int TK = kTileK,
+          int THidden = 32>
+void launch_fused_split2_pairh32_outseq(const __nv_bfloat16* d_a,
+                                        const __nv_bfloat16* d_w1,
+                                        const __nv_bfloat16* d_b1,
+                                        const __nv_bfloat16* d_w2,
+                                        const __nv_bfloat16* d_b2,
+                                        __nv_bfloat16* d_out) {
+    dim3 grid(kM / TM, 1, 1);
+    ffn12_fused_split2_pairh32_outseq_bf16_kernel<TM, GeluMode, TK, THidden>
+        <<<grid, 1>>>(d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+}
+#endif
+
+template <int TM, int GeluMode = kGeluErf, bool FullBF16 = false>
+void launch_fused_split2_pairh32_source_style(const __nv_bfloat16* d_a,
+                                              const __nv_bfloat16* d_w1,
+                                              const __nv_bfloat16* d_b1,
+                                              const __nv_bfloat16* d_w2,
+                                              const __nv_bfloat16* d_b2,
+                                              __nv_bfloat16* d_out) {
+    dim3 grid(kM / TM, 1, 1);
+    ffn12_fused_split2_pairh32_source_style_bf16_kernel<TM, GeluMode, FullBF16>
+        <<<grid, 1>>>(d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+}
+
+template <int TM, int GeluMode = kGeluErf, int TK = kTileK>
+void launch_fused_split4_pairh32(const __nv_bfloat16* d_a,
+                                 const __nv_bfloat16* d_w1,
+                                 const __nv_bfloat16* d_b1,
+                                 const __nv_bfloat16* d_w2,
+                                 const __nv_bfloat16* d_b2,
+                                 __nv_bfloat16* d_out) {
+    dim3 grid(kM / TM, 1, 1);
+    ffn12_fused_split4_pairh32_bf16_kernel<TM, GeluMode, TK>
+        <<<grid, 1>>>(d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+}
+
+template <int TM, int GeluMode = kGeluErf>
+void launch_fused_split2_quadh32(const __nv_bfloat16* d_a,
+                                 const __nv_bfloat16* d_w1,
+                                 const __nv_bfloat16* d_b1,
+                                 const __nv_bfloat16* d_w2,
+                                 const __nv_bfloat16* d_b2,
+                                 __nv_bfloat16* d_out) {
+    dim3 grid(kM / TM, 1, 1);
+    ffn12_fused_split2_quadh32_bf16_kernel<TM, GeluMode>
         <<<grid, 1>>>(d_a, d_w1, d_b1, d_w2, d_b2, d_out);
 }
 
@@ -723,27 +2475,389 @@ int main(int argc, char** argv) {
         __nv_bfloat16* d_b1 = nullptr;
         __nv_bfloat16* d_hidden = nullptr;
         __nv_bfloat16* d_w2 = nullptr;
+#ifdef CUDASEP_FFN12_CANDIDATES_ONLY
+        __nv_bfloat16* d_w1_bkn = nullptr;
+        __nv_bfloat16* d_w2_bkn = nullptr;
+#endif
         __nv_bfloat16* d_b2 = nullptr;
         __nv_bfloat16* d_out = nullptr;
+        __nv_bfloat16* d_partial = nullptr;
         CUDA_CHECK(cudaMalloc(&d_a, a_elems * sizeof(__nv_bfloat16)));
         CUDA_CHECK(cudaMalloc(&d_w1, w1_elems * sizeof(__nv_bfloat16)));
         CUDA_CHECK(cudaMalloc(&d_b1, b1_elems * sizeof(__nv_bfloat16)));
         CUDA_CHECK(cudaMalloc(&d_hidden, hidden_elems * sizeof(__nv_bfloat16)));
         CUDA_CHECK(cudaMalloc(&d_w2, w2_elems * sizeof(__nv_bfloat16)));
+#ifdef CUDASEP_FFN12_CANDIDATES_ONLY
+        CUDA_CHECK(cudaMalloc(&d_w1_bkn, w1_elems * sizeof(__nv_bfloat16)));
+        CUDA_CHECK(cudaMalloc(&d_w2_bkn, w2_elems * sizeof(__nv_bfloat16)));
+#endif
         CUDA_CHECK(cudaMalloc(&d_b2, b2_elems * sizeof(__nv_bfloat16)));
         CUDA_CHECK(cudaMalloc(&d_out, out_elems * sizeof(__nv_bfloat16)));
+        CUDA_CHECK(cudaMalloc(&d_partial, 4 * out_elems * sizeof(__nv_bfloat16)));
 
         init_bf16(d_a, a_elems);
         init_bf16(d_w1, w1_elems);
         init_bf16(d_b1, b1_elems);
         init_bf16(d_w2, w2_elems);
         init_bf16(d_b2, b2_elems);
+#ifdef CUDASEP_FFN12_CANDIDATES_ONLY
+        init_bkn_from_nt(d_w1, d_w1_bkn, kIn, kHidden);
+        init_bkn_from_nt(d_w2, d_w2_bkn, kHidden, kOut);
+#endif
         CUDA_CHECK(cudaDeviceSynchronize());
 
         std::printf("FFN1->GELU->FFN2 CUDA Tile fusion probe\n");
         std::printf("shape: M=%d, in=%d, hidden=%d, out=%d, BF16 storage, FP32 mma accumulate\n",
                     kM, kIn, kHidden, kOut);
 
+#ifdef CUDASEP_FFN12_CANDIDATES_ONLY
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32<32, kGeluErfPoly9L30, 64>(
+                                d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_bkn")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_bkn", 32, 256, 1, 1, opts,
+                        d_a, d_w1_bkn, d_b1, d_w2_bkn, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32_bkn<32, kGeluErfPoly9L30, 64>(
+                                d_a, d_w1_bkn, d_b1, d_w2_bkn, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_tinyblend_split2_pairh32_tk64")) {
+            run_variant("fused_h32_poly9_tinyblend_split2_pairh32_tk64",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32<32, kGeluErfPoly9TinyBlend, 64>(
+                                d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_identity_split2_pairh32_tk64")) {
+            run_variant("fused_h32_identity_split2_pairh32_tk64",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32<32, kGeluIdentity, 64>(
+                                d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_tk64")) {
+            run_variant("fused_h32_poly9_split2_tk64", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2<32, 32, kGeluErfPoly9L30, true, true, 64>(
+                                d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_m8_h32_poly9_split2_pairh32_tk64")) {
+            run_variant("fused_m8_h32_poly9_split2_pairh32_tk64", 8, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32<8, kGeluErfPoly9L30, 64>(
+                                d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk128")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk128", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32<32, kGeluErfPoly9L30, 128>(
+                                d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk256")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk256", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32<32, kGeluErfPoly9L30, 256>(
+                                d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h64_poly9_split2_pairh64_tk64")) {
+            run_variant("fused_h64_poly9_split2_pairh64_tk64", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32<32, kGeluErfPoly9L30, 64, 64>(
+                                d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h64_poly9_split2_pairh64_tk64_idx32")) {
+            run_variant("fused_h64_poly9_split2_pairh64_tk64_idx32", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 64, false, false, true, true,
+                                 false, true, true, int>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h64_poly9_split2_pairh64_tk64_outnoround")) {
+            run_variant("fused_h64_poly9_split2_pairh64_tk64_outnoround",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 64, false, false, true, true,
+                                 false, true, false>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h64_poly9_split2_pairh64_tk64_idx32_outnoround")) {
+            run_variant("fused_h64_poly9_split2_pairh64_tk64_idx32_outnoround",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 64, false, false, true, true,
+                                 false, true, false, int>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_halfout")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_halfout", 32, 128, 2, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32_halfout<32, kGeluErfPoly9L30, 64>(
+                                d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_quarterout")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_quarterout",
+                        32, 64, 4, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32_quarterout
+                                <32, kGeluErfPoly9L30, 64>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_quarterout_w1w2lat2")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_quarterout_w1w2lat2",
+                        32, 64, 4, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32_quarterout_lat2
+                                <32, kGeluErfPoly9L30, 64>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_outseq")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_outseq", 32, 128, 2, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32_outseq<32, kGeluErfPoly9L30, 64>(
+                                d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_noround")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_noround", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, false, false, true, true,
+                                 false, false>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_outnoround")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_outnoround", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, false, false, true, true,
+                                 false, true, false>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_idx32")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_idx32", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, false, false, true, true,
+                                 false, true, true, int>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_idx32_outnoround")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_idx32_outnoround",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, false, false, true, true,
+                                 false, true, false, int>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_nooutbias")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_nooutbias", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, false, false, true, false>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_nobias")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_nobias", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, false, false, false, false>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_w1lat8")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_w1lat8", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, false, false, true, true, true>(
+	                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+	                        });
+	        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_w1lat2")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_w1lat2", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, false, false, true, true,
+                                 true, true, true, long long, false, false, false, false, 2>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_w1batched2")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_w1batched2",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, false, false, true, true,
+                                 false, true, true, long long, false, false, true>(
+	                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+	                        });
+	        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_w2batched2")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_w2batched2",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, false, false, true, true,
+                                 false, true, true, long long, false, false, false, true>(
+	                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+	                        });
+	        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_hsplit2_partial")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_hsplit2_partial",
+                        32, 256, 1, 2, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32_hsplit_partial<2>(
+                                d_a, d_w1, d_b1, d_w2, d_b2, d_partial, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_hsplit4_partial")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_hsplit4_partial",
+                        32, 256, 1, 2, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32_hsplit_partial<4>(
+                                d_a, d_w1, d_b1, d_w2, d_b2, d_partial, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_stagedhidden")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_stagedhidden", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, false, false, true, true,
+                                 false, true, true, long long, true>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split4_pairh32_tk64")) {
+            run_variant("fused_h32_poly9_split4_pairh32_tk64", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split4_pairh32<32, kGeluErfPoly9L30, 64>(
+                                d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_accgroup")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_accgroup", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, false, true>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_w2lat8")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_w2lat8", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, true>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_w2lat2")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_w2lat2", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, true, false, true, true,
+                                 false, true, true, long long, false, false, false, false, 2>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_w1w2lat2")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_w1w2lat2", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, true, false, true, true,
+                                 true, true, true, long long, false, false, false, false, 2>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_w2temp")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_w2temp", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, false, false, true, true,
+                                 false, true, true, long long, false, true>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_w2splitspan")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_w2splitspan",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32_w2splitspan
+                                <32, kGeluErfPoly9L30, 64>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_w2manual")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_w2manual",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32_w2manual
+                                <32, kGeluErfPoly9L30, 64>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+#else
         if (should_run(opts, "separate")) {
             run_variant("separate", 32, 64, 1, 2, opts,
                         d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
@@ -880,11 +2994,210 @@ int main(int argc, char** argv) {
                                 d_a, d_w1, d_b1, d_w2, d_b2, d_out);
                         });
         }
+        if (should_run(opts, "fused_m16_h16_poly9_split2")) {
+            run_variant("fused_m16_h16_poly9_split2", 16, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2<16, 16, kGeluErfPoly9L30>(
+                                d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_m16_h32_poly9_split2")) {
+            run_variant("fused_m16_h32_poly9_split2", 16, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2<16, 32, kGeluErfPoly9L30>(
+                                d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_m16_h64_poly9_split2")) {
+            run_variant("fused_m16_h64_poly9_split2", 16, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2<16, 64, kGeluErfPoly9L30>(
+                                d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
         if (should_run(opts, "fused_h32_poly9_split2")) {
             run_variant("fused_h32_poly9_split2", 32, 256, 1, 1, opts,
                         d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
                         [&] {
                             launch_fused_split2<32, 32, kGeluErfPoly9L30>(
+                                d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_identity_split2")) {
+            run_variant("fused_h32_identity_split2", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2<32, 32, kGeluIdentity>(
+                                d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_identity_nooutbias_split2")) {
+            run_variant("fused_h32_identity_nooutbias_split2", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2<32, 32, kGeluIdentity, true, false>(
+                                d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_rawhidden_split2")) {
+            run_variant("fused_h32_rawhidden_split2", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2<32, 32, kGeluIdentity, false>(
+                                d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32")) {
+            run_variant("fused_h32_poly9_split2_pairh32", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32<32, kGeluErfPoly9L30>(
+                                d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk16")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk16", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32<32, kGeluErfPoly9L30, 16>(
+                                d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32<32, kGeluErfPoly9L30, 64>(
+                                d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_accgroup")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_accgroup", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, false, true>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_w2lat8")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_w2lat8", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, true>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_w2temp")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_w2temp", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, false, false, true, true,
+                                 false, true, true, long long, false, true>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_occ2")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_occ2", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32_occ2<32, kGeluErfPoly9L30, 64>(
+                                d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h16_poly9_split2_pairh16_tk64")) {
+            run_variant("fused_h16_poly9_split2_pairh16_tk64", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32<32, kGeluErfPoly9L30, 64, 16>(
+                                d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h64_poly9_split2_pairh64_tk64")) {
+            run_variant("fused_h64_poly9_split2_pairh64_tk64", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32<32, kGeluErfPoly9L30, 64, 64>(
+                                d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_m16_h32_poly9_split2_pairh32")) {
+            run_variant("fused_m16_h32_poly9_split2_pairh32", 16, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32<16, kGeluErfPoly9L30>(
+                                d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_m16_h32_poly9_split2_pairh32_tk64")) {
+            run_variant("fused_m16_h32_poly9_split2_pairh32_tk64", 16, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32<16, kGeluErfPoly9L30, 64>(
+                                d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_tinyblend_split2_pairh32")) {
+            run_variant("fused_h32_poly9_tinyblend_split2_pairh32", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32<32, kGeluErfPoly9TinyBlend>(
+                                d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_tinyblend_split2_pairh32_tk64")) {
+            run_variant("fused_h32_poly9_tinyblend_split2_pairh32_tk64",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32<32, kGeluErfPoly9TinyBlend, 64>(
+                                d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_identity_split2_pairh32")) {
+            run_variant("fused_h32_identity_split2_pairh32", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32<32, kGeluIdentity>(
+                                d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_identity_split2_pairh32_tk64")) {
+            run_variant("fused_h32_identity_split2_pairh32_tk64",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32<32, kGeluIdentity, 64>(
+                                d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_source_style")) {
+            run_variant("fused_h32_poly9_split2_pairh32_source_style", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32_source_style
+                                <32, kGeluErfPoly9L30, false>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split4_pairh32")) {
+            run_variant("fused_h32_poly9_split4_pairh32", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split4_pairh32<32, kGeluErfPoly9L30>(
+                                d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_quadh32")) {
+            run_variant("fused_h32_poly9_split2_quadh32", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_quadh32<32, kGeluErfPoly9L30>(
                                 d_a, d_w1, d_b1, d_w2, d_b2, d_out);
                         });
         }
@@ -941,14 +3254,20 @@ int main(int argc, char** argv) {
                             launch_fused<16, 256, 16>(d_a, d_w1, d_b1, d_w2, d_b2, d_out);
                         });
         }
+#endif
 
         CUDA_CHECK(cudaFree(d_a));
         CUDA_CHECK(cudaFree(d_w1));
         CUDA_CHECK(cudaFree(d_b1));
         CUDA_CHECK(cudaFree(d_hidden));
         CUDA_CHECK(cudaFree(d_w2));
+#ifdef CUDASEP_FFN12_CANDIDATES_ONLY
+        CUDA_CHECK(cudaFree(d_w1_bkn));
+        CUDA_CHECK(cudaFree(d_w2_bkn));
+#endif
         CUDA_CHECK(cudaFree(d_b2));
         CUDA_CHECK(cudaFree(d_out));
+        CUDA_CHECK(cudaFree(d_partial));
         return 0;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());

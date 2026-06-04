@@ -121,7 +121,13 @@ private:
 
     // Forward sub-steps
     Tensor apply_attention(const Tensor& x, const AttentionWeights& w,
-                          const Tensor& cos_freqs, const Tensor& sin_freqs);
+                          const Tensor& cos_freqs, const Tensor& sin_freqs,
+                          const Tensor* residual,
+                          bool* used_fused_residual);
+    Tensor apply_attention_normed(const Tensor& normed, const AttentionWeights& w,
+                                  const Tensor& cos_freqs, const Tensor& sin_freqs,
+                                  const Tensor* residual,
+                                  bool* used_fused_residual);
     Tensor apply_feedforward(const Tensor& x, const FeedForwardWeights& w);
     Tensor apply_transformer(const Tensor& x, const TransformerLayerWeights& w,
                             const Tensor& cos_freqs, const Tensor& sin_freqs);

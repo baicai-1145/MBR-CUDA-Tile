@@ -31,6 +31,9 @@ constexpr int kNPad = 1344;
 constexpr int kNMain = 1280;
 constexpr int kD = 64;
 constexpr int kBH = 480;
+constexpr int kHeads = 8;
+constexpr int kBatches = kBH / kHeads;
+constexpr int kQkvStride = 3 * kHeads * kD;
 constexpr int kKTile = 64;
 constexpr int kInitTile = 256;
 constexpr float kLog2E = 1.44269504088896340736f;
@@ -39,6 +42,8 @@ struct Options {
     int warmup = 1;
     int iters = 3;
     bool validate = false;
+    bool compare_baseline = false;
+    std::string variant = "all";
 };
 
 int parse_int_arg(const char* name, const char* value) {
@@ -63,6 +68,10 @@ Options parse_args(int argc, char** argv) {
             opts.warmup = parse_int_arg(argv[i], need_value(argv[i]));
         } else if (std::strcmp(argv[i], "--iters") == 0) {
             opts.iters = parse_int_arg(argv[i], need_value(argv[i]));
+        } else if (std::strcmp(argv[i], "--variant") == 0) {
+            opts.variant = need_value(argv[i]);
+        } else if (std::strcmp(argv[i], "--compare-baseline") == 0) {
+            opts.compare_baseline = true;
         } else if (std::strcmp(argv[i], "--validate") == 0) {
             opts.validate = true;
         } else if (std::strcmp(argv[i], "--help") == 0) {
@@ -70,6 +79,25 @@ Options parse_args(int argc, char** argv) {
                 "Usage: bench_bf16_time_attention_cutile [options]\n"
                 "  --warmup N  warmup launches, default 1\n"
                 "  --iters N   measured launches, default 3\n"
+                "  --variant NAME  run one focused variant, default all\n"
+                "                  main1280_q32k32_exp2,\n"
+                "                  main1280_q64k16_exp2,\n"
+                "                  main1280_q64k32_exp2,\n"
+                "                  main1280_q64k64_exp2,\n"
+                "                  main1280_q128k32_exp2,\n"
+                "                  main1280_q64k32_exp2_sum_bf16,\n"
+                "                  main1280_q64k32_exp2_score_bf16,\n"
+                "                  main1280_q64k32_exp2_prescale_q,\n"
+                "                  main1280_q64k32_exp2_split_d32,\n"
+                "                  main1280_q64k32_exp2_qkv_direct_rotary,\n"
+                "                  main1280_q64k32_exp2_split_contig_input,\n"
+                "                  main1280_q64k32_exp2_split_contig_tail_idx32,\n"
+                "                  main1280_q64k32_exp2_split_contig_tail_first,\n"
+                "                  main1280_q64k32_exp2_split_contig_padded_tail_load,\n"
+                "                  main1280_q64k32_exp2_split_contig_two_pass_state,\n"
+                "                  main1280_q64k32_exp2_split_contig_input_no_keytail,\n"
+                "                  split_tail_q64k32_tail32k32_exp2\n"
+                "  --compare-baseline  compare focused output against q64/k32 exp2\n"
                 "  --validate  compare several BH0 rows against CPU reference\n");
             std::exit(0);
         } else {
@@ -126,6 +154,121 @@ __tile_global__ void transpose_k_nd_to_dn_kernel(const __nv_bfloat16* __restrict
     auto dst_idx = (bh * kD + d) * kN + n;
     auto values = ct::load_masked(src + idx, valid);
     ct::store_masked(dst + dst_idx, values, valid);
+}
+
+__tile_global__ void fill_rotary_identity_kernel(float* __restrict__ cos_f,
+                                                 float* __restrict__ sin_f,
+                                                 long long total) {
+    using I64Tile = ct::tile<long long, ct::shape<256>>;
+    cos_f = ct::assume_aligned(cos_f, 16_ic);
+    sin_f = ct::assume_aligned(sin_f, 16_ic);
+
+    I64Tile idx = (long long)ct::bid().x * 256 + ct::iota<I64Tile>();
+    auto valid = idx < total;
+    auto one = ct::element_cast<float>(idx * 0LL) + 1.0f;
+    auto zero = one * 0.0f;
+    ct::store_masked(cos_f + idx, one, valid);
+    ct::store_masked(sin_f + idx, zero, valid);
+}
+
+__tile_global__ void pack_time_qkv_kernel(const __nv_bfloat16* __restrict__ q,
+                                          const __nv_bfloat16* __restrict__ k,
+                                          const __nv_bfloat16* __restrict__ v,
+                                          __nv_bfloat16* __restrict__ qkv,
+                                          long long total) {
+    using I64Tile = ct::tile<long long, ct::shape<256>>;
+    q = ct::assume_aligned(q, 16_ic);
+    k = ct::assume_aligned(k, 16_ic);
+    v = ct::assume_aligned(v, 16_ic);
+    qkv = ct::assume_aligned(qkv, 16_ic);
+
+    I64Tile idx = (long long)ct::bid().x * 256 + ct::iota<I64Tile>();
+    auto valid = idx < total;
+    auto d = idx % kD;
+    auto n = (idx / kD) % kN;
+    auto bh = idx / ((long long)kN * kD);
+    auto b = bh / kHeads;
+    auto h = bh - b * kHeads;
+    auto head_offset = h * kD + d;
+    auto qkv_base = (b * kN + n) * kQkvStride;
+
+    auto qv = ct::load_masked(q + idx, valid);
+    auto kv = ct::load_masked(k + idx, valid);
+    auto vv = ct::load_masked(v + idx, valid);
+    ct::store_masked(qkv + qkv_base + head_offset, qv, valid);
+    ct::store_masked(qkv + qkv_base + kHeads * kD + head_offset, kv, valid);
+    ct::store_masked(qkv + qkv_base + 2LL * kHeads * kD + head_offset, vv, valid);
+}
+
+__tile_global__ void pack_time_split_contig_kernel(
+    const __nv_bfloat16* __restrict__ q,
+    const __nv_bfloat16* __restrict__ k,
+    const __nv_bfloat16* __restrict__ v,
+    __nv_bfloat16* __restrict__ q_split,
+    __nv_bfloat16* __restrict__ k_split,
+    __nv_bfloat16* __restrict__ v_split,
+    long long total) {
+    using I64Tile = ct::tile<long long, ct::shape<256>>;
+    q = ct::assume_aligned(q, 16_ic);
+    k = ct::assume_aligned(k, 16_ic);
+    v = ct::assume_aligned(v, 16_ic);
+    q_split = ct::assume_aligned(q_split, 16_ic);
+    k_split = ct::assume_aligned(k_split, 16_ic);
+    v_split = ct::assume_aligned(v_split, 16_ic);
+
+    I64Tile idx = (long long)ct::bid().x * 256 + ct::iota<I64Tile>();
+    auto valid = idx < total;
+    auto d = idx % kD;
+    auto n = (idx / kD) % kN;
+    auto bh = idx / ((long long)kN * kD);
+    auto b = bh / kHeads;
+    auto h = bh - b * kHeads;
+    auto dst = (b * kN + n) * (kHeads * kD) + h * kD + d;
+
+    auto qv = ct::load_masked(q + idx, valid);
+    auto kv = ct::load_masked(k + idx, valid);
+    auto vv = ct::load_masked(v + idx, valid);
+    ct::store_masked(q_split + dst, qv, valid);
+    ct::store_masked(k_split + dst, kv, valid);
+    ct::store_masked(v_split + dst, vv, valid);
+}
+
+__tile_global__ void pack_time_split_contig_padded_kernel(
+    const __nv_bfloat16* __restrict__ q,
+    const __nv_bfloat16* __restrict__ k,
+    const __nv_bfloat16* __restrict__ v,
+    __nv_bfloat16* __restrict__ q_split,
+    __nv_bfloat16* __restrict__ k_split,
+    __nv_bfloat16* __restrict__ v_split,
+    long long total) {
+    using I64Tile = ct::tile<long long, ct::shape<256>>;
+    q = ct::assume_aligned(q, 16_ic);
+    k = ct::assume_aligned(k, 16_ic);
+    v = ct::assume_aligned(v, 16_ic);
+    q_split = ct::assume_aligned(q_split, 16_ic);
+    k_split = ct::assume_aligned(k_split, 16_ic);
+    v_split = ct::assume_aligned(v_split, 16_ic);
+
+    I64Tile idx = (long long)ct::bid().x * 256 + ct::iota<I64Tile>();
+    auto valid = idx < total;
+    auto d = idx % kD;
+    auto h = (idx / kD) % kHeads;
+    auto n = (idx / ((long long)kD * kHeads)) % kNPad;
+    auto b = idx / ((long long)kNPad * kHeads * kD);
+    auto src = ((b * kHeads + h) * kN + n) * kD + d;
+    auto dst = (b * kNPad + n) * (kHeads * kD) + h * kD + d;
+    auto src_valid = valid && (n < kN);
+
+    auto qv = ct::load_masked(q + src, src_valid);
+    auto kv = ct::load_masked(k + src, src_valid);
+    auto vv = ct::load_masked(v + src, src_valid);
+    auto zero = ct::element_cast<__nv_bfloat16>(ct::element_cast<float>(idx * 0LL));
+    qv = ct::select(src_valid, qv, zero);
+    kv = ct::select(src_valid, kv, zero);
+    vv = ct::select(src_valid, vv, zero);
+    ct::store_masked(q_split + dst, qv, valid);
+    ct::store_masked(k_split + dst, kv, valid);
+    ct::store_masked(v_split + dst, vv, valid);
 }
 
 template <int QRows>
@@ -933,6 +1076,555 @@ __tile_global__ void time_attention1301_main1280_kernel(
     out_view.store(ct::element_cast<__nv_bfloat16>(out_acc / row_l), q_block, 0);
 }
 
+template <int QRows,
+          int KTile,
+          bool UseExp2 = true,
+          bool IncludeKeyTail = true,
+          bool TailIdx32 = false>
+__tile_global__ void time_attention1301_main1280_split_contig_input_kernel(
+    const __nv_bfloat16* __restrict__ q,
+    const __nv_bfloat16* __restrict__ k,
+    const __nv_bfloat16* __restrict__ v,
+    __nv_bfloat16* __restrict__ out,
+    float scale) {
+    constexpr int FullKTiles = kNMain / KTile;
+    using ScoreTile = ct::tile<float, ct::shape<QRows, KTile>>;
+    using OutTile = ct::tile<float, ct::shape<QRows, kD>>;
+    using I64ScoreTile = ct::tile<long long, ct::shape<QRows, KTile>>;
+    using RowTile = ct::tile<float, ct::shape<QRows, 1>>;
+    using NDShape = ct::shape<kN, kD>;
+    using DNShape = ct::shape<kD, kN>;
+    using NDStrides = ct::shape<kHeads * kD, 1>;
+    using DNStrides = ct::shape<1, kHeads * kD>;
+    using NDLayout = ct::layout_strided<NDStrides>;
+    using DNLayout = ct::layout_strided<DNStrides>;
+    using NDMapping = typename NDLayout::template mapping<NDShape>;
+    using DNMapping = typename DNLayout::template mapping<DNShape>;
+
+    q = ct::assume_aligned(q, 16_ic);
+    k = ct::assume_aligned(k, 16_ic);
+    v = ct::assume_aligned(v, 16_ic);
+    out = ct::assume_aligned(out, 16_ic);
+
+    auto [q_block, bh_raw, tile_z] = ct::bid();
+    (void)tile_z;
+    int bh = static_cast<int>(bh_raw);
+    int b = bh / kHeads;
+    int h = bh - b * kHeads;
+    const std::size_t base =
+        (static_cast<std::size_t>(b) * kN * kHeads + h) * kD;
+    const __nv_bfloat16* q_batch = q + base;
+    const __nv_bfloat16* k_batch = k + base;
+    const __nv_bfloat16* v_batch = v + base;
+    __nv_bfloat16* out_batch =
+        out + static_cast<std::size_t>(bh) * kN * kD;
+
+    auto q_view = ct::partition_view{
+        ct::tensor_span{q_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<QRows, kD>{}
+    };
+    auto k_t_view = ct::partition_view{
+        ct::tensor_span{k_batch, DNMapping{DNShape{}, DNStrides{}}},
+        ct::shape<kD, KTile>{}
+    };
+    auto v_view = ct::partition_view{
+        ct::tensor_span{v_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<KTile, kD>{}
+    };
+    auto out_view = ct::partition_view{
+        ct::tensor_span{out_batch, ct::shape<kN, kD>{}},
+        ct::shape<QRows, kD>{}
+    };
+
+    auto q_tile = q_view.load(q_block, 0);
+    RowTile row_m = ct::full<RowTile>(-3.402823466e38f);
+    RowTile row_l = ct::full<RowTile>(0.0f);
+    OutTile out_acc = ct::full<OutTile>(0.0f);
+
+    for (auto kt : ct::irange(std::size_t{0}, std::size_t{FullKTiles})) {
+        auto scores = ct::mma(q_tile,
+                              k_t_view.load(0, kt),
+                              ct::full<ScoreTile>(0.0f)) * scale;
+        auto tile_m = ct::reduce_max<1>(scores);
+        auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+        auto alpha = softmax_exp<UseExp2>(row_m - new_m);
+        auto probs_f32 = softmax_exp<UseExp2>(scores - new_m);
+        auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+        auto tile_l = ct::sum<1>(probs_f32);
+
+        out_acc = out_acc * alpha +
+                  ct::mma(probs_bf16,
+                          v_view.load(kt, 0),
+                          ct::full<OutTile>(0.0f));
+        row_l = row_l * alpha + tile_l;
+        row_m = new_m;
+    }
+
+    if constexpr (IncludeKeyTail) {
+        if constexpr (TailIdx32) {
+            using I32ScoreTile = ct::tile<int, ct::shape<QRows, KTile>>;
+            I32ScoreTile score_local = ct::iota<I32ScoreTile>();
+            auto key_cols = FullKTiles * KTile + score_local % KTile;
+            auto valid = key_cols < kN;
+            auto scores = ct::mma(q_tile,
+                                  k_t_view.load_masked(0, FullKTiles),
+                                  ct::full<ScoreTile>(0.0f)) * scale;
+            auto neg_inf = scores * 0.0f - 3.402823466e38f;
+            scores = ct::select(valid, scores, neg_inf);
+            auto tile_m = ct::reduce_max<1>(scores);
+            auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+            auto alpha = softmax_exp<UseExp2>(row_m - new_m);
+            auto probs_f32 =
+                ct::select(valid, softmax_exp<UseExp2>(scores - new_m), scores * 0.0f);
+            auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+            auto tile_l = ct::sum<1>(probs_f32);
+            out_acc = out_acc * alpha +
+                      ct::mma(probs_bf16,
+                              v_view.load_masked(FullKTiles, 0),
+                              ct::full<OutTile>(0.0f));
+            row_l = row_l * alpha + tile_l;
+        } else {
+            I64ScoreTile score_local = ct::iota<I64ScoreTile>();
+            auto key_cols = static_cast<long long>(FullKTiles) * KTile + score_local % KTile;
+            auto valid = key_cols < kN;
+            auto scores = ct::mma(q_tile,
+                                  k_t_view.load_masked(0, FullKTiles),
+                                  ct::full<ScoreTile>(0.0f)) * scale;
+            auto neg_inf = scores * 0.0f - 3.402823466e38f;
+            scores = ct::select(valid, scores, neg_inf);
+            auto tile_m = ct::reduce_max<1>(scores);
+            auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+            auto alpha = softmax_exp<UseExp2>(row_m - new_m);
+            auto probs_f32 =
+                ct::select(valid, softmax_exp<UseExp2>(scores - new_m), scores * 0.0f);
+            auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+            auto tile_l = ct::sum<1>(probs_f32);
+            out_acc = out_acc * alpha +
+                      ct::mma(probs_bf16,
+                              v_view.load_masked(FullKTiles, 0),
+                              ct::full<OutTile>(0.0f));
+            row_l = row_l * alpha + tile_l;
+        }
+    }
+
+    out_view.store(ct::element_cast<__nv_bfloat16>(out_acc / row_l), q_block, 0);
+}
+
+template <int QRows, int KTile, bool UseExp2 = true>
+__tile_global__ void time_attention1301_main1280_split_contig_tail_first_kernel(
+    const __nv_bfloat16* __restrict__ q,
+    const __nv_bfloat16* __restrict__ k,
+    const __nv_bfloat16* __restrict__ v,
+    __nv_bfloat16* __restrict__ out,
+    float scale) {
+    constexpr int FullKTiles = kNMain / KTile;
+    using ScoreTile = ct::tile<float, ct::shape<QRows, KTile>>;
+    using OutTile = ct::tile<float, ct::shape<QRows, kD>>;
+    using I64ScoreTile = ct::tile<long long, ct::shape<QRows, KTile>>;
+    using RowTile = ct::tile<float, ct::shape<QRows, 1>>;
+    using NDShape = ct::shape<kN, kD>;
+    using DNShape = ct::shape<kD, kN>;
+    using NDStrides = ct::shape<kHeads * kD, 1>;
+    using DNStrides = ct::shape<1, kHeads * kD>;
+    using NDLayout = ct::layout_strided<NDStrides>;
+    using DNLayout = ct::layout_strided<DNStrides>;
+    using NDMapping = typename NDLayout::template mapping<NDShape>;
+    using DNMapping = typename DNLayout::template mapping<DNShape>;
+
+    q = ct::assume_aligned(q, 16_ic);
+    k = ct::assume_aligned(k, 16_ic);
+    v = ct::assume_aligned(v, 16_ic);
+    out = ct::assume_aligned(out, 16_ic);
+
+    auto [q_block, bh_raw, tile_z] = ct::bid();
+    (void)tile_z;
+    int bh = static_cast<int>(bh_raw);
+    int b = bh / kHeads;
+    int h = bh - b * kHeads;
+    const std::size_t base =
+        (static_cast<std::size_t>(b) * kN * kHeads + h) * kD;
+    const __nv_bfloat16* q_batch = q + base;
+    const __nv_bfloat16* k_batch = k + base;
+    const __nv_bfloat16* v_batch = v + base;
+    __nv_bfloat16* out_batch =
+        out + static_cast<std::size_t>(bh) * kN * kD;
+
+    auto q_view = ct::partition_view{
+        ct::tensor_span{q_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<QRows, kD>{}
+    };
+    auto k_t_view = ct::partition_view{
+        ct::tensor_span{k_batch, DNMapping{DNShape{}, DNStrides{}}},
+        ct::shape<kD, KTile>{}
+    };
+    auto v_view = ct::partition_view{
+        ct::tensor_span{v_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<KTile, kD>{}
+    };
+    auto out_view = ct::partition_view{
+        ct::tensor_span{out_batch, ct::shape<kN, kD>{}},
+        ct::shape<QRows, kD>{}
+    };
+
+    auto q_tile = q_view.load(q_block, 0);
+    RowTile row_m = ct::full<RowTile>(-3.402823466e38f);
+    RowTile row_l = ct::full<RowTile>(0.0f);
+    OutTile out_acc = ct::full<OutTile>(0.0f);
+
+    {
+        I64ScoreTile score_local = ct::iota<I64ScoreTile>();
+        auto key_cols = static_cast<long long>(FullKTiles) * KTile + score_local % KTile;
+        auto valid = key_cols < kN;
+        auto scores = ct::mma(q_tile,
+                              k_t_view.load_masked(0, FullKTiles),
+                              ct::full<ScoreTile>(0.0f)) * scale;
+        auto neg_inf = scores * 0.0f - 3.402823466e38f;
+        scores = ct::select(valid, scores, neg_inf);
+        row_m = ct::reduce_max<1>(scores);
+        auto probs_f32 =
+            ct::select(valid, softmax_exp<UseExp2>(scores - row_m), scores * 0.0f);
+        auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+        row_l = ct::sum<1>(probs_f32);
+        out_acc = ct::mma(probs_bf16,
+                          v_view.load_masked(FullKTiles, 0),
+                          ct::full<OutTile>(0.0f));
+    }
+
+    for (auto kt : ct::irange(std::size_t{0}, std::size_t{FullKTiles})) {
+        auto scores = ct::mma(q_tile,
+                              k_t_view.load(0, kt),
+                              ct::full<ScoreTile>(0.0f)) * scale;
+        auto tile_m = ct::reduce_max<1>(scores);
+        auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+        auto alpha = softmax_exp<UseExp2>(row_m - new_m);
+        auto probs_f32 = softmax_exp<UseExp2>(scores - new_m);
+        auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+        auto tile_l = ct::sum<1>(probs_f32);
+
+        out_acc = out_acc * alpha +
+                  ct::mma(probs_bf16,
+                          v_view.load(kt, 0),
+                          ct::full<OutTile>(0.0f));
+        row_l = row_l * alpha + tile_l;
+        row_m = new_m;
+    }
+
+    out_view.store(ct::element_cast<__nv_bfloat16>(out_acc / row_l), q_block, 0);
+}
+
+template <int QRows, int KTile, bool UseExp2 = true>
+__tile_global__ void time_attention1301_main1280_split_contig_padded_tail_load_kernel(
+    const __nv_bfloat16* __restrict__ q,
+    const __nv_bfloat16* __restrict__ k,
+    const __nv_bfloat16* __restrict__ v,
+    __nv_bfloat16* __restrict__ out,
+    float scale) {
+    constexpr int FullKTiles = kNMain / KTile;
+    using ScoreTile = ct::tile<float, ct::shape<QRows, KTile>>;
+    using OutTile = ct::tile<float, ct::shape<QRows, kD>>;
+    using I64ScoreTile = ct::tile<long long, ct::shape<QRows, KTile>>;
+    using RowTile = ct::tile<float, ct::shape<QRows, 1>>;
+    using NDShape = ct::shape<kNPad, kD>;
+    using DNShape = ct::shape<kD, kNPad>;
+    using NDStrides = ct::shape<kHeads * kD, 1>;
+    using DNStrides = ct::shape<1, kHeads * kD>;
+    using NDLayout = ct::layout_strided<NDStrides>;
+    using DNLayout = ct::layout_strided<DNStrides>;
+    using NDMapping = typename NDLayout::template mapping<NDShape>;
+    using DNMapping = typename DNLayout::template mapping<DNShape>;
+
+    q = ct::assume_aligned(q, 16_ic);
+    k = ct::assume_aligned(k, 16_ic);
+    v = ct::assume_aligned(v, 16_ic);
+    out = ct::assume_aligned(out, 16_ic);
+
+    auto [q_block, bh_raw, tile_z] = ct::bid();
+    (void)tile_z;
+    int bh = static_cast<int>(bh_raw);
+    int b = bh / kHeads;
+    int h = bh - b * kHeads;
+    const std::size_t base =
+        (static_cast<std::size_t>(b) * kNPad * kHeads + h) * kD;
+    const __nv_bfloat16* q_batch = q + base;
+    const __nv_bfloat16* k_batch = k + base;
+    const __nv_bfloat16* v_batch = v + base;
+    __nv_bfloat16* out_batch =
+        out + static_cast<std::size_t>(bh) * kN * kD;
+
+    auto q_view = ct::partition_view{
+        ct::tensor_span{q_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<QRows, kD>{}
+    };
+    auto k_t_view = ct::partition_view{
+        ct::tensor_span{k_batch, DNMapping{DNShape{}, DNStrides{}}},
+        ct::shape<kD, KTile>{}
+    };
+    auto v_view = ct::partition_view{
+        ct::tensor_span{v_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<KTile, kD>{}
+    };
+    auto out_view = ct::partition_view{
+        ct::tensor_span{out_batch, ct::shape<kN, kD>{}},
+        ct::shape<QRows, kD>{}
+    };
+
+    auto q_tile = q_view.load(q_block, 0);
+    RowTile row_m = ct::full<RowTile>(-3.402823466e38f);
+    RowTile row_l = ct::full<RowTile>(0.0f);
+    OutTile out_acc = ct::full<OutTile>(0.0f);
+
+    for (auto kt : ct::irange(std::size_t{0}, std::size_t{FullKTiles})) {
+        auto scores = ct::mma(q_tile,
+                              k_t_view.load(0, kt),
+                              ct::full<ScoreTile>(0.0f)) * scale;
+        auto tile_m = ct::reduce_max<1>(scores);
+        auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+        auto alpha = softmax_exp<UseExp2>(row_m - new_m);
+        auto probs_f32 = softmax_exp<UseExp2>(scores - new_m);
+        auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+        auto tile_l = ct::sum<1>(probs_f32);
+
+        out_acc = out_acc * alpha +
+                  ct::mma(probs_bf16,
+                          v_view.load(kt, 0),
+                          ct::full<OutTile>(0.0f));
+        row_l = row_l * alpha + tile_l;
+        row_m = new_m;
+    }
+
+    I64ScoreTile score_local = ct::iota<I64ScoreTile>();
+    auto key_cols = static_cast<long long>(FullKTiles) * KTile + score_local % KTile;
+    auto valid = key_cols < kN;
+    auto scores = ct::mma(q_tile,
+                          k_t_view.load(0, FullKTiles),
+                          ct::full<ScoreTile>(0.0f)) * scale;
+    auto neg_inf = scores * 0.0f - 3.402823466e38f;
+    scores = ct::select(valid, scores, neg_inf);
+    auto tile_m = ct::reduce_max<1>(scores);
+    auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+    auto alpha = softmax_exp<UseExp2>(row_m - new_m);
+    auto probs_f32 =
+        ct::select(valid, softmax_exp<UseExp2>(scores - new_m), scores * 0.0f);
+    auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+    auto tile_l = ct::sum<1>(probs_f32);
+    out_acc = out_acc * alpha +
+              ct::mma(probs_bf16,
+                      v_view.load(FullKTiles, 0),
+                      ct::full<OutTile>(0.0f));
+    row_l = row_l * alpha + tile_l;
+
+    out_view.store(ct::element_cast<__nv_bfloat16>(out_acc / row_l), q_block, 0);
+}
+
+template <int QRows, int KTile, bool UseExp2 = true>
+__tile_global__ void time_attention1301_main1280_split_contig_state1280_kernel(
+    const __nv_bfloat16* __restrict__ q,
+    const __nv_bfloat16* __restrict__ k,
+    const __nv_bfloat16* __restrict__ v,
+    float* __restrict__ state_acc,
+    float* __restrict__ state_m,
+    float* __restrict__ state_l,
+    float scale) {
+    constexpr int FullKTiles = kNMain / KTile;
+    using ScoreTile = ct::tile<float, ct::shape<QRows, KTile>>;
+    using OutTile = ct::tile<float, ct::shape<QRows, kD>>;
+    using RowTile = ct::tile<float, ct::shape<QRows, 1>>;
+    using NDShape = ct::shape<kN, kD>;
+    using DNShape = ct::shape<kD, kN>;
+    using NDStrides = ct::shape<kHeads * kD, 1>;
+    using DNStrides = ct::shape<1, kHeads * kD>;
+    using NDLayout = ct::layout_strided<NDStrides>;
+    using DNLayout = ct::layout_strided<DNStrides>;
+    using NDMapping = typename NDLayout::template mapping<NDShape>;
+    using DNMapping = typename DNLayout::template mapping<DNShape>;
+
+    q = ct::assume_aligned(q, 16_ic);
+    k = ct::assume_aligned(k, 16_ic);
+    v = ct::assume_aligned(v, 16_ic);
+    state_acc = ct::assume_aligned(state_acc, 16_ic);
+    state_m = ct::assume_aligned(state_m, 16_ic);
+    state_l = ct::assume_aligned(state_l, 16_ic);
+
+    auto [q_block, bh_raw, tile_z] = ct::bid();
+    (void)tile_z;
+    int bh = static_cast<int>(bh_raw);
+    int b = bh / kHeads;
+    int h = bh - b * kHeads;
+    const std::size_t base =
+        (static_cast<std::size_t>(b) * kN * kHeads + h) * kD;
+    const __nv_bfloat16* q_batch = q + base;
+    const __nv_bfloat16* k_batch = k + base;
+    const __nv_bfloat16* v_batch = v + base;
+    float* state_acc_batch =
+        state_acc + static_cast<std::size_t>(bh) * kNMain * kD;
+    float* state_m_batch =
+        state_m + static_cast<std::size_t>(bh) * kNMain;
+    float* state_l_batch =
+        state_l + static_cast<std::size_t>(bh) * kNMain;
+
+    auto q_view = ct::partition_view{
+        ct::tensor_span{q_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<QRows, kD>{}
+    };
+    auto k_t_view = ct::partition_view{
+        ct::tensor_span{k_batch, DNMapping{DNShape{}, DNStrides{}}},
+        ct::shape<kD, KTile>{}
+    };
+    auto v_view = ct::partition_view{
+        ct::tensor_span{v_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<KTile, kD>{}
+    };
+    auto state_acc_view = ct::partition_view{
+        ct::tensor_span{state_acc_batch, ct::shape<kNMain, kD>{}},
+        ct::shape<QRows, kD>{}
+    };
+    auto state_m_view = ct::partition_view{
+        ct::tensor_span{state_m_batch, ct::shape<kNMain, 1>{}},
+        ct::shape<QRows, 1>{}
+    };
+    auto state_l_view = ct::partition_view{
+        ct::tensor_span{state_l_batch, ct::shape<kNMain, 1>{}},
+        ct::shape<QRows, 1>{}
+    };
+
+    auto q_tile = q_view.load(q_block, 0);
+    RowTile row_m = ct::full<RowTile>(-3.402823466e38f);
+    RowTile row_l = ct::full<RowTile>(0.0f);
+    OutTile out_acc = ct::full<OutTile>(0.0f);
+
+    for (auto kt : ct::irange(std::size_t{0}, std::size_t{FullKTiles})) {
+        auto scores = ct::mma(q_tile,
+                              k_t_view.load(0, kt),
+                              ct::full<ScoreTile>(0.0f)) * scale;
+        auto tile_m = ct::reduce_max<1>(scores);
+        auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+        auto alpha = softmax_exp<UseExp2>(row_m - new_m);
+        auto probs_f32 = softmax_exp<UseExp2>(scores - new_m);
+        auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+        auto tile_l = ct::sum<1>(probs_f32);
+
+        out_acc = out_acc * alpha +
+                  ct::mma(probs_bf16,
+                          v_view.load(kt, 0),
+                          ct::full<OutTile>(0.0f));
+        row_l = row_l * alpha + tile_l;
+        row_m = new_m;
+    }
+
+    state_acc_view.store(out_acc, q_block, 0);
+    state_m_view.store(row_m, q_block, 0);
+    state_l_view.store(row_l, q_block, 0);
+}
+
+template <int QRows, int KTile, bool UseExp2 = true>
+__tile_global__ void time_attention1301_main1280_split_contig_tail_finalize_kernel(
+    const __nv_bfloat16* __restrict__ q,
+    const __nv_bfloat16* __restrict__ k,
+    const __nv_bfloat16* __restrict__ v,
+    const float* __restrict__ state_acc,
+    const float* __restrict__ state_m,
+    const float* __restrict__ state_l,
+    __nv_bfloat16* __restrict__ out,
+    float scale) {
+    constexpr int FullKTiles = kNMain / KTile;
+    using ScoreTile = ct::tile<float, ct::shape<QRows, KTile>>;
+    using OutTile = ct::tile<float, ct::shape<QRows, kD>>;
+    using I64ScoreTile = ct::tile<long long, ct::shape<QRows, KTile>>;
+    using RowTile = ct::tile<float, ct::shape<QRows, 1>>;
+    using NDShape = ct::shape<kN, kD>;
+    using DNShape = ct::shape<kD, kN>;
+    using NDStrides = ct::shape<kHeads * kD, 1>;
+    using DNStrides = ct::shape<1, kHeads * kD>;
+    using NDLayout = ct::layout_strided<NDStrides>;
+    using DNLayout = ct::layout_strided<DNStrides>;
+    using NDMapping = typename NDLayout::template mapping<NDShape>;
+    using DNMapping = typename DNLayout::template mapping<DNShape>;
+
+    q = ct::assume_aligned(q, 16_ic);
+    k = ct::assume_aligned(k, 16_ic);
+    v = ct::assume_aligned(v, 16_ic);
+    state_acc = ct::assume_aligned(state_acc, 16_ic);
+    state_m = ct::assume_aligned(state_m, 16_ic);
+    state_l = ct::assume_aligned(state_l, 16_ic);
+    out = ct::assume_aligned(out, 16_ic);
+
+    auto [q_block, bh_raw, tile_z] = ct::bid();
+    (void)tile_z;
+    int bh = static_cast<int>(bh_raw);
+    int b = bh / kHeads;
+    int h = bh - b * kHeads;
+    const std::size_t base =
+        (static_cast<std::size_t>(b) * kN * kHeads + h) * kD;
+    const __nv_bfloat16* q_batch = q + base;
+    const __nv_bfloat16* k_batch = k + base;
+    const __nv_bfloat16* v_batch = v + base;
+    const float* state_acc_batch =
+        state_acc + static_cast<std::size_t>(bh) * kNMain * kD;
+    const float* state_m_batch =
+        state_m + static_cast<std::size_t>(bh) * kNMain;
+    const float* state_l_batch =
+        state_l + static_cast<std::size_t>(bh) * kNMain;
+    __nv_bfloat16* out_batch =
+        out + static_cast<std::size_t>(bh) * kN * kD;
+
+    auto q_view = ct::partition_view{
+        ct::tensor_span{q_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<QRows, kD>{}
+    };
+    auto k_t_view = ct::partition_view{
+        ct::tensor_span{k_batch, DNMapping{DNShape{}, DNStrides{}}},
+        ct::shape<kD, KTile>{}
+    };
+    auto v_view = ct::partition_view{
+        ct::tensor_span{v_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<KTile, kD>{}
+    };
+    auto state_acc_view = ct::partition_view{
+        ct::tensor_span{state_acc_batch, ct::shape<kNMain, kD>{}},
+        ct::shape<QRows, kD>{}
+    };
+    auto state_m_view = ct::partition_view{
+        ct::tensor_span{state_m_batch, ct::shape<kNMain, 1>{}},
+        ct::shape<QRows, 1>{}
+    };
+    auto state_l_view = ct::partition_view{
+        ct::tensor_span{state_l_batch, ct::shape<kNMain, 1>{}},
+        ct::shape<QRows, 1>{}
+    };
+    auto out_view = ct::partition_view{
+        ct::tensor_span{out_batch, ct::shape<kN, kD>{}},
+        ct::shape<QRows, kD>{}
+    };
+
+    auto q_tile = q_view.load(q_block, 0);
+    OutTile out_acc = state_acc_view.load(q_block, 0);
+    RowTile row_m = state_m_view.load(q_block, 0);
+    RowTile row_l = state_l_view.load(q_block, 0);
+
+    I64ScoreTile score_local = ct::iota<I64ScoreTile>();
+    auto key_cols = static_cast<long long>(FullKTiles) * KTile + score_local % KTile;
+    auto valid = key_cols < kN;
+    auto scores = ct::mma(q_tile,
+                          k_t_view.load_masked(0, FullKTiles),
+                          ct::full<ScoreTile>(0.0f)) * scale;
+    auto neg_inf = scores * 0.0f - 3.402823466e38f;
+    scores = ct::select(valid, scores, neg_inf);
+    auto tile_m = ct::reduce_max<1>(scores);
+    auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+    auto alpha = softmax_exp<UseExp2>(row_m - new_m);
+    auto probs_f32 =
+        ct::select(valid, softmax_exp<UseExp2>(scores - new_m), scores * 0.0f);
+    auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+    auto tile_l = ct::sum<1>(probs_f32);
+    out_acc = out_acc * alpha +
+              ct::mma(probs_bf16,
+                      v_view.load_masked(FullKTiles, 0),
+                      ct::full<OutTile>(0.0f));
+    row_l = row_l * alpha + tile_l;
+
+    out_view.store(ct::element_cast<__nv_bfloat16>(out_acc / row_l), q_block, 0);
+}
+
 __tile_global__ void time_attention1301_main1280_q64k32_exp2_split_d32_kernel(
     const __nv_bfloat16* __restrict__ q,
     const __nv_bfloat16* __restrict__ k,
@@ -1136,6 +1828,150 @@ __tile_global__ void time_attention1301_main1280_direct_ptr_kernel(
               ct::mma(probs_bf16,
                       v_tile,
                       ct::full<OutTile>(0.0f));
+    row_l = row_l * alpha + tile_l;
+
+    I64OutTile out_local = ct::iota<I64OutTile>();
+    auto out_rows = static_cast<long long>(q_block) * QRows + out_local / kD;
+    auto out_cols = out_local % kD;
+    ct::store_masked(out_batch + out_rows * kD + out_cols,
+                     ct::element_cast<__nv_bfloat16>(out_acc / row_l),
+                     out_rows < kN);
+}
+
+template <int QRows, int KTile, bool UseExp2 = true>
+__tile_global__ void time_attention1301_main1280_qkv_direct_rotary_kernel(
+    const __nv_bfloat16* __restrict__ qkv,
+    const float* __restrict__ cos_f,
+    const float* __restrict__ sin_f,
+    __nv_bfloat16* __restrict__ out,
+    float scale) {
+    constexpr int FullKTiles = kNMain / KTile;
+    using QIndexTile = ct::tile<long long, ct::shape<QRows, kD>>;
+    using KIndexTile = ct::tile<long long, ct::shape<kD, KTile>>;
+    using VIndexTile = ct::tile<long long, ct::shape<KTile, kD>>;
+    using ScoreTile = ct::tile<float, ct::shape<QRows, KTile>>;
+    using OutTile = ct::tile<float, ct::shape<QRows, kD>>;
+    using I64ScoreTile = ct::tile<long long, ct::shape<QRows, KTile>>;
+    using I64OutTile = ct::tile<long long, ct::shape<QRows, kD>>;
+    using RowTile = ct::tile<float, ct::shape<QRows, 1>>;
+
+    qkv = ct::assume_aligned(qkv, 16_ic);
+    cos_f = ct::assume_aligned(cos_f, 16_ic);
+    sin_f = ct::assume_aligned(sin_f, 16_ic);
+    out = ct::assume_aligned(out, 16_ic);
+
+    auto [q_block, bh_raw, tile_z] = ct::bid();
+    (void)tile_z;
+    int bh = static_cast<int>(bh_raw);
+    int b = bh / kHeads;
+    int h = bh - b * kHeads;
+    const long long head_base = static_cast<long long>(h) * kD;
+    const long long k_part_base = kHeads * kD + head_base;
+    const long long v_part_base = 2LL * kHeads * kD + head_base;
+    __nv_bfloat16* out_batch =
+        out + static_cast<std::size_t>(bh) * kN * kD;
+
+    QIndexTile q_local = ct::iota<QIndexTile>();
+    auto q_rows = static_cast<long long>(q_block) * QRows + q_local / kD;
+    auto q_cols = q_local % kD;
+    auto q_pair = q_cols / 2LL;
+    auto q_even_d = q_pair * 2LL;
+    auto q_is_odd = (q_cols & 1LL) != 0LL;
+    auto q_base = (static_cast<long long>(b) * kN + q_rows) * kQkvStride;
+    auto q_even = ct::element_cast<float>(
+        ct::load(qkv + q_base + head_base + q_even_d));
+    auto q_odd = ct::element_cast<float>(
+        ct::load(qkv + q_base + head_base + q_even_d + 1LL));
+    auto q_c = ct::load(cos_f + q_rows * (kD / 2) + q_pair);
+    auto q_s = ct::load(sin_f + q_rows * (kD / 2) + q_pair);
+    auto q_rot_even = q_even * q_c - q_odd * q_s;
+    auto q_rot_odd = q_even * q_s + q_odd * q_c;
+    auto q_tile = ct::element_cast<__nv_bfloat16>(
+        ct::select(q_is_odd, q_rot_odd, q_rot_even));
+
+    KIndexTile k_local = ct::iota<KIndexTile>();
+    auto k_d = k_local / KTile;
+    auto k_cols_local = k_local % KTile;
+    auto k_pair = k_d / 2LL;
+    auto k_even_d = k_pair * 2LL;
+    auto k_is_odd = (k_d & 1LL) != 0LL;
+
+    VIndexTile v_local = ct::iota<VIndexTile>();
+    auto v_rows_local = v_local / kD;
+    auto v_cols = v_local % kD;
+
+    RowTile row_m = ct::full<RowTile>(-3.402823466e38f);
+    RowTile row_l = ct::full<RowTile>(0.0f);
+    OutTile out_acc = ct::full<OutTile>(0.0f);
+
+    for (auto kt : ct::irange(std::size_t{0}, std::size_t{FullKTiles})) {
+        auto key_cols = static_cast<long long>(kt) * KTile + k_cols_local;
+        auto k_base = (static_cast<long long>(b) * kN + key_cols) * kQkvStride;
+        auto k_even = ct::element_cast<float>(
+            ct::load(qkv + k_base + k_part_base + k_even_d));
+        auto k_odd = ct::element_cast<float>(
+            ct::load(qkv + k_base + k_part_base + k_even_d + 1LL));
+        auto k_c = ct::load(cos_f + key_cols * (kD / 2) + k_pair);
+        auto k_s = ct::load(sin_f + key_cols * (kD / 2) + k_pair);
+        auto k_rot_even = k_even * k_c - k_odd * k_s;
+        auto k_rot_odd = k_even * k_s + k_odd * k_c;
+        auto k_tile = ct::element_cast<__nv_bfloat16>(
+            ct::select(k_is_odd, k_rot_odd, k_rot_even));
+
+        auto scores = ct::mma(q_tile, k_tile, ct::full<ScoreTile>(0.0f)) * scale;
+        auto tile_m = ct::reduce_max<1>(scores);
+        auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+        auto alpha = softmax_exp<UseExp2>(row_m - new_m);
+        auto probs_f32 = softmax_exp<UseExp2>(scores - new_m);
+        auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+        auto tile_l = ct::sum<1>(probs_f32);
+
+        auto v_rows = static_cast<long long>(kt) * KTile + v_rows_local;
+        auto v_base = (static_cast<long long>(b) * kN + v_rows) * kQkvStride;
+        auto v_tile = ct::load(qkv + v_base + v_part_base + v_cols);
+        out_acc = out_acc * alpha +
+                  ct::mma(probs_bf16, v_tile, ct::full<OutTile>(0.0f));
+        row_l = row_l * alpha + tile_l;
+        row_m = new_m;
+    }
+
+    I64ScoreTile score_local = ct::iota<I64ScoreTile>();
+    auto score_key_cols = static_cast<long long>(FullKTiles) * KTile + score_local % KTile;
+    auto score_valid = score_key_cols < kN;
+    auto tail_k_cols = static_cast<long long>(FullKTiles) * KTile + k_cols_local;
+    auto tail_k_valid = tail_k_cols < kN;
+    auto tail_k_safe_cols = ct::select(tail_k_valid, tail_k_cols, tail_k_cols * 0LL);
+    auto tail_k_base = (static_cast<long long>(b) * kN + tail_k_safe_cols) * kQkvStride;
+    auto k_even = ct::element_cast<float>(
+        ct::load_masked(qkv + tail_k_base + k_part_base + k_even_d, tail_k_valid));
+    auto k_odd = ct::element_cast<float>(
+        ct::load_masked(qkv + tail_k_base + k_part_base + k_even_d + 1LL, tail_k_valid));
+    auto k_c = ct::load_masked(cos_f + tail_k_safe_cols * (kD / 2) + k_pair, tail_k_valid);
+    auto k_s = ct::load_masked(sin_f + tail_k_safe_cols * (kD / 2) + k_pair, tail_k_valid);
+    auto k_rot_even = k_even * k_c - k_odd * k_s;
+    auto k_rot_odd = k_even * k_s + k_odd * k_c;
+    auto k_tile = ct::element_cast<__nv_bfloat16>(
+        ct::select(k_is_odd, k_rot_odd, k_rot_even));
+
+    auto scores = ct::mma(q_tile, k_tile, ct::full<ScoreTile>(0.0f)) * scale;
+    auto neg_inf = scores * 0.0f - 3.402823466e38f;
+    scores = ct::select(score_valid, scores, neg_inf);
+    auto tile_m = ct::reduce_max<1>(scores);
+    auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+    auto alpha = softmax_exp<UseExp2>(row_m - new_m);
+    auto probs_f32 = ct::select(score_valid, softmax_exp<UseExp2>(scores - new_m),
+                                scores * 0.0f);
+    auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+    auto tile_l = ct::sum<1>(probs_f32);
+
+    auto tail_v_rows = static_cast<long long>(FullKTiles) * KTile + v_rows_local;
+    auto tail_v_valid = tail_v_rows < kN;
+    auto tail_v_safe_rows = ct::select(tail_v_valid, tail_v_rows, tail_v_rows * 0LL);
+    auto tail_v_base = (static_cast<long long>(b) * kN + tail_v_safe_rows) * kQkvStride;
+    auto v_tile = ct::load_masked(qkv + tail_v_base + v_part_base + v_cols,
+                                  tail_v_valid);
+    out_acc = out_acc * alpha +
+              ct::mma(probs_bf16, v_tile, ct::full<OutTile>(0.0f));
     row_l = row_l * alpha + tile_l;
 
     I64OutTile out_local = ct::iota<I64OutTile>();
@@ -1615,6 +2451,8 @@ void run_main1280_variant(const Options& opts,
         name = "main1280_sum_f32_prescale_q";
     } else if constexpr (PrescaleQ) {
         name = "main1280_prescale_q";
+    } else if constexpr (ScoreBf16 && UseExp2 && SumF32) {
+        name = "main1280_sum_f32_exp2_score_bf16";
     } else if constexpr (ScoreBf16 && SumF32) {
         name = "main1280_sum_f32_score_bf16";
     } else if constexpr (ScoreBf16) {
@@ -1622,13 +2460,248 @@ void run_main1280_variant(const Options& opts,
     } else if constexpr (UseExp2 && SumF32) {
         name = "main1280_sum_f32_exp2";
     } else if constexpr (UseExp2) {
-        name = "main1280_exp2";
+        name = "main1280_exp2_sum_bf16";
     } else if constexpr (SumF32) {
         name = "main1280_sum_f32";
     }
     std::printf("%s qrows=%d ktile=%d best=%.3f ms median=%.3f ms real_math=%.2f TF/s logical_tile_math=%.2f TF/s roof70=%.1f%% checksum=%.6f\n",
                 name, QRows, KTile, best_ms, median_ms, real_tflops, logical_tflops,
                 real_tflops / 70.0 * 100.0, checksum);
+}
+
+template <int QRows,
+          int KTile,
+          bool IncludeKeyTail = true,
+          bool TailIdx32 = false>
+void run_main1280_split_contig_input_variant(const Options& opts,
+                                             const __nv_bfloat16* d_q,
+                                             const __nv_bfloat16* d_k,
+                                             const __nv_bfloat16* d_v,
+                                             __nv_bfloat16* d_out,
+                                             float scale) {
+    dim3 grid(kNMain / QRows, kBH);
+    for (int i = 0; i < opts.warmup; ++i) {
+        time_attention1301_main1280_split_contig_input_kernel
+            <QRows, KTile, true, IncludeKeyTail, TailIdx32>
+            <<<grid, 1>>>(d_q, d_k, d_v, d_out, scale);
+    }
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    cudaEvent_t start{};
+    cudaEvent_t stop{};
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    std::vector<float> times_ms;
+    times_ms.reserve(opts.iters);
+    for (int i = 0; i < opts.iters; ++i) {
+        CUDA_CHECK(cudaEventRecord(start));
+        time_attention1301_main1280_split_contig_input_kernel
+            <QRows, KTile, true, IncludeKeyTail, TailIdx32>
+            <<<grid, 1>>>(d_q, d_k, d_v, d_out, scale);
+        CUDA_CHECK(cudaEventRecord(stop));
+        CUDA_CHECK(cudaEventSynchronize(stop));
+        CUDA_CHECK(cudaGetLastError());
+        float ms = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+        times_ms.push_back(ms);
+    }
+
+    __nv_bfloat16 checksum_bf16{};
+    CUDA_CHECK(cudaMemcpy(&checksum_bf16, d_out, sizeof(checksum_bf16), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+
+    float best_ms = *std::min_element(times_ms.begin(), times_ms.end());
+    float median_ms = percentile(times_ms, 0.5f);
+    constexpr int EffectiveK = IncludeKeyTail ? kN : kNMain;
+    double real_flops = 4.0 * static_cast<double>(kBH) * kNMain * EffectiveK * kD;
+    double logical_padded_flops =
+        4.0 * static_cast<double>(kBH) * kNMain *
+        (IncludeKeyTail ? kNPad : kNMain) * kD;
+    double real_tflops = real_flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
+    double logical_tflops =
+        logical_padded_flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
+    const char* name = !IncludeKeyTail
+        ? "main1280_split_contig_input_exp2_no_keytail"
+        : (TailIdx32
+            ? "main1280_split_contig_input_exp2_tail_idx32"
+            : "main1280_split_contig_input_exp2");
+    std::printf("%s qrows=%d ktile=%d best=%.3f ms median=%.3f ms real_math=%.2f TF/s logical_tile_math=%.2f TF/s roof70=%.1f%% checksum=%.6f\n",
+                name, QRows, KTile, best_ms, median_ms, real_tflops, logical_tflops,
+                real_tflops / 70.0 * 100.0, __bfloat162float(checksum_bf16));
+}
+
+template <int QRows, int KTile>
+void run_main1280_split_contig_tail_first_variant(const Options& opts,
+                                                  const __nv_bfloat16* d_q,
+                                                  const __nv_bfloat16* d_k,
+                                                  const __nv_bfloat16* d_v,
+                                                  __nv_bfloat16* d_out,
+                                                  float scale) {
+    dim3 grid(kNMain / QRows, kBH);
+    for (int i = 0; i < opts.warmup; ++i) {
+        time_attention1301_main1280_split_contig_tail_first_kernel
+            <QRows, KTile, true>
+            <<<grid, 1>>>(d_q, d_k, d_v, d_out, scale);
+    }
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    cudaEvent_t start{};
+    cudaEvent_t stop{};
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    std::vector<float> times_ms;
+    times_ms.reserve(opts.iters);
+    for (int i = 0; i < opts.iters; ++i) {
+        CUDA_CHECK(cudaEventRecord(start));
+        time_attention1301_main1280_split_contig_tail_first_kernel
+            <QRows, KTile, true>
+            <<<grid, 1>>>(d_q, d_k, d_v, d_out, scale);
+        CUDA_CHECK(cudaEventRecord(stop));
+        CUDA_CHECK(cudaEventSynchronize(stop));
+        CUDA_CHECK(cudaGetLastError());
+        float ms = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+        times_ms.push_back(ms);
+    }
+
+    __nv_bfloat16 checksum_bf16{};
+    CUDA_CHECK(cudaMemcpy(&checksum_bf16, d_out, sizeof(checksum_bf16), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+
+    float best_ms = *std::min_element(times_ms.begin(), times_ms.end());
+    float median_ms = percentile(times_ms, 0.5f);
+    double real_flops = 4.0 * static_cast<double>(kBH) * kNMain * kN * kD;
+    double logical_padded_flops =
+        4.0 * static_cast<double>(kBH) * kNMain * kNPad * kD;
+    double real_tflops = real_flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
+    double logical_tflops =
+        logical_padded_flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
+    std::printf("main1280_split_contig_tail_first_exp2 qrows=%d ktile=%d best=%.3f ms median=%.3f ms real_math=%.2f TF/s logical_tile_math=%.2f TF/s roof70=%.1f%% checksum=%.6f\n",
+                QRows, KTile, best_ms, median_ms, real_tflops, logical_tflops,
+                real_tflops / 70.0 * 100.0, __bfloat162float(checksum_bf16));
+}
+
+template <int QRows, int KTile>
+void run_main1280_split_contig_padded_tail_load_variant(const Options& opts,
+                                                        const __nv_bfloat16* d_q,
+                                                        const __nv_bfloat16* d_k,
+                                                        const __nv_bfloat16* d_v,
+                                                        __nv_bfloat16* d_out,
+                                                        float scale) {
+    dim3 grid(kNMain / QRows, kBH);
+    for (int i = 0; i < opts.warmup; ++i) {
+        time_attention1301_main1280_split_contig_padded_tail_load_kernel
+            <QRows, KTile, true>
+            <<<grid, 1>>>(d_q, d_k, d_v, d_out, scale);
+    }
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    cudaEvent_t start{};
+    cudaEvent_t stop{};
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    std::vector<float> times_ms;
+    times_ms.reserve(opts.iters);
+    for (int i = 0; i < opts.iters; ++i) {
+        CUDA_CHECK(cudaEventRecord(start));
+        time_attention1301_main1280_split_contig_padded_tail_load_kernel
+            <QRows, KTile, true>
+            <<<grid, 1>>>(d_q, d_k, d_v, d_out, scale);
+        CUDA_CHECK(cudaEventRecord(stop));
+        CUDA_CHECK(cudaEventSynchronize(stop));
+        CUDA_CHECK(cudaGetLastError());
+        float ms = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+        times_ms.push_back(ms);
+    }
+
+    __nv_bfloat16 checksum_bf16{};
+    CUDA_CHECK(cudaMemcpy(&checksum_bf16, d_out, sizeof(checksum_bf16), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+
+    float best_ms = *std::min_element(times_ms.begin(), times_ms.end());
+    float median_ms = percentile(times_ms, 0.5f);
+    double real_flops = 4.0 * static_cast<double>(kBH) * kNMain * kN * kD;
+    double logical_padded_flops =
+        4.0 * static_cast<double>(kBH) * kNMain * kNPad * kD;
+    double real_tflops = real_flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
+    double logical_tflops =
+        logical_padded_flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
+    std::printf("main1280_split_contig_padded_tail_load_exp2 qrows=%d ktile=%d best=%.3f ms median=%.3f ms real_math=%.2f TF/s logical_tile_math=%.2f TF/s roof70=%.1f%% checksum=%.6f\n",
+                QRows, KTile, best_ms, median_ms, real_tflops, logical_tflops,
+                real_tflops / 70.0 * 100.0, __bfloat162float(checksum_bf16));
+}
+
+template <int QRows, int KTile>
+void run_main1280_split_contig_two_pass_state_variant(const Options& opts,
+                                                      const __nv_bfloat16* d_q,
+                                                      const __nv_bfloat16* d_k,
+                                                      const __nv_bfloat16* d_v,
+                                                      float* d_state_acc,
+                                                      float* d_state_m,
+                                                      float* d_state_l,
+                                                      __nv_bfloat16* d_out,
+                                                      float scale) {
+    dim3 grid(kNMain / QRows, kBH);
+    for (int i = 0; i < opts.warmup; ++i) {
+        time_attention1301_main1280_split_contig_state1280_kernel
+            <QRows, KTile, true>
+            <<<grid, 1>>>(d_q, d_k, d_v, d_state_acc, d_state_m, d_state_l,
+                          scale);
+        time_attention1301_main1280_split_contig_tail_finalize_kernel
+            <QRows, KTile, true>
+            <<<grid, 1>>>(d_q, d_k, d_v, d_state_acc, d_state_m, d_state_l,
+                          d_out, scale);
+    }
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    cudaEvent_t start{};
+    cudaEvent_t stop{};
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    std::vector<float> times_ms;
+    times_ms.reserve(opts.iters);
+    for (int i = 0; i < opts.iters; ++i) {
+        CUDA_CHECK(cudaEventRecord(start));
+        time_attention1301_main1280_split_contig_state1280_kernel
+            <QRows, KTile, true>
+            <<<grid, 1>>>(d_q, d_k, d_v, d_state_acc, d_state_m, d_state_l,
+                          scale);
+        time_attention1301_main1280_split_contig_tail_finalize_kernel
+            <QRows, KTile, true>
+            <<<grid, 1>>>(d_q, d_k, d_v, d_state_acc, d_state_m, d_state_l,
+                          d_out, scale);
+        CUDA_CHECK(cudaEventRecord(stop));
+        CUDA_CHECK(cudaEventSynchronize(stop));
+        CUDA_CHECK(cudaGetLastError());
+        float ms = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+        times_ms.push_back(ms);
+    }
+
+    __nv_bfloat16 checksum_bf16{};
+    CUDA_CHECK(cudaMemcpy(&checksum_bf16, d_out, sizeof(checksum_bf16), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+
+    float best_ms = *std::min_element(times_ms.begin(), times_ms.end());
+    float median_ms = percentile(times_ms, 0.5f);
+    double real_flops = 4.0 * static_cast<double>(kBH) * kNMain * kN * kD;
+    double logical_padded_flops =
+        4.0 * static_cast<double>(kBH) * kNMain * kNPad * kD;
+    double real_tflops = real_flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
+    double logical_tflops =
+        logical_padded_flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
+    std::printf("main1280_split_contig_two_pass_state_exp2 qrows=%d ktile=%d best=%.3f ms median=%.3f ms real_math=%.2f TF/s logical_tile_math=%.2f TF/s roof70=%.1f%% checksum=%.6f\n",
+                QRows, KTile, best_ms, median_ms, real_tflops, logical_tflops,
+                real_tflops / 70.0 * 100.0, __bfloat162float(checksum_bf16));
 }
 
 void run_main1280_q64k32_exp2_split_d32_variant(const Options& opts,
@@ -1864,6 +2937,61 @@ void run_main1280_direct_ptr_variant(const Options& opts,
     double logical_tflops =
         logical_padded_flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
     std::printf("main1280_direct_ptr_sum_f32 qrows=%d ktile=%d best=%.3f ms median=%.3f ms real_math=%.2f TF/s logical_tile_math=%.2f TF/s roof70=%.1f%% checksum=%.6f\n",
+                QRows, KTile, best_ms, median_ms, real_tflops, logical_tflops,
+                real_tflops / 70.0 * 100.0, checksum);
+}
+
+template <int QRows, int KTile>
+void run_main1280_qkv_direct_rotary_variant(const Options& opts,
+                                            const __nv_bfloat16* d_qkv,
+                                            const float* d_cos,
+                                            const float* d_sin,
+                                            __nv_bfloat16* d_out,
+                                            float scale) {
+    dim3 grid(kNMain / QRows, kBH);
+    for (int i = 0; i < opts.warmup; ++i) {
+        time_attention1301_main1280_qkv_direct_rotary_kernel<QRows, KTile, true>
+            <<<grid, 1>>>(d_qkv, d_cos, d_sin, d_out, scale);
+    }
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    cudaEvent_t start{};
+    cudaEvent_t stop{};
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+
+    std::vector<float> times_ms;
+    times_ms.reserve(opts.iters);
+    for (int i = 0; i < opts.iters; ++i) {
+        CUDA_CHECK(cudaEventRecord(start));
+        time_attention1301_main1280_qkv_direct_rotary_kernel<QRows, KTile, true>
+            <<<grid, 1>>>(d_qkv, d_cos, d_sin, d_out, scale);
+        CUDA_CHECK(cudaEventRecord(stop));
+        CUDA_CHECK(cudaEventSynchronize(stop));
+        CUDA_CHECK(cudaGetLastError());
+        float ms = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+        times_ms.push_back(ms);
+    }
+
+    __nv_bfloat16 checksum_bf16{};
+    CUDA_CHECK(cudaMemcpy(&checksum_bf16, d_out, sizeof(checksum_bf16),
+                          cudaMemcpyDeviceToHost));
+    float checksum = __bfloat162float(checksum_bf16);
+
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+
+    float best_ms = *std::min_element(times_ms.begin(), times_ms.end());
+    float median_ms = percentile(times_ms, 0.5f);
+    double real_flops = 4.0 * static_cast<double>(kBH) * kNMain * kN * kD;
+    double logical_padded_flops =
+        4.0 * static_cast<double>(kBH) * kNMain * (kNMain + KTile) * kD;
+    double real_tflops = real_flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
+    double logical_tflops =
+        logical_padded_flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
+    std::printf("main1280_qkv_direct_rotary_exp2 qrows=%d ktile=%d best=%.3f ms median=%.3f ms real_math=%.2f TF/s logical_tile_math=%.2f TF/s roof70=%.1f%% checksum=%.6f\n",
                 QRows, KTile, best_ms, median_ms, real_tflops, logical_tflops,
                 real_tflops / 70.0 * 100.0, checksum);
 }
@@ -2224,11 +3352,120 @@ void run_main1280_prescale_q_lower_bound_variant(const Options& opts,
                 real_tflops / 70.0 * 100.0, checksum);
 }
 
+void run_focused_variant(const Options& opts,
+                         const __nv_bfloat16* d_q,
+                         const __nv_bfloat16* d_k,
+                         const __nv_bfloat16* d_v,
+                         __nv_bfloat16* d_out,
+                         float scale) {
+    if (opts.variant == "main1280_q32k32_exp2") {
+        run_main1280_variant<32, false, true, true, 32>(
+            opts, d_q, d_k, d_v, d_out, scale);
+        return;
+    }
+    if (opts.variant == "main1280_q64k16_exp2") {
+        run_main1280_variant<64, false, true, true, 16>(
+            opts, d_q, d_k, d_v, d_out, scale);
+        return;
+    }
+    if (opts.variant == "main1280_q64k32_exp2" ||
+        opts.variant == "main1280_sum_f32_exp2") {
+        run_main1280_variant<64, false, true, true, 32>(
+            opts, d_q, d_k, d_v, d_out, scale);
+        return;
+    }
+    if (opts.variant == "main1280_q64k64_exp2") {
+        run_main1280_variant<64, false, true, true>(
+            opts, d_q, d_k, d_v, d_out, scale);
+        return;
+    }
+    if (opts.variant == "main1280_q128k32_exp2") {
+        run_main1280_variant<128, false, true, true, 32>(
+            opts, d_q, d_k, d_v, d_out, scale);
+        return;
+    }
+    if (opts.variant == "main1280_q64k32_exp2_sum_bf16" ||
+        opts.variant == "main1280_exp2_sum_bf16") {
+        run_main1280_variant<64, false, false, true, 32>(
+            opts, d_q, d_k, d_v, d_out, scale);
+        return;
+    }
+    if (opts.variant == "main1280_q64k32_exp2_score_bf16" ||
+        opts.variant == "main1280_sum_f32_exp2_score_bf16") {
+        run_main1280_variant<64, false, true, true, 32, true>(
+            opts, d_q, d_k, d_v, d_out, scale);
+        return;
+    }
+    if (opts.variant == "main1280_q64k32_exp2_prescale_q" ||
+        opts.variant == "main1280_sum_f32_exp2_prescale_q") {
+        run_main1280_variant<64, false, true, true, 32, false, true>(
+            opts, d_q, d_k, d_v, d_out, scale);
+        return;
+    }
+    if (opts.variant == "main1280_q64k32_exp2_split_d32" ||
+        opts.variant == "main1280_sum_f32_exp2_split_d32") {
+        run_main1280_q64k32_exp2_split_d32_variant(
+            opts, d_q, d_k, d_v, d_out, scale);
+        return;
+    }
+    if (opts.variant == "split_tail_q64k32_tail32k32_exp2") {
+        run_split_tail_pair_variant<32, 32, 32, true>(
+            opts, d_q, d_k, d_v, d_out, scale);
+        return;
+    }
+    throw std::runtime_error("unknown --variant: " + opts.variant);
+}
+
+void launch_main1280_q64k32_exp2_once(const __nv_bfloat16* d_q,
+                                      const __nv_bfloat16* d_k,
+                                      const __nv_bfloat16* d_v,
+                                      __nv_bfloat16* d_out,
+                                      float scale) {
+    dim3 grid(kNMain / 64, kBH);
+    time_attention1301_main1280_kernel<64, 32, true, true>
+        <<<grid, 1>>>(d_q, d_k, d_v, d_out, scale);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+void compare_outputs_to_baseline(const __nv_bfloat16* d_ref,
+                                 const __nv_bfloat16* d_out,
+                                 std::size_t elems) {
+    std::vector<__nv_bfloat16> ref(elems);
+    std::vector<__nv_bfloat16> out(elems);
+    CUDA_CHECK(cudaMemcpy(ref.data(), d_ref, elems * sizeof(__nv_bfloat16),
+                          cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(out.data(), d_out, elems * sizeof(__nv_bfloat16),
+                          cudaMemcpyDeviceToHost));
+
+    double max_abs = 0.0;
+    double sum_sq = 0.0;
+    double ref_sum_sq = 0.0;
+    for (std::size_t i = 0; i < elems; ++i) {
+        double ref_v = static_cast<double>(__bfloat162float(ref[i]));
+        double out_v = static_cast<double>(__bfloat162float(out[i]));
+        double diff = out_v - ref_v;
+        double abs_diff = std::abs(diff);
+        max_abs = std::max(max_abs, abs_diff);
+        sum_sq += diff * diff;
+        ref_sum_sq += ref_v * ref_v;
+    }
+
+    double rms = std::sqrt(sum_sq / static_cast<double>(elems));
+    double ref_rms = std::sqrt(ref_sum_sq / static_cast<double>(elems));
+    double rel_rms = ref_rms > 0.0 ? rms / ref_rms : 0.0;
+    std::printf("compare_vs_main1280_q64k32_exp2 elems=%zu max_abs=%.9g rms=%.9g ref_rms=%.9g rel_rms=%.9g\n",
+                elems, max_abs, rms, ref_rms, rel_rms);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     try {
         Options opts = parse_args(argc, argv);
+        if (opts.compare_baseline && opts.variant == "all") {
+            throw std::runtime_error("--compare-baseline requires --variant NAME");
+        }
 
         int device = 0;
         CUDA_CHECK(cudaGetDevice(&device));
@@ -2241,7 +3478,13 @@ int main(int argc, char** argv) {
 
         size_t padded_elems = static_cast<size_t>(kBH) * kNPad * kD;
         size_t unpadded_elems = static_cast<size_t>(kBH) * kN * kD;
+        size_t qkv_elems = static_cast<size_t>(kBatches) * kN * kQkvStride;
+        size_t split_padded_elems =
+            static_cast<size_t>(kBatches) * kNPad * kHeads * kD;
+        size_t rotary_elems = static_cast<size_t>(kN) * (kD / 2);
         size_t out_elems = static_cast<size_t>(kBH) * kN * kD;
+        size_t state_acc_elems = static_cast<size_t>(kBH) * kNMain * kD;
+        size_t state_row_elems = static_cast<size_t>(kBH) * kNMain;
         constexpr int split_qrows = 64;
         constexpr int split_qblocks = kNMain / split_qrows;
         constexpr int split_ktiles = (kN + kKTile - 1) / kKTile;
@@ -2254,7 +3497,20 @@ int main(int argc, char** argv) {
         __nv_bfloat16* d_k_masked = nullptr;
         __nv_bfloat16* d_k_t_masked = nullptr;
         __nv_bfloat16* d_v_masked = nullptr;
+        __nv_bfloat16* d_qkv_masked = nullptr;
+        __nv_bfloat16* d_q_split_contig = nullptr;
+        __nv_bfloat16* d_k_split_contig = nullptr;
+        __nv_bfloat16* d_v_split_contig = nullptr;
+        __nv_bfloat16* d_q_split_padded = nullptr;
+        __nv_bfloat16* d_k_split_padded = nullptr;
+        __nv_bfloat16* d_v_split_padded = nullptr;
+        float* d_cos = nullptr;
+        float* d_sin = nullptr;
+        float* d_state_acc = nullptr;
+        float* d_state_m = nullptr;
+        float* d_state_l = nullptr;
         __nv_bfloat16* d_out = nullptr;
+        __nv_bfloat16* d_ref = nullptr;
         __nv_bfloat16* d_p_split_q64 = nullptr;
         CUDA_CHECK(cudaMalloc(&d_q, padded_elems * sizeof(__nv_bfloat16)));
         CUDA_CHECK(cudaMalloc(&d_k, padded_elems * sizeof(__nv_bfloat16)));
@@ -2263,7 +3519,22 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaMalloc(&d_k_masked, unpadded_elems * sizeof(__nv_bfloat16)));
         CUDA_CHECK(cudaMalloc(&d_k_t_masked, unpadded_elems * sizeof(__nv_bfloat16)));
         CUDA_CHECK(cudaMalloc(&d_v_masked, unpadded_elems * sizeof(__nv_bfloat16)));
+        CUDA_CHECK(cudaMalloc(&d_qkv_masked, qkv_elems * sizeof(__nv_bfloat16)));
+        CUDA_CHECK(cudaMalloc(&d_q_split_contig, unpadded_elems * sizeof(__nv_bfloat16)));
+        CUDA_CHECK(cudaMalloc(&d_k_split_contig, unpadded_elems * sizeof(__nv_bfloat16)));
+        CUDA_CHECK(cudaMalloc(&d_v_split_contig, unpadded_elems * sizeof(__nv_bfloat16)));
+        CUDA_CHECK(cudaMalloc(&d_q_split_padded, split_padded_elems * sizeof(__nv_bfloat16)));
+        CUDA_CHECK(cudaMalloc(&d_k_split_padded, split_padded_elems * sizeof(__nv_bfloat16)));
+        CUDA_CHECK(cudaMalloc(&d_v_split_padded, split_padded_elems * sizeof(__nv_bfloat16)));
+        CUDA_CHECK(cudaMalloc(&d_cos, rotary_elems * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_sin, rotary_elems * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_state_acc, state_acc_elems * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_state_m, state_row_elems * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_state_l, state_row_elems * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&d_out, out_elems * sizeof(__nv_bfloat16)));
+        if (opts.compare_baseline) {
+            CUDA_CHECK(cudaMalloc(&d_ref, out_elems * sizeof(__nv_bfloat16)));
+        }
         CUDA_CHECK(cudaMalloc(&d_p_split_q64, split_p_elems * sizeof(__nv_bfloat16)));
 
         int fill_blocks = static_cast<int>((padded_elems + kInitTile - 1) / kInitTile);
@@ -2280,10 +3551,71 @@ int main(int argc, char** argv) {
             d_v_masked, static_cast<long long>(unpadded_elems));
         transpose_k_nd_to_dn_kernel<<<fill_masked_blocks, 1>>>(
             d_k_masked, d_k_t_masked, static_cast<long long>(unpadded_elems));
+        pack_time_qkv_kernel<<<fill_masked_blocks, 1>>>(
+            d_q_masked, d_k_masked, d_v_masked, d_qkv_masked,
+            static_cast<long long>(unpadded_elems));
+        pack_time_split_contig_kernel<<<fill_masked_blocks, 1>>>(
+            d_q_masked, d_k_masked, d_v_masked,
+            d_q_split_contig, d_k_split_contig, d_v_split_contig,
+            static_cast<long long>(unpadded_elems));
+        int fill_split_padded_blocks =
+            static_cast<int>((split_padded_elems + 255) / 256);
+        pack_time_split_contig_padded_kernel<<<fill_split_padded_blocks, 1>>>(
+            d_q_masked, d_k_masked, d_v_masked,
+            d_q_split_padded, d_k_split_padded, d_v_split_padded,
+            static_cast<long long>(split_padded_elems));
+        int fill_rotary_blocks =
+            static_cast<int>((rotary_elems + 255) / 256);
+        fill_rotary_identity_kernel<<<fill_rotary_blocks, 1>>>(
+            d_cos, d_sin, static_cast<long long>(rotary_elems));
         CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaDeviceSynchronize());
 
         float scale = 1.0f / std::sqrt(static_cast<float>(kD));
+        if (opts.variant != "all") {
+            if (opts.compare_baseline) {
+                launch_main1280_q64k32_exp2_once(
+                    d_q_masked, d_k_masked, d_v_masked, d_ref, scale);
+            }
+            if (opts.variant == "main1280_q64k32_exp2_qkv_direct_rotary") {
+                run_main1280_qkv_direct_rotary_variant<64, 32>(
+                    opts, d_qkv_masked, d_cos, d_sin, d_out, scale);
+            } else if (opts.variant == "main1280_q64k32_exp2_split_contig_input") {
+                run_main1280_split_contig_input_variant<64, 32>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_tail_idx32") {
+                run_main1280_split_contig_input_variant<64, 32, true, true>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_tail_first") {
+                run_main1280_split_contig_tail_first_variant<64, 32>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_padded_tail_load") {
+                run_main1280_split_contig_padded_tail_load_variant<64, 32>(
+                    opts, d_q_split_padded, d_k_split_padded, d_v_split_padded,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_two_pass_state") {
+                run_main1280_split_contig_two_pass_state_variant<64, 32>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_state_acc, d_state_m, d_state_l, d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_input_no_keytail") {
+                run_main1280_split_contig_input_variant<64, 32, false>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else {
+                run_focused_variant(opts, d_q_masked, d_k_masked, d_v_masked, d_out, scale);
+            }
+            if (opts.compare_baseline) {
+                compare_outputs_to_baseline(d_ref, d_out, out_elems);
+            }
+        } else {
         run_padded_variant<8>(opts, d_q, d_k, d_v, d_out, scale, false);
         run_padded_variant<16>(opts, d_q, d_k, d_v, d_out, scale, opts.validate);
         run_padded_variant<32>(opts, d_q, d_k, d_v, d_out, scale, false);
@@ -2318,6 +3650,8 @@ int main(int argc, char** argv) {
         run_main1280_variant<64, false, true, true, 16>(opts, d_q_masked, d_k_masked, d_v_masked, d_out, scale);
         run_main1280_variant<64, false, true, false, 32>(opts, d_q_masked, d_k_masked, d_v_masked, d_out, scale);
         run_main1280_variant<64, false, true, true, 32>(opts, d_q_masked, d_k_masked, d_v_masked, d_out, scale);
+        run_main1280_variant<64, false, true, true, 32, true>(
+            opts, d_q_masked, d_k_masked, d_v_masked, d_out, scale);
         run_main1280_variant<64, false, true, true, 32, false, true>(
             opts, d_q_masked, d_k_masked, d_v_masked, d_out, scale);
         run_main1280_direct_ptr_variant<64, 32>(
@@ -2360,6 +3694,7 @@ int main(int argc, char** argv) {
         run_main1280_variant<128, false, true, false, 32>(opts, d_q_masked, d_k_masked, d_v_masked, d_out, scale);
         run_main1280_variant<128, false, true, true, 32>(opts, d_q_masked, d_k_masked, d_v_masked, d_out, scale);
         run_main1280_variant<128, true>(opts, d_q_masked, d_k_masked, d_v_masked, d_out, scale);
+        }
         CUDA_CHECK(cudaFree(d_q));
         CUDA_CHECK(cudaFree(d_k));
         CUDA_CHECK(cudaFree(d_v));
@@ -2367,7 +3702,22 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaFree(d_k_masked));
         CUDA_CHECK(cudaFree(d_k_t_masked));
         CUDA_CHECK(cudaFree(d_v_masked));
+        CUDA_CHECK(cudaFree(d_qkv_masked));
+        CUDA_CHECK(cudaFree(d_q_split_contig));
+        CUDA_CHECK(cudaFree(d_k_split_contig));
+        CUDA_CHECK(cudaFree(d_v_split_contig));
+        CUDA_CHECK(cudaFree(d_q_split_padded));
+        CUDA_CHECK(cudaFree(d_k_split_padded));
+        CUDA_CHECK(cudaFree(d_v_split_padded));
+        CUDA_CHECK(cudaFree(d_cos));
+        CUDA_CHECK(cudaFree(d_sin));
+        CUDA_CHECK(cudaFree(d_state_acc));
+        CUDA_CHECK(cudaFree(d_state_m));
+        CUDA_CHECK(cudaFree(d_state_l));
         CUDA_CHECK(cudaFree(d_out));
+        if (d_ref) {
+            CUDA_CHECK(cudaFree(d_ref));
+        }
         CUDA_CHECK(cudaFree(d_p_split_q64));
         return 0;
     } catch (const std::exception& e) {
