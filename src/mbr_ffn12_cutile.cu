@@ -24,6 +24,7 @@ constexpr int kGeluErfPoly5L25 = 4;
 constexpr int kGeluErfPoly7L25 = 5;
 constexpr int kGeluErfPoly9L30 = 6;
 constexpr int kGeluErfPoly9TinyBlendL30 = 7;
+constexpr int kGeluErfOdd5L175 = 8;
 
 bool env_flag_enabled(const char* name) {
     const char* raw = std::getenv(name);
@@ -41,6 +42,17 @@ bool ffn12_output_no_round_enabled() {
 bool ffn12_pairh32_latency2_enabled() {
     static int disabled = env_flag_enabled("CUDASEP_DISABLE_FFN12_PAIRH32_LAT2") ? 1 : 0;
     return disabled == 0;
+}
+
+bool ffn12_pairh32_weight_latency2_enabled() {
+    static int enabled = env_flag_enabled("CUDASEP_ENABLE_FFN12_PAIRH32_WEIGHT_LAT2") ? 1 : 0;
+    return enabled != 0 && ffn12_pairh32_latency2_enabled();
+}
+
+bool ffn12_round_output_bias_bf16_enabled() {
+    static int enabled =
+        env_flag_enabled("CUDASEP_ENABLE_FFN12_ROUND_OUTPUT_BIAS_BF16") ? 1 : 0;
+    return enabled != 0;
 }
 
 template <typename T>
@@ -180,6 +192,36 @@ static __tile__ auto gelu_erf_poly9_l30_fast(TileT x) {
     return 0.5f * x * (one + erf_approx);
 }
 
+template <typename TileT>
+static __tile__ auto gelu_erf_odd5_l175_fast(TileT x) {
+    auto zero = x * 0.0f;
+    auto one = zero + 1.0f;
+    auto ax = ct::abs(x);
+    auto z = ax * ax;
+    auto p = (0.04752145079070458f * z - 0.32203058651122096f) * z +
+             1.1212825366624732f;
+    auto erf_abs = ct::min(ct::max(ax * p, zero), one);
+    auto erf_approx = ct::select(x < zero, zero - erf_abs, erf_abs);
+    return 0.5f * x * (one + erf_approx);
+}
+
+template <bool FullBF16, typename TileT>
+static __tile__ auto gelu_erf_odd5_l175(TileT x) {
+    auto zero = x * 0.0f;
+    auto one = zero + 1.0f;
+    auto ax = ct::select(x < zero, zero - x, x);
+    auto z = ax * ax;
+    z = bf16_round_if<FullBF16>(z);
+    auto p = (0.04752145079070458f * z - 0.32203058651122096f) * z +
+             1.1212825366624732f;
+    p = bf16_round_if<FullBF16>(p);
+    auto erf_abs = ct::min(ct::max(ax * p, zero), one);
+    erf_abs = bf16_round_if<FullBF16>(erf_abs);
+    auto erf_approx = ct::select(x < zero, zero - erf_abs, erf_abs);
+    auto gelu = 0.5f * x * (one + erf_approx);
+    return bf16_round_if<FullBF16>(gelu);
+}
+
 template <bool FullBF16, typename TileT>
 static __tile__ auto gelu_erf_poly9_tinyblend_l30(TileT x) {
     auto gelu = gelu_erf_poly9_l30<FullBF16>(x);
@@ -197,6 +239,12 @@ template <int GeluMode, bool FullBF16, typename TileT>
 static __tile__ auto gelu_selected(TileT x) {
     if constexpr (GeluMode == kGeluErfPoly9L30) {
         return gelu_erf_poly9_l30<FullBF16>(x);
+    } else if constexpr (GeluMode == kGeluErfOdd5L175) {
+        if constexpr (FullBF16) {
+            return gelu_erf_odd5_l175<FullBF16>(x);
+        } else {
+            return gelu_erf_odd5_l175_fast(x);
+        }
     } else if constexpr (GeluMode == kGeluErfPoly9TinyBlendL30) {
         if constexpr (FullBF16) {
             return gelu_erf_poly9_tinyblend_l30<FullBF16>(x);
@@ -399,7 +447,11 @@ template <int GeluMode,
           int InputTileK = kLinearCutileTileK,
           bool AddResidual = false,
           bool RoundOutputAcc = true,
-          int MemoryLatency = 0>
+          int MemoryLatency = 0,
+          bool ALoadLatencyHint = (MemoryLatency > 0),
+          bool W1WeightLatencyHint = (MemoryLatency > 0),
+          bool StoreLatencyHint = (MemoryLatency > 0),
+          bool RoundOutputBiasBF16 = FullBF16>
 __tile_global__ void ffn12_fused256_split2_pairh32_cutile_kernel(
     const __nv_bfloat16* __restrict__ a,
     const __nv_bfloat16* __restrict__ w1_nt,
@@ -462,16 +514,25 @@ __tile_global__ void ffn12_fused256_split2_pairh32_cutile_kernel(
         auto hidden_acc0 = ct::full<HiddenAccTile>(0.0f);
         auto hidden_acc1 = ct::full<HiddenAccTile>(0.0f);
         for (auto kk : ct::irange(std::size_t{0}, std::size_t{256 / InputTileK})) {
-            if constexpr (MemoryLatency > 0) {
+            if constexpr (MemoryLatency > 0 || ALoadLatencyHint || W1WeightLatencyHint) {
                 ATile a_tile;
                 W1Tile w1_0;
                 W1Tile w1_1;
-                [[cutile::hint(0, latency=MemoryLatency)]]
-                a_tile = a_view.load(tile_m, kk);
-                [[cutile::hint(0, latency=MemoryLatency)]]
-                w1_0 = w1_view.load(kk, hidden_tile0);
-                [[cutile::hint(0, latency=MemoryLatency)]]
-                w1_1 = w1_view.load(kk, hidden_tile1);
+                if constexpr (ALoadLatencyHint) {
+                    [[cutile::hint(0, latency=MemoryLatency)]]
+                    a_tile = a_view.load(tile_m, kk);
+                } else {
+                    a_tile = a_view.load(tile_m, kk);
+                }
+                if constexpr (W1WeightLatencyHint) {
+                    [[cutile::hint(0, latency=MemoryLatency)]]
+                    w1_0 = w1_view.load(kk, hidden_tile0);
+                    [[cutile::hint(0, latency=MemoryLatency)]]
+                    w1_1 = w1_view.load(kk, hidden_tile1);
+                } else {
+                    w1_0 = w1_view.load(kk, hidden_tile0);
+                    w1_1 = w1_view.load(kk, hidden_tile1);
+                }
                 hidden_acc0 = ct::mma(a_tile, w1_0, hidden_acc0);
                 hidden_acc1 = ct::mma(a_tile, w1_1, hidden_acc1);
             } else {
@@ -492,6 +553,9 @@ __tile_global__ void ffn12_fused256_split2_pairh32_cutile_kernel(
         if constexpr (!FullBF16 && GeluMode == kGeluErfPoly9L30) {
             hidden_value0 = gelu_erf_poly9_l30_fast(hidden_value0);
             hidden_value1 = gelu_erf_poly9_l30_fast(hidden_value1);
+        } else if constexpr (!FullBF16 && GeluMode == kGeluErfOdd5L175) {
+            hidden_value0 = gelu_erf_odd5_l175_fast(hidden_value0);
+            hidden_value1 = gelu_erf_odd5_l175_fast(hidden_value1);
         } else if constexpr (!FullBF16 && GeluMode == kGeluErfPoly9TinyBlendL30) {
             hidden_value0 = gelu_erf_poly9_tinyblend_l30_fast(hidden_value0);
             hidden_value1 = gelu_erf_poly9_tinyblend_l30_fast(hidden_value1);
@@ -534,7 +598,7 @@ __tile_global__ void ffn12_fused256_split2_pairh32_cutile_kernel(
     auto out_bias1 = ct::element_cast<float>(ct::load(b2 + OutHalf + out_cols));
     auto value0 = bf16_round_if<RoundOutputAcc>(out_acc0) + out_bias0;
     auto value1 = bf16_round_if<RoundOutputAcc>(out_acc1) + out_bias1;
-    if constexpr (FullBF16) {
+    if constexpr (RoundOutputBiasBF16) {
         value0 = bf16_round(value0);
         value1 = bf16_round(value1);
     }
@@ -548,7 +612,7 @@ __tile_global__ void ffn12_fused256_split2_pairh32_cutile_kernel(
         out_value0 = residual_view.load(tile_m, 0) + out_value0;
         out_value1 = residual_view.load(tile_m, 1) + out_value1;
     }
-    if constexpr (MemoryLatency > 0) {
+    if constexpr (StoreLatencyHint) {
         [[cutile::hint(0, latency=MemoryLatency)]]
         out_view.store(out_value0, tile_m, 0);
         [[cutile::hint(0, latency=MemoryLatency)]]
@@ -697,20 +761,82 @@ void launch_ffn12_fused256_cutile_typed(const Tensor& x,
             if constexpr (!FullBF16 && !AddResidual) {
                 if (ffn12_output_no_round_enabled()) {
                     if (ffn12_pairh32_latency2_enabled()) {
-                        ffn12_fused256_split2_pairh32_cutile_kernel<GeluMode,
-                                                                    FullBF16,
-                                                                    64,
-                                                                    AddResidual,
-                                                                    false,
-                                                                    2>
-                            <<<full_grid, 1>>>(
-                                x.data_bf16(),
-                                linear1_w.data_bf16(),
-                                linear1_b.data_bf16(),
-                                linear2_w.data_bf16(),
-                                linear2_b.data_bf16(),
-                                residual_ptr,
-                                out.data_bf16());
+                        if (ffn12_pairh32_weight_latency2_enabled()) {
+                            if (ffn12_round_output_bias_bf16_enabled()) {
+                                ffn12_fused256_split2_pairh32_cutile_kernel<GeluMode,
+                                                                            FullBF16,
+                                                                            64,
+                                                                            AddResidual,
+                                                                            false,
+                                                                            2,
+                                                                            false,
+                                                                            true,
+                                                                            false,
+                                                                            true>
+                                    <<<full_grid, 1>>>(
+                                        x.data_bf16(),
+                                        linear1_w.data_bf16(),
+                                        linear1_b.data_bf16(),
+                                        linear2_w.data_bf16(),
+                                        linear2_b.data_bf16(),
+                                        residual_ptr,
+                                        out.data_bf16());
+                            } else {
+                                ffn12_fused256_split2_pairh32_cutile_kernel<GeluMode,
+                                                                            FullBF16,
+                                                                            64,
+                                                                            AddResidual,
+                                                                            false,
+                                                                            2,
+                                                                            false,
+                                                                            true,
+                                                                            false>
+                                    <<<full_grid, 1>>>(
+                                        x.data_bf16(),
+                                        linear1_w.data_bf16(),
+                                        linear1_b.data_bf16(),
+                                        linear2_w.data_bf16(),
+                                        linear2_b.data_bf16(),
+                                        residual_ptr,
+                                        out.data_bf16());
+                            }
+                        } else {
+                            if (ffn12_round_output_bias_bf16_enabled()) {
+                                ffn12_fused256_split2_pairh32_cutile_kernel<GeluMode,
+                                                                            FullBF16,
+                                                                            64,
+                                                                            AddResidual,
+                                                                            false,
+                                                                            2,
+                                                                            true,
+                                                                            true,
+                                                                            true,
+                                                                            true>
+                                    <<<full_grid, 1>>>(
+                                        x.data_bf16(),
+                                        linear1_w.data_bf16(),
+                                        linear1_b.data_bf16(),
+                                        linear2_w.data_bf16(),
+                                        linear2_b.data_bf16(),
+                                        residual_ptr,
+                                        out.data_bf16());
+                            } else {
+                                ffn12_fused256_split2_pairh32_cutile_kernel<GeluMode,
+                                                                            FullBF16,
+                                                                            64,
+                                                                            AddResidual,
+                                                                            false,
+                                                                            2>
+                                    <<<full_grid, 1>>>(
+                                        x.data_bf16(),
+                                        linear1_w.data_bf16(),
+                                        linear1_b.data_bf16(),
+                                        linear2_w.data_bf16(),
+                                        linear2_b.data_bf16(),
+                                        residual_ptr,
+                                        out.data_bf16());
+                            }
+                        }
                     } else {
                         ffn12_fused256_split2_pairh32_cutile_kernel<GeluMode,
                                                                     FullBF16,
@@ -728,20 +854,40 @@ void launch_ffn12_fused256_cutile_typed(const Tensor& x,
                     }
                 } else {
                     if (ffn12_pairh32_latency2_enabled()) {
-                        ffn12_fused256_split2_pairh32_cutile_kernel<GeluMode,
-                                                                    FullBF16,
-                                                                    64,
-                                                                    AddResidual,
-                                                                    true,
-                                                                    2>
-                            <<<full_grid, 1>>>(
-                                x.data_bf16(),
-                                linear1_w.data_bf16(),
-                                linear1_b.data_bf16(),
-                                linear2_w.data_bf16(),
-                                linear2_b.data_bf16(),
-                                residual_ptr,
-                                out.data_bf16());
+                        if (ffn12_pairh32_weight_latency2_enabled()) {
+                            ffn12_fused256_split2_pairh32_cutile_kernel<GeluMode,
+                                                                        FullBF16,
+                                                                        64,
+                                                                        AddResidual,
+                                                                        true,
+                                                                        2,
+                                                                        false,
+                                                                        true,
+                                                                        false>
+                                <<<full_grid, 1>>>(
+                                    x.data_bf16(),
+                                    linear1_w.data_bf16(),
+                                    linear1_b.data_bf16(),
+                                    linear2_w.data_bf16(),
+                                    linear2_b.data_bf16(),
+                                    residual_ptr,
+                                    out.data_bf16());
+                        } else {
+                            ffn12_fused256_split2_pairh32_cutile_kernel<GeluMode,
+                                                                        FullBF16,
+                                                                        64,
+                                                                        AddResidual,
+                                                                        true,
+                                                                        2>
+                                <<<full_grid, 1>>>(
+                                    x.data_bf16(),
+                                    linear1_w.data_bf16(),
+                                    linear1_b.data_bf16(),
+                                    linear2_w.data_bf16(),
+                                    linear2_b.data_bf16(),
+                                    residual_ptr,
+                                    out.data_bf16());
+                        }
                     } else {
                         ffn12_fused256_split2_pairh32_cutile_kernel<GeluMode,
                                                                     FullBF16,
@@ -831,6 +977,11 @@ void launch_ffn12_fused256_cutile_mode(int gelu_mode,
                                        bool split2_pairh32,
                                        bool split2_pairh32_tk64) {
     switch (gelu_mode) {
+        case kGeluErfOdd5L175:
+            launch_ffn12_fused256_cutile_typed<kGeluErfOdd5L175, FullBF16, AddResidual>(
+                x, linear1_w, linear1_b, linear2_w, linear2_b, residual, out,
+                split2_output, split2_pairh32, split2_pairh32_tk64);
+            break;
         case kGeluErfPoly9TinyBlendL30:
             launch_ffn12_fused256_cutile_typed<kGeluErfPoly9TinyBlendL30,
                                                FullBF16, AddResidual>(

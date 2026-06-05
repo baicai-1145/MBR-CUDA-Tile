@@ -109,6 +109,7 @@ Options parse_args(int argc, char** argv) {
                 "                  qkv_t16x256x32bkn, qkv_t64x256x32bkn,\n"
                 "                  qkv_t32x512x32bkn,\n"
                 "                  qkv_t16x256x16bkn, qkv_t32x128x16bkn,\n"
+                "                  qkv_t64x128x16bkn,\n"
                 "                  qkv_t32x256x8bkn, qkv_t32x256x16bkn,\n"
                 "                  qkv_t32x256x16bkn_pairk,\n"
                 "                  qkv_t32x256x16bkn_loadtmp,\n"
@@ -120,14 +121,36 @@ Options parse_args(int argc, char** argv) {
                 "                  qkv_t32x256x16bkn_occ24,\n"
                 "                  qkv_t32x256x16bkn_lat1,\n"
                 "                  qkv_t32x256x16bkn_lat2,\n"
+                "                  qkv_t64x128x16bkn_lat2,\n"
                 "                  qkv_t32x256x16bkn_lat4,\n"
                 "                  qkv_t32x256x16bkn_lat7,\n"
                 "                  qkv_t32x256x16bkn_lat10,\n"
+                "                  qkv_t32x256x16bkn_a2_b2_s0,\n"
+                "                  qkv_t32x256x16bkn_a2_b1_s0,\n"
                 "                  qkv_t32x256p128x16bkn,\n"
                 "                  qkv_t64x256x16bkn, qkv_t32x512x16bkn,\n"
                 "                  qkv_t32x256x16bkn_scatter_time,\n"
                 "                  qkv_t32x256x16bkn_split_contig,\n"
+                "                  qkv_t32x256x16bkn_split_contig_direct_store,\n"
+                "                  qkv_t32x256x16bkn_split_contig_latecast,\n"
+                "                  qkv_t32x256x16bkn_split_contig_lateview,\n"
+                "                  qkv_t16x256x16bkn_split_contig_lat2,\n"
+                "                  qkv_t32x32x16bkn_split_contig_lat2,\n"
+                "                  qkv_t32x64x16bkn_split_contig_lat2,\n"
+                "                  qkv_t32x128x16bkn_split_contig_lat2,\n"
+                "                  qkv_t32x512x16bkn_split_contig,\n"
                 "                  qkv_t32x256x16bkn_split_contig_lat2,\n"
+                "                  qkv_t64x256x16bkn_split_contig_lat2,\n"
+                "                  qkv_t32x256x16bkn_split_contig_direct_store_lat2,\n"
+                "                  qkv_t32x256x16bkn_split_contig_latecast_lat2,\n"
+                "                  qkv_t32x256x16bkn_split_contig_lateview_lat2,\n"
+                "                  qkv_t32x512x16bkn_split_contig_lat2,\n"
+                "                  qkv_t32x256x16bkn_split_contig_a2_b0_s0,\n"
+                "                  qkv_t32x256x16bkn_split_contig_a0_b2_s0,\n"
+                "                  qkv_t32x256x16bkn_split_contig_a0_b0_s2,\n"
+                "                  qkv_t32x256x16bkn_split_contig_a2_b1_s2,\n"
+                "                  qkv_t32x256x16bkn_split_contig_a1_b2_s2,\n"
+                "                  qkv_t32x256x16bkn_split_contig_a2_b2_s0,\n"
                 "                  qkv_t32x256x64bkn, qkv_t32x256x128bkn,\n"
                 "                  t32x256x32bkn, t32x64x64s, t32x64x32,\n"
                 "                  t32x64x32m, t32x64x64, t32x128x16, t64x64x16,\n"
@@ -737,7 +760,15 @@ __tile_global__ void qkv_bkn_static_tiled_occ_kernel(const __nv_bfloat16* __rest
     c_view.store(ct::element_cast<__nv_bfloat16>(acc), tile_m, tile_n);
 }
 
-template <int TM, int TN, int TK, int M, int N, int K, int Latency>
+template <int TM,
+          int TN,
+          int TK,
+          int M,
+          int N,
+          int K,
+          int LoadLatency,
+          int BLoadLatency = LoadLatency,
+          int StoreLatency = LoadLatency>
 __tile_global__ void qkv_bkn_static_tiled_latency_kernel(
     const __nv_bfloat16* __restrict__ a,
     const __nv_bfloat16* __restrict__ b_kn,
@@ -769,14 +800,26 @@ __tile_global__ void qkv_bkn_static_tiled_latency_kernel(
     for (auto kk : ct::irange(std::size_t{0}, std::size_t{K / TK})) {
         ATile a_tile;
         BTile b_tile;
-        [[ cutile::hint(0, latency=Latency) ]]
-        a_tile = a_view.load(tile_m, kk);
-        [[ cutile::hint(0, latency=Latency) ]]
-        b_tile = b_view.load(kk, tile_n);
+        if constexpr (LoadLatency > 0) {
+            [[ cutile::hint(0, latency=LoadLatency) ]]
+            a_tile = a_view.load(tile_m, kk);
+        } else {
+            a_tile = a_view.load(tile_m, kk);
+        }
+        if constexpr (BLoadLatency > 0) {
+            [[ cutile::hint(0, latency=BLoadLatency) ]]
+            b_tile = b_view.load(kk, tile_n);
+        } else {
+            b_tile = b_view.load(kk, tile_n);
+        }
         acc = ct::mma(a_tile, b_tile, acc);
     }
-    [[ cutile::hint(0, latency=Latency) ]]
-    c_view.store(ct::element_cast<__nv_bfloat16>(acc), tile_m, tile_n);
+    if constexpr (StoreLatency > 0) {
+        [[ cutile::hint(0, latency=StoreLatency) ]]
+        c_view.store(ct::element_cast<__nv_bfloat16>(acc), tile_m, tile_n);
+    } else {
+        c_view.store(ct::element_cast<__nv_bfloat16>(acc), tile_m, tile_n);
+    }
 }
 
 template <int TM, int TK, int M, int N, int K>
@@ -894,7 +937,17 @@ __tile_global__ void qkv_bkn_static_tiled_scatter_time_kernel(
     }
 }
 
-template <int TM, int TN, int TK, int M, int N, int K, int LoadLatency = 0>
+template <int TM,
+          int TN,
+          int TK,
+          int M,
+          int N,
+          int K,
+          int LoadLatency = 0,
+          int BLoadLatency = LoadLatency,
+          int StoreLatency = LoadLatency,
+          bool BranchLocalCast = false,
+          bool BranchLocalView = false>
 __tile_global__ void qkv_bkn_static_tiled_split_contig_kernel(
     const __nv_bfloat16* __restrict__ a,
     const __nv_bfloat16* __restrict__ b_kn,
@@ -904,6 +957,7 @@ __tile_global__ void qkv_bkn_static_tiled_split_contig_kernel(
     static_assert(N == 3 * kQkvHeads * kQkvDim);
     static_assert((N / 3) % TN == 0);
     static_assert(K % TK == 0);
+    constexpr int kComponentTiles = (N / 3) / TN;
     using AccTile = ct::tile<float, ct::shape<TM, TN>>;
     using ATile = ct::tile<__nv_bfloat16, ct::shape<TM, TK>>;
     using BTile = ct::tile<__nv_bfloat16, ct::shape<TK, TN>>;
@@ -922,16 +976,344 @@ __tile_global__ void qkv_bkn_static_tiled_split_contig_kernel(
         ct::tensor_span{b_kn, ct::shape<K, N>{}},
         ct::shape<TK, TN>{}
     };
-    auto q_view = ct::partition_view{
-        ct::tensor_span{q, ct::shape<M, N / 3>{}},
-        ct::shape<TM, TN>{}
+    if constexpr (BranchLocalView) {
+        auto [tile_m, tile_n, tile_z] = ct::bid();
+        (void)tile_z;
+        auto acc = ct::full<AccTile>(0.0f);
+        for (auto kk : ct::irange(std::size_t{0}, std::size_t{K / TK})) {
+            if constexpr (LoadLatency > 0 || BLoadLatency > 0) {
+                ATile a_tile;
+                BTile b_tile;
+                if constexpr (LoadLatency > 0) {
+                    [[ cutile::hint(0, latency=LoadLatency) ]]
+                    a_tile = a_view.load(tile_m, kk);
+                } else {
+                    a_tile = a_view.load(tile_m, kk);
+                }
+                if constexpr (BLoadLatency > 0) {
+                    [[ cutile::hint(0, latency=BLoadLatency) ]]
+                    b_tile = b_view.load(kk, tile_n);
+                } else {
+                    b_tile = b_view.load(kk, tile_n);
+                }
+                acc = ct::mma(a_tile, b_tile, acc);
+            } else {
+                acc = ct::mma(a_view.load(tile_m, kk), b_view.load(kk, tile_n), acc);
+            }
+        }
+
+        if constexpr (BranchLocalCast) {
+            if (tile_n < kComponentTiles) {
+                auto q_view = ct::partition_view{
+                    ct::tensor_span{q, ct::shape<M, N / 3>{}},
+                    ct::shape<TM, TN>{}
+                };
+                if constexpr (StoreLatency > 0) {
+                    [[ cutile::hint(0, latency=StoreLatency) ]]
+                    q_view.store(ct::element_cast<__nv_bfloat16>(acc), tile_m, tile_n);
+                } else {
+                    q_view.store(ct::element_cast<__nv_bfloat16>(acc), tile_m, tile_n);
+                }
+            } else if (tile_n < 2 * kComponentTiles) {
+                auto k_view = ct::partition_view{
+                    ct::tensor_span{k_out, ct::shape<M, N / 3>{}},
+                    ct::shape<TM, TN>{}
+                };
+                if constexpr (StoreLatency > 0) {
+                    [[ cutile::hint(0, latency=StoreLatency) ]]
+                    k_view.store(ct::element_cast<__nv_bfloat16>(acc),
+                                 tile_m,
+                                 tile_n - kComponentTiles);
+                } else {
+                    k_view.store(ct::element_cast<__nv_bfloat16>(acc),
+                                 tile_m,
+                                 tile_n - kComponentTiles);
+                }
+            } else {
+                auto v_view = ct::partition_view{
+                    ct::tensor_span{v, ct::shape<M, N / 3>{}},
+                    ct::shape<TM, TN>{}
+                };
+                if constexpr (StoreLatency > 0) {
+                    [[ cutile::hint(0, latency=StoreLatency) ]]
+                    v_view.store(ct::element_cast<__nv_bfloat16>(acc),
+                                 tile_m,
+                                 tile_n - 2 * kComponentTiles);
+                } else {
+                    v_view.store(ct::element_cast<__nv_bfloat16>(acc),
+                                 tile_m,
+                                 tile_n - 2 * kComponentTiles);
+                }
+            }
+        } else {
+            auto out = ct::element_cast<__nv_bfloat16>(acc);
+            if (tile_n < kComponentTiles) {
+                auto q_view = ct::partition_view{
+                    ct::tensor_span{q, ct::shape<M, N / 3>{}},
+                    ct::shape<TM, TN>{}
+                };
+                if constexpr (StoreLatency > 0) {
+                    [[ cutile::hint(0, latency=StoreLatency) ]]
+                    q_view.store(out, tile_m, tile_n);
+                } else {
+                    q_view.store(out, tile_m, tile_n);
+                }
+            } else if (tile_n < 2 * kComponentTiles) {
+                auto k_view = ct::partition_view{
+                    ct::tensor_span{k_out, ct::shape<M, N / 3>{}},
+                    ct::shape<TM, TN>{}
+                };
+                if constexpr (StoreLatency > 0) {
+                    [[ cutile::hint(0, latency=StoreLatency) ]]
+                    k_view.store(out, tile_m, tile_n - kComponentTiles);
+                } else {
+                    k_view.store(out, tile_m, tile_n - kComponentTiles);
+                }
+            } else {
+                auto v_view = ct::partition_view{
+                    ct::tensor_span{v, ct::shape<M, N / 3>{}},
+                    ct::shape<TM, TN>{}
+                };
+                if constexpr (StoreLatency > 0) {
+                    [[ cutile::hint(0, latency=StoreLatency) ]]
+                    v_view.store(out, tile_m, tile_n - 2 * kComponentTiles);
+                } else {
+                    v_view.store(out, tile_m, tile_n - 2 * kComponentTiles);
+                }
+            }
+        }
+    } else {
+        auto q_view = ct::partition_view{
+            ct::tensor_span{q, ct::shape<M, N / 3>{}},
+            ct::shape<TM, TN>{}
+        };
+        auto k_view = ct::partition_view{
+            ct::tensor_span{k_out, ct::shape<M, N / 3>{}},
+            ct::shape<TM, TN>{}
+        };
+        auto v_view = ct::partition_view{
+            ct::tensor_span{v, ct::shape<M, N / 3>{}},
+            ct::shape<TM, TN>{}
+        };
+
+        auto [tile_m, tile_n, tile_z] = ct::bid();
+        (void)tile_z;
+        auto acc = ct::full<AccTile>(0.0f);
+        for (auto kk : ct::irange(std::size_t{0}, std::size_t{K / TK})) {
+            if constexpr (LoadLatency > 0 || BLoadLatency > 0) {
+                ATile a_tile;
+                BTile b_tile;
+                if constexpr (LoadLatency > 0) {
+                    [[ cutile::hint(0, latency=LoadLatency) ]]
+                    a_tile = a_view.load(tile_m, kk);
+                } else {
+                    a_tile = a_view.load(tile_m, kk);
+                }
+                if constexpr (BLoadLatency > 0) {
+                    [[ cutile::hint(0, latency=BLoadLatency) ]]
+                    b_tile = b_view.load(kk, tile_n);
+                } else {
+                    b_tile = b_view.load(kk, tile_n);
+                }
+                acc = ct::mma(a_tile, b_tile, acc);
+            } else {
+                acc = ct::mma(a_view.load(tile_m, kk), b_view.load(kk, tile_n), acc);
+            }
+        }
+
+        if constexpr (BranchLocalCast) {
+            if (tile_n < kComponentTiles) {
+                if constexpr (StoreLatency > 0) {
+                    [[ cutile::hint(0, latency=StoreLatency) ]]
+                    q_view.store(ct::element_cast<__nv_bfloat16>(acc), tile_m, tile_n);
+                } else {
+                    q_view.store(ct::element_cast<__nv_bfloat16>(acc), tile_m, tile_n);
+                }
+            } else if (tile_n < 2 * kComponentTiles) {
+                if constexpr (StoreLatency > 0) {
+                    [[ cutile::hint(0, latency=StoreLatency) ]]
+                    k_view.store(ct::element_cast<__nv_bfloat16>(acc),
+                                 tile_m,
+                                 tile_n - kComponentTiles);
+                } else {
+                    k_view.store(ct::element_cast<__nv_bfloat16>(acc),
+                                 tile_m,
+                                 tile_n - kComponentTiles);
+                }
+            } else {
+                if constexpr (StoreLatency > 0) {
+                    [[ cutile::hint(0, latency=StoreLatency) ]]
+                    v_view.store(ct::element_cast<__nv_bfloat16>(acc),
+                                 tile_m,
+                                 tile_n - 2 * kComponentTiles);
+                } else {
+                    v_view.store(ct::element_cast<__nv_bfloat16>(acc),
+                                 tile_m,
+                                 tile_n - 2 * kComponentTiles);
+                }
+            }
+        } else {
+            auto out = ct::element_cast<__nv_bfloat16>(acc);
+            if (tile_n < kComponentTiles) {
+                if constexpr (StoreLatency > 0) {
+                    [[ cutile::hint(0, latency=StoreLatency) ]]
+                    q_view.store(out, tile_m, tile_n);
+                } else {
+                    q_view.store(out, tile_m, tile_n);
+                }
+            } else if (tile_n < 2 * kComponentTiles) {
+                if constexpr (StoreLatency > 0) {
+                    [[ cutile::hint(0, latency=StoreLatency) ]]
+                    k_view.store(out, tile_m, tile_n - kComponentTiles);
+                } else {
+                    k_view.store(out, tile_m, tile_n - kComponentTiles);
+                }
+            } else {
+                if constexpr (StoreLatency > 0) {
+                    [[ cutile::hint(0, latency=StoreLatency) ]]
+                    v_view.store(out, tile_m, tile_n - 2 * kComponentTiles);
+                } else {
+                    v_view.store(out, tile_m, tile_n - 2 * kComponentTiles);
+                }
+            }
+        }
+    }
+}
+
+template <int TM,
+          int TN,
+          int TK,
+          int M,
+          int N,
+          int K,
+          int LoadLatency = 0,
+          int BLoadLatency = LoadLatency,
+          int StoreLatency = LoadLatency>
+__tile_global__ void qkv_bkn_static_tiled_split_contig_direct_store_kernel(
+    const __nv_bfloat16* __restrict__ a,
+    const __nv_bfloat16* __restrict__ b_kn,
+    __nv_bfloat16* __restrict__ q,
+    __nv_bfloat16* __restrict__ k_out,
+    __nv_bfloat16* __restrict__ v) {
+    static_assert(N == 3 * kQkvHeads * kQkvDim);
+    static_assert((N / 3) % TN == 0);
+    static_assert(K % TK == 0);
+    constexpr int kComponentTiles = (N / 3) / TN;
+    using AccTile = ct::tile<float, ct::shape<TM, TN>>;
+    using ATile = ct::tile<__nv_bfloat16, ct::shape<TM, TK>>;
+    using BTile = ct::tile<__nv_bfloat16, ct::shape<TK, TN>>;
+    using I64OutTile = ct::tile<long long, ct::shape<TM, TN>>;
+
+    a = ct::assume_aligned(a, 16_ic);
+    b_kn = ct::assume_aligned(b_kn, 16_ic);
+    q = ct::assume_aligned(q, 16_ic);
+    k_out = ct::assume_aligned(k_out, 16_ic);
+    v = ct::assume_aligned(v, 16_ic);
+
+    auto a_view = ct::partition_view{
+        ct::tensor_span{a, ct::shape<M, K>{}},
+        ct::shape<TM, TK>{}
     };
-    auto k_view = ct::partition_view{
-        ct::tensor_span{k_out, ct::shape<M, N / 3>{}},
-        ct::shape<TM, TN>{}
+    auto b_view = ct::partition_view{
+        ct::tensor_span{b_kn, ct::shape<K, N>{}},
+        ct::shape<TK, TN>{}
     };
-    auto v_view = ct::partition_view{
-        ct::tensor_span{v, ct::shape<M, N / 3>{}},
+
+    auto [tile_m, tile_n, tile_z] = ct::bid();
+    (void)tile_z;
+    auto acc = ct::full<AccTile>(0.0f);
+    for (auto kk : ct::irange(std::size_t{0}, std::size_t{K / TK})) {
+        if constexpr (LoadLatency > 0 || BLoadLatency > 0) {
+            ATile a_tile;
+            BTile b_tile;
+            if constexpr (LoadLatency > 0) {
+                [[ cutile::hint(0, latency=LoadLatency) ]]
+                a_tile = a_view.load(tile_m, kk);
+            } else {
+                a_tile = a_view.load(tile_m, kk);
+            }
+            if constexpr (BLoadLatency > 0) {
+                [[ cutile::hint(0, latency=BLoadLatency) ]]
+                b_tile = b_view.load(kk, tile_n);
+            } else {
+                b_tile = b_view.load(kk, tile_n);
+            }
+            acc = ct::mma(a_tile, b_tile, acc);
+        } else {
+            acc = ct::mma(a_view.load(tile_m, kk), b_view.load(kk, tile_n), acc);
+        }
+    }
+
+    I64OutTile local = ct::iota<I64OutTile>();
+    auto row = static_cast<long long>(tile_m) * TM + local / TN;
+    auto col = local % TN;
+    auto out = ct::element_cast<__nv_bfloat16>(acc);
+    if (tile_n < kComponentTiles) {
+        auto offset = row * (N / 3) + tile_n * TN + col;
+        if constexpr (StoreLatency > 0) {
+            [[ cutile::hint(0, latency=StoreLatency) ]]
+            ct::store(q + offset, out);
+        } else {
+            ct::store(q + offset, out);
+        }
+    } else if (tile_n < 2 * kComponentTiles) {
+        auto component_tile = tile_n - kComponentTiles;
+        auto offset = row * (N / 3) + component_tile * TN + col;
+        if constexpr (StoreLatency > 0) {
+            [[ cutile::hint(0, latency=StoreLatency) ]]
+            ct::store(k_out + offset, out);
+        } else {
+            ct::store(k_out + offset, out);
+        }
+    } else {
+        auto component_tile = tile_n - 2 * kComponentTiles;
+        auto offset = row * (N / 3) + component_tile * TN + col;
+        if constexpr (StoreLatency > 0) {
+            [[ cutile::hint(0, latency=StoreLatency) ]]
+            ct::store(v + offset, out);
+        } else {
+            ct::store(v + offset, out);
+        }
+    }
+}
+
+template <int TM,
+          int TN,
+          int TK,
+          int M,
+          int N,
+          int K,
+          int Component,
+          int LoadLatency = 0,
+          int BLoadLatency = LoadLatency,
+          int StoreLatency = LoadLatency>
+__tile_global__ void qkv_bkn_static_tiled_split_contig_component_kernel(
+    const __nv_bfloat16* __restrict__ a,
+    const __nv_bfloat16* __restrict__ b_kn,
+    __nv_bfloat16* __restrict__ out) {
+    static_assert(N == 3 * kQkvHeads * kQkvDim);
+    static_assert((N / 3) % TN == 0);
+    static_assert(K % TK == 0);
+    static_assert(Component >= 0 && Component < 3);
+    constexpr int kComponentN = N / 3;
+    using AccTile = ct::tile<float, ct::shape<TM, TN>>;
+    using ATile = ct::tile<__nv_bfloat16, ct::shape<TM, TK>>;
+    using BTile = ct::tile<__nv_bfloat16, ct::shape<TK, TN>>;
+
+    a = ct::assume_aligned(a, 16_ic);
+    b_kn = ct::assume_aligned(b_kn, 16_ic);
+    out = ct::assume_aligned(out, 16_ic);
+
+    auto a_view = ct::partition_view{
+        ct::tensor_span{a, ct::shape<M, K>{}},
+        ct::shape<TM, TK>{}
+    };
+    auto b_view = ct::partition_view{
+        ct::tensor_span{b_kn + Component * kComponentN, ct::shape<K, kComponentN>{}},
+        ct::shape<TK, TN>{}
+    };
+    auto out_view = ct::partition_view{
+        ct::tensor_span{out, ct::shape<M, kComponentN>{}},
         ct::shape<TM, TN>{}
     };
 
@@ -939,40 +1321,133 @@ __tile_global__ void qkv_bkn_static_tiled_split_contig_kernel(
     (void)tile_z;
     auto acc = ct::full<AccTile>(0.0f);
     for (auto kk : ct::irange(std::size_t{0}, std::size_t{K / TK})) {
-        if constexpr (LoadLatency > 0) {
+        if constexpr (LoadLatency > 0 || BLoadLatency > 0) {
             ATile a_tile;
             BTile b_tile;
-            [[ cutile::hint(0, latency=LoadLatency) ]]
-            a_tile = a_view.load(tile_m, kk);
-            [[ cutile::hint(0, latency=LoadLatency) ]]
-            b_tile = b_view.load(kk, tile_n);
+            if constexpr (LoadLatency > 0) {
+                [[ cutile::hint(0, latency=LoadLatency) ]]
+                a_tile = a_view.load(tile_m, kk);
+            } else {
+                a_tile = a_view.load(tile_m, kk);
+            }
+            if constexpr (BLoadLatency > 0) {
+                [[ cutile::hint(0, latency=BLoadLatency) ]]
+                b_tile = b_view.load(kk, tile_n);
+            } else {
+                b_tile = b_view.load(kk, tile_n);
+            }
             acc = ct::mma(a_tile, b_tile, acc);
         } else {
             acc = ct::mma(a_view.load(tile_m, kk), b_view.load(kk, tile_n), acc);
         }
     }
 
-    auto out = ct::element_cast<__nv_bfloat16>(acc);
-    if (tile_n < 2) {
-        if constexpr (LoadLatency > 0) {
-            [[ cutile::hint(0, latency=LoadLatency) ]]
-            q_view.store(out, tile_m, tile_n);
+    auto out_tile = ct::element_cast<__nv_bfloat16>(acc);
+    if constexpr (StoreLatency > 0) {
+        [[ cutile::hint(0, latency=StoreLatency) ]]
+        out_view.store(out_tile, tile_m, tile_n);
+    } else {
+        out_view.store(out_tile, tile_m, tile_n);
+    }
+}
+
+template <int TM,
+          int TN,
+          int TK,
+          int M,
+          int N,
+          int K,
+          int LoadLatency = 0,
+          int BLoadLatency = LoadLatency,
+          int StoreLatency = LoadLatency>
+__tile_global__ void qkv_bkn_static_tiled_split_contig_zcomponent_kernel(
+    const __nv_bfloat16* __restrict__ a,
+    const __nv_bfloat16* __restrict__ b_kn,
+    __nv_bfloat16* __restrict__ q,
+    __nv_bfloat16* __restrict__ k_out,
+    __nv_bfloat16* __restrict__ v) {
+    static_assert(N == 3 * kQkvHeads * kQkvDim);
+    static_assert((N / 3) % TN == 0);
+    static_assert(K % TK == 0);
+    constexpr int kComponentN = N / 3;
+    using AccTile = ct::tile<float, ct::shape<TM, TN>>;
+    using ATile = ct::tile<__nv_bfloat16, ct::shape<TM, TK>>;
+    using BTile = ct::tile<__nv_bfloat16, ct::shape<TK, TN>>;
+
+    a = ct::assume_aligned(a, 16_ic);
+    b_kn = ct::assume_aligned(b_kn, 16_ic);
+    q = ct::assume_aligned(q, 16_ic);
+    k_out = ct::assume_aligned(k_out, 16_ic);
+    v = ct::assume_aligned(v, 16_ic);
+
+    auto a_view = ct::partition_view{
+        ct::tensor_span{a, ct::shape<M, K>{}},
+        ct::shape<TM, TK>{}
+    };
+
+    auto [tile_m, tile_n, component_raw] = ct::bid();
+    int component = static_cast<int>(component_raw);
+    auto b_view = ct::partition_view{
+        ct::tensor_span{b_kn + component * kComponentN, ct::shape<K, kComponentN>{}},
+        ct::shape<TK, TN>{}
+    };
+
+    auto acc = ct::full<AccTile>(0.0f);
+    for (auto kk : ct::irange(std::size_t{0}, std::size_t{K / TK})) {
+        if constexpr (LoadLatency > 0 || BLoadLatency > 0) {
+            ATile a_tile;
+            BTile b_tile;
+            if constexpr (LoadLatency > 0) {
+                [[ cutile::hint(0, latency=LoadLatency) ]]
+                a_tile = a_view.load(tile_m, kk);
+            } else {
+                a_tile = a_view.load(tile_m, kk);
+            }
+            if constexpr (BLoadLatency > 0) {
+                [[ cutile::hint(0, latency=BLoadLatency) ]]
+                b_tile = b_view.load(kk, tile_n);
+            } else {
+                b_tile = b_view.load(kk, tile_n);
+            }
+            acc = ct::mma(a_tile, b_tile, acc);
         } else {
-            q_view.store(out, tile_m, tile_n);
+            acc = ct::mma(a_view.load(tile_m, kk), b_view.load(kk, tile_n), acc);
         }
-    } else if (tile_n < 4) {
-        if constexpr (LoadLatency > 0) {
-            [[ cutile::hint(0, latency=LoadLatency) ]]
-            k_view.store(out, tile_m, tile_n - 2);
+    }
+
+    auto out_tile = ct::element_cast<__nv_bfloat16>(acc);
+    if (component == 0) {
+        auto q_view = ct::partition_view{
+            ct::tensor_span{q, ct::shape<M, kComponentN>{}},
+            ct::shape<TM, TN>{}
+        };
+        if constexpr (StoreLatency > 0) {
+            [[ cutile::hint(0, latency=StoreLatency) ]]
+            q_view.store(out_tile, tile_m, tile_n);
         } else {
-            k_view.store(out, tile_m, tile_n - 2);
+            q_view.store(out_tile, tile_m, tile_n);
+        }
+    } else if (component == 1) {
+        auto k_view = ct::partition_view{
+            ct::tensor_span{k_out, ct::shape<M, kComponentN>{}},
+            ct::shape<TM, TN>{}
+        };
+        if constexpr (StoreLatency > 0) {
+            [[ cutile::hint(0, latency=StoreLatency) ]]
+            k_view.store(out_tile, tile_m, tile_n);
+        } else {
+            k_view.store(out_tile, tile_m, tile_n);
         }
     } else {
-        if constexpr (LoadLatency > 0) {
-            [[ cutile::hint(0, latency=LoadLatency) ]]
-            v_view.store(out, tile_m, tile_n - 4);
+        auto v_view = ct::partition_view{
+            ct::tensor_span{v, ct::shape<M, kComponentN>{}},
+            ct::shape<TM, TN>{}
+        };
+        if constexpr (StoreLatency > 0) {
+            [[ cutile::hint(0, latency=StoreLatency) ]]
+            v_view.store(out_tile, tile_m, tile_n);
         } else {
-            v_view.store(out, tile_m, tile_n - 4);
+            v_view.store(out_tile, tile_m, tile_n);
         }
     }
 }
@@ -1247,12 +1722,28 @@ void launch_static_qkv_bkn_tiled_occ_cutile(const __nv_bfloat16* d_a,
         d_a, d_b, d_c);
 }
 
-template <int TM, int TN, int TK, int M, int N, int K, int Latency>
+template <int TM,
+          int TN,
+          int TK,
+          int M,
+          int N,
+          int K,
+          int LoadLatency,
+          int BLoadLatency = LoadLatency,
+          int StoreLatency = LoadLatency>
 void launch_static_qkv_bkn_tiled_latency_cutile(const __nv_bfloat16* d_a,
-                                                const __nv_bfloat16* d_b,
-                                                __nv_bfloat16* d_c) {
+                                                 const __nv_bfloat16* d_b,
+                                                 __nv_bfloat16* d_c) {
     dim3 grid(M / TM, N / TN, 1);
-    qkv_bkn_static_tiled_latency_kernel<TM, TN, TK, M, N, K, Latency><<<grid, 1>>>(
+    qkv_bkn_static_tiled_latency_kernel<TM,
+                                        TN,
+                                        TK,
+                                        M,
+                                        N,
+                                        K,
+                                        LoadLatency,
+                                        BLoadLatency,
+                                        StoreLatency><<<grid, 1>>>(
         d_a, d_b, d_c);
 }
 
@@ -1276,15 +1767,142 @@ void launch_static_qkv_bkn_tiled_scatter_time_cutile(const __nv_bfloat16* d_a,
         d_a, d_b, d_q, d_k, d_v);
 }
 
-template <int TM, int TN, int TK, int M, int N, int K, int LoadLatency = 0>
+template <int TM,
+          int TN,
+          int TK,
+          int M,
+          int N,
+          int K,
+          int LoadLatency = 0,
+          int BLoadLatency = LoadLatency,
+          int StoreLatency = LoadLatency,
+          bool BranchLocalCast = false,
+          bool BranchLocalView = false>
 void launch_static_qkv_bkn_tiled_split_contig_cutile(const __nv_bfloat16* d_a,
                                                      const __nv_bfloat16* d_b,
                                                      __nv_bfloat16* d_q,
                                                      __nv_bfloat16* d_k,
                                                      __nv_bfloat16* d_v) {
     dim3 grid(M / TM, N / TN, 1);
-    qkv_bkn_static_tiled_split_contig_kernel<TM, TN, TK, M, N, K, LoadLatency><<<grid, 1>>>(
-        d_a, d_b, d_q, d_k, d_v);
+    qkv_bkn_static_tiled_split_contig_kernel<TM,
+                                             TN,
+                                             TK,
+                                             M,
+                                             N,
+                                             K,
+                                             LoadLatency,
+                                             BLoadLatency,
+                                             StoreLatency,
+                                             BranchLocalCast,
+                                             BranchLocalView>
+        <<<grid, 1>>>(d_a, d_b, d_q, d_k, d_v);
+}
+
+template <int TM,
+          int TN,
+          int TK,
+          int M,
+          int N,
+          int K,
+          int LoadLatency = 0,
+          int BLoadLatency = LoadLatency,
+          int StoreLatency = LoadLatency>
+void launch_static_qkv_bkn_tiled_split_contig_direct_store_cutile(
+    const __nv_bfloat16* d_a,
+    const __nv_bfloat16* d_b,
+    __nv_bfloat16* d_q,
+    __nv_bfloat16* d_k,
+    __nv_bfloat16* d_v) {
+    dim3 grid(M / TM, N / TN, 1);
+    qkv_bkn_static_tiled_split_contig_direct_store_kernel<TM,
+                                                          TN,
+                                                          TK,
+                                                          M,
+                                                          N,
+                                                          K,
+                                                          LoadLatency,
+                                                          BLoadLatency,
+                                                          StoreLatency>
+        <<<grid, 1>>>(d_a, d_b, d_q, d_k, d_v);
+}
+
+template <int TM,
+          int TN,
+          int TK,
+          int M,
+          int N,
+          int K,
+          int LoadLatency = 0,
+          int BLoadLatency = LoadLatency,
+          int StoreLatency = LoadLatency>
+void launch_static_qkv_bkn_tiled_split_contig_component_cutile(
+    const __nv_bfloat16* d_a,
+    const __nv_bfloat16* d_b,
+    __nv_bfloat16* d_q,
+    __nv_bfloat16* d_k,
+    __nv_bfloat16* d_v) {
+    dim3 grid(M / TM, (N / 3) / TN, 1);
+    qkv_bkn_static_tiled_split_contig_component_kernel<TM,
+                                                       TN,
+                                                       TK,
+                                                       M,
+                                                       N,
+                                                       K,
+                                                       0,
+                                                       LoadLatency,
+                                                       BLoadLatency,
+                                                       StoreLatency>
+        <<<grid, 1>>>(d_a, d_b, d_q);
+    qkv_bkn_static_tiled_split_contig_component_kernel<TM,
+                                                       TN,
+                                                       TK,
+                                                       M,
+                                                       N,
+                                                       K,
+                                                       1,
+                                                       LoadLatency,
+                                                       BLoadLatency,
+                                                       StoreLatency>
+        <<<grid, 1>>>(d_a, d_b, d_k);
+    qkv_bkn_static_tiled_split_contig_component_kernel<TM,
+                                                       TN,
+                                                       TK,
+                                                       M,
+                                                       N,
+                                                       K,
+                                                       2,
+                                                       LoadLatency,
+                                                       BLoadLatency,
+                                                       StoreLatency>
+        <<<grid, 1>>>(d_a, d_b, d_v);
+}
+
+template <int TM,
+          int TN,
+          int TK,
+          int M,
+          int N,
+          int K,
+          int LoadLatency = 0,
+          int BLoadLatency = LoadLatency,
+          int StoreLatency = LoadLatency>
+void launch_static_qkv_bkn_tiled_split_contig_zcomponent_cutile(
+    const __nv_bfloat16* d_a,
+    const __nv_bfloat16* d_b,
+    __nv_bfloat16* d_q,
+    __nv_bfloat16* d_k,
+    __nv_bfloat16* d_v) {
+    dim3 grid(M / TM, (N / 3) / TN, 3);
+    qkv_bkn_static_tiled_split_contig_zcomponent_kernel<TM,
+                                                        TN,
+                                                        TK,
+                                                        M,
+                                                        N,
+                                                        K,
+                                                        LoadLatency,
+                                                        BLoadLatency,
+                                                        StoreLatency>
+        <<<grid, 1>>>(d_a, d_b, d_q, d_k, d_v);
 }
 
 template <int TM, int TN, int TK, int M, int N, int K>
@@ -1778,7 +2396,12 @@ void run_static_qkv_bkn_tiled_occ_variant(const Shape& shape,
         });
 }
 
-template <int Latency>
+template <int LoadLatency,
+          int BLoadLatency = LoadLatency,
+          int StoreLatency = LoadLatency,
+          int TM = 32,
+          int TN = 256,
+          int TK = 16>
 void run_static_qkv_bkn_tiled_latency_variant(const Shape& shape,
                                               const Options& opts,
                                               const char* variant_name) {
@@ -1789,18 +2412,20 @@ void run_static_qkv_bkn_tiled_latency_variant(const Shape& shape,
         }
         return;
     }
-    constexpr int kFullM = (78060 / 32) * 32;
-    dim3 grid(kFullM / 32, 1536 / 256, 1);
+    constexpr int kFullM = (78060 / TM) * TM;
+    dim3 grid(kFullM / TM, 1536 / TN, 1);
     run_qkv_custom_variant(
-        shape, opts, variant_name, kFullM, 32, 256, 16, grid,
+        shape, opts, variant_name, kFullM, TM, TN, TK, grid,
         [](__nv_bfloat16* d_a, __nv_bfloat16* d_b, __nv_bfloat16* d_c) {
-            launch_static_qkv_bkn_tiled_latency_cutile<32,
-                                                       256,
-                                                       16,
+            launch_static_qkv_bkn_tiled_latency_cutile<TM,
+                                                       TN,
+                                                       TK,
                                                        kFullM,
                                                        1536,
                                                        256,
-                                                       Latency>(d_a, d_b, d_c);
+                                                       LoadLatency,
+                                                       BLoadLatency,
+                                                       StoreLatency>(d_a, d_b, d_c);
         });
 }
 
@@ -1917,7 +2542,14 @@ void run_static_qkv_bkn_tiled_scatter_time_variant(const Shape& shape,
         __bfloat162float(checksum_bf16));
 }
 
-template <int TM, int TN, int TK, int LoadLatency = 0>
+template <int TM,
+          int TN,
+          int TK,
+          int LoadLatency = 0,
+          int BLoadLatency = LoadLatency,
+          int StoreLatency = LoadLatency,
+          bool BranchLocalCast = false,
+          bool BranchLocalView = false>
 void run_static_qkv_bkn_tiled_split_contig_variant(const Shape& shape,
                                                    const Options& opts,
                                                    const char* variant_name) {
@@ -1960,7 +2592,11 @@ void run_static_qkv_bkn_tiled_split_contig_variant(const Shape& shape,
                                                         kFullM,
                                                         1536,
                                                         256,
-                                                        LoadLatency>(
+                                                        LoadLatency,
+                                                        BLoadLatency,
+                                                        StoreLatency,
+                                                        BranchLocalCast,
+                                                        BranchLocalView>(
             d_a, d_b, d_q, d_k, d_v);
     };
 
@@ -2004,6 +2640,306 @@ void run_static_qkv_bkn_tiled_split_contig_variant(const Shape& shape,
     std::printf(
         "  %-10s tile=%dx%dx%d grid=(%u,%u) fullM=%d mem=%.2f GiB best=%.3f ms median=%.3f ms %.2f TF/s roof=%.1f%% checksum=%.4f\n",
         variant_name, TM, TN, TK, grid.x, grid.y, kFullM, gib,
+        best_ms, median_ms, tflops, tflops * 100.0 / kA10gDenseBf16Tflops,
+        __bfloat162float(checksum_bf16));
+}
+
+template <int TM,
+          int TN,
+          int TK,
+          int LoadLatency = 0,
+          int BLoadLatency = LoadLatency,
+          int StoreLatency = LoadLatency>
+void run_static_qkv_bkn_tiled_split_contig_direct_store_variant(
+    const Shape& shape,
+    const Options& opts,
+    const char* variant_name) {
+    if (std::strcmp(shape.name, "infer_qkv") != 0) {
+        if (opts.variant == variant_name) {
+            std::printf("  %-10s skipped: QKV-only BKN direct-store split variant\n",
+                        variant_name);
+        }
+        return;
+    }
+
+    constexpr int kFullM = (78060 / TM) * TM;
+    int iters = opts.iters_override > 0 ? opts.iters_override : shape.iters;
+    size_t a_elems = static_cast<size_t>(shape.m) * shape.k;
+    size_t b_elems = static_cast<size_t>(shape.n) * shape.k;
+    size_t out_elems = static_cast<size_t>(shape.m) * (shape.n / 3) * 3;
+    size_t split_elems = static_cast<size_t>(shape.m) * (shape.n / 3);
+    double gib = (static_cast<double>(a_elems + b_elems + out_elems) *
+                  sizeof(__nv_bfloat16)) /
+                 (1024.0 * 1024.0 * 1024.0);
+    dim3 grid(kFullM / TM, 1536 / TN, 1);
+
+    __nv_bfloat16* d_a = nullptr;
+    __nv_bfloat16* d_b = nullptr;
+    __nv_bfloat16* d_q = nullptr;
+    __nv_bfloat16* d_k = nullptr;
+    __nv_bfloat16* d_v = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_a, a_elems * sizeof(__nv_bfloat16)));
+    CUDA_CHECK(cudaMalloc(&d_b, b_elems * sizeof(__nv_bfloat16)));
+    CUDA_CHECK(cudaMalloc(&d_q, split_elems * sizeof(__nv_bfloat16)));
+    CUDA_CHECK(cudaMalloc(&d_k, split_elems * sizeof(__nv_bfloat16)));
+    CUDA_CHECK(cudaMalloc(&d_v, split_elems * sizeof(__nv_bfloat16)));
+    init_bf16(d_a, a_elems);
+    init_bf16(d_b, b_elems);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    auto launch = [&]() {
+        launch_static_qkv_bkn_tiled_split_contig_direct_store_cutile<TM,
+                                                                     TN,
+                                                                     TK,
+                                                                     kFullM,
+                                                                     1536,
+                                                                     256,
+                                                                     LoadLatency,
+                                                                     BLoadLatency,
+                                                                     StoreLatency>(
+            d_a, d_b, d_q, d_k, d_v);
+    };
+
+    for (int i = 0; i < opts.warmup; ++i) {
+        launch();
+    }
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    cudaEvent_t start{};
+    cudaEvent_t stop{};
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    std::vector<float> times_ms;
+    times_ms.reserve(iters);
+    for (int i = 0; i < iters; ++i) {
+        CUDA_CHECK(cudaEventRecord(start));
+        launch();
+        CUDA_CHECK(cudaEventRecord(stop));
+        CUDA_CHECK(cudaEventSynchronize(stop));
+        CUDA_CHECK(cudaGetLastError());
+        float ms = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+        times_ms.push_back(ms);
+    }
+
+    __nv_bfloat16 checksum_bf16{};
+    CUDA_CHECK(cudaMemcpy(&checksum_bf16, d_q, sizeof(checksum_bf16), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+    CUDA_CHECK(cudaFree(d_a));
+    CUDA_CHECK(cudaFree(d_b));
+    CUDA_CHECK(cudaFree(d_q));
+    CUDA_CHECK(cudaFree(d_k));
+    CUDA_CHECK(cudaFree(d_v));
+
+    double flops = 2.0 * kFullM * 1536 * 256;
+    float best_ms = *std::min_element(times_ms.begin(), times_ms.end());
+    float median_ms = percentile(times_ms, 0.5f);
+    double tflops = flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
+    std::printf(
+        "  %-10s tile=%dx%dx%d direct_grid=(%u,%u) fullM=%d mem=%.2f GiB best=%.3f ms median=%.3f ms %.2f TF/s roof=%.1f%% checksum=%.4f\n",
+        variant_name, TM, TN, TK, grid.x, grid.y, kFullM, gib,
+        best_ms, median_ms, tflops, tflops * 100.0 / kA10gDenseBf16Tflops,
+        __bfloat162float(checksum_bf16));
+}
+
+template <int TM,
+          int TN,
+          int TK,
+          int LoadLatency = 0,
+          int BLoadLatency = LoadLatency,
+          int StoreLatency = LoadLatency>
+void run_static_qkv_bkn_tiled_split_contig_component_variant(
+    const Shape& shape,
+    const Options& opts,
+    const char* variant_name) {
+    if (std::strcmp(shape.name, "infer_qkv") != 0) {
+        if (opts.variant == variant_name) {
+            std::printf("  %-10s skipped: QKV-only BKN component split variant\n",
+                        variant_name);
+        }
+        return;
+    }
+
+    constexpr int kFullM = (78060 / TM) * TM;
+    int iters = opts.iters_override > 0 ? opts.iters_override : shape.iters;
+    size_t a_elems = static_cast<size_t>(shape.m) * shape.k;
+    size_t b_elems = static_cast<size_t>(shape.n) * shape.k;
+    size_t out_elems = static_cast<size_t>(shape.m) * (shape.n / 3) * 3;
+    size_t split_elems = static_cast<size_t>(shape.m) * (shape.n / 3);
+    double gib = (static_cast<double>(a_elems + b_elems + out_elems) *
+                  sizeof(__nv_bfloat16)) /
+                 (1024.0 * 1024.0 * 1024.0);
+    dim3 grid(kFullM / TM, (1536 / 3) / TN, 1);
+
+    __nv_bfloat16* d_a = nullptr;
+    __nv_bfloat16* d_b = nullptr;
+    __nv_bfloat16* d_q = nullptr;
+    __nv_bfloat16* d_k = nullptr;
+    __nv_bfloat16* d_v = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_a, a_elems * sizeof(__nv_bfloat16)));
+    CUDA_CHECK(cudaMalloc(&d_b, b_elems * sizeof(__nv_bfloat16)));
+    CUDA_CHECK(cudaMalloc(&d_q, split_elems * sizeof(__nv_bfloat16)));
+    CUDA_CHECK(cudaMalloc(&d_k, split_elems * sizeof(__nv_bfloat16)));
+    CUDA_CHECK(cudaMalloc(&d_v, split_elems * sizeof(__nv_bfloat16)));
+    init_bf16(d_a, a_elems);
+    init_bf16(d_b, b_elems);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    auto launch = [&]() {
+        launch_static_qkv_bkn_tiled_split_contig_component_cutile<TM,
+                                                                  TN,
+                                                                  TK,
+                                                                  kFullM,
+                                                                  1536,
+                                                                  256,
+                                                                  LoadLatency,
+                                                                  BLoadLatency,
+                                                                  StoreLatency>(
+            d_a, d_b, d_q, d_k, d_v);
+    };
+
+    for (int i = 0; i < opts.warmup; ++i) {
+        launch();
+    }
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    cudaEvent_t start{};
+    cudaEvent_t stop{};
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    std::vector<float> times_ms;
+    times_ms.reserve(iters);
+    for (int i = 0; i < iters; ++i) {
+        CUDA_CHECK(cudaEventRecord(start));
+        launch();
+        CUDA_CHECK(cudaEventRecord(stop));
+        CUDA_CHECK(cudaEventSynchronize(stop));
+        CUDA_CHECK(cudaGetLastError());
+        float ms = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+        times_ms.push_back(ms);
+    }
+
+    __nv_bfloat16 checksum_bf16{};
+    CUDA_CHECK(cudaMemcpy(&checksum_bf16, d_q, sizeof(checksum_bf16), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+    CUDA_CHECK(cudaFree(d_a));
+    CUDA_CHECK(cudaFree(d_b));
+    CUDA_CHECK(cudaFree(d_q));
+    CUDA_CHECK(cudaFree(d_k));
+    CUDA_CHECK(cudaFree(d_v));
+
+    double flops = 2.0 * kFullM * 1536 * 256;
+    float best_ms = *std::min_element(times_ms.begin(), times_ms.end());
+    float median_ms = percentile(times_ms, 0.5f);
+    double tflops = flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
+    std::printf(
+        "  %-10s tile=%dx%dx%d component_grid=(%u,%u) fullM=%d launches=3 mem=%.2f GiB best=%.3f ms median=%.3f ms %.2f TF/s roof=%.1f%% checksum=%.4f\n",
+        variant_name, TM, TN, TK, grid.x, grid.y, kFullM, gib,
+        best_ms, median_ms, tflops, tflops * 100.0 / kA10gDenseBf16Tflops,
+        __bfloat162float(checksum_bf16));
+}
+
+template <int TM,
+          int TN,
+          int TK,
+          int LoadLatency = 0,
+          int BLoadLatency = LoadLatency,
+          int StoreLatency = LoadLatency>
+void run_static_qkv_bkn_tiled_split_contig_zcomponent_variant(
+    const Shape& shape,
+    const Options& opts,
+    const char* variant_name) {
+    if (std::strcmp(shape.name, "infer_qkv") != 0) {
+        if (opts.variant == variant_name) {
+            std::printf("  %-10s skipped: QKV-only BKN z-component split variant\n",
+                        variant_name);
+        }
+        return;
+    }
+
+    constexpr int kFullM = (78060 / TM) * TM;
+    int iters = opts.iters_override > 0 ? opts.iters_override : shape.iters;
+    size_t a_elems = static_cast<size_t>(shape.m) * shape.k;
+    size_t b_elems = static_cast<size_t>(shape.n) * shape.k;
+    size_t out_elems = static_cast<size_t>(shape.m) * (shape.n / 3) * 3;
+    size_t split_elems = static_cast<size_t>(shape.m) * (shape.n / 3);
+    double gib = (static_cast<double>(a_elems + b_elems + out_elems) *
+                  sizeof(__nv_bfloat16)) /
+                 (1024.0 * 1024.0 * 1024.0);
+    dim3 grid(kFullM / TM, (1536 / 3) / TN, 3);
+
+    __nv_bfloat16* d_a = nullptr;
+    __nv_bfloat16* d_b = nullptr;
+    __nv_bfloat16* d_q = nullptr;
+    __nv_bfloat16* d_k = nullptr;
+    __nv_bfloat16* d_v = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_a, a_elems * sizeof(__nv_bfloat16)));
+    CUDA_CHECK(cudaMalloc(&d_b, b_elems * sizeof(__nv_bfloat16)));
+    CUDA_CHECK(cudaMalloc(&d_q, split_elems * sizeof(__nv_bfloat16)));
+    CUDA_CHECK(cudaMalloc(&d_k, split_elems * sizeof(__nv_bfloat16)));
+    CUDA_CHECK(cudaMalloc(&d_v, split_elems * sizeof(__nv_bfloat16)));
+    init_bf16(d_a, a_elems);
+    init_bf16(d_b, b_elems);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    auto launch = [&]() {
+        launch_static_qkv_bkn_tiled_split_contig_zcomponent_cutile<TM,
+                                                                   TN,
+                                                                   TK,
+                                                                   kFullM,
+                                                                   1536,
+                                                                   256,
+                                                                   LoadLatency,
+                                                                   BLoadLatency,
+                                                                   StoreLatency>(
+            d_a, d_b, d_q, d_k, d_v);
+    };
+
+    for (int i = 0; i < opts.warmup; ++i) {
+        launch();
+    }
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    cudaEvent_t start{};
+    cudaEvent_t stop{};
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    std::vector<float> times_ms;
+    times_ms.reserve(iters);
+    for (int i = 0; i < iters; ++i) {
+        CUDA_CHECK(cudaEventRecord(start));
+        launch();
+        CUDA_CHECK(cudaEventRecord(stop));
+        CUDA_CHECK(cudaEventSynchronize(stop));
+        CUDA_CHECK(cudaGetLastError());
+        float ms = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+        times_ms.push_back(ms);
+    }
+
+    __nv_bfloat16 checksum_bf16{};
+    CUDA_CHECK(cudaMemcpy(&checksum_bf16, d_q, sizeof(checksum_bf16), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+    CUDA_CHECK(cudaFree(d_a));
+    CUDA_CHECK(cudaFree(d_b));
+    CUDA_CHECK(cudaFree(d_q));
+    CUDA_CHECK(cudaFree(d_k));
+    CUDA_CHECK(cudaFree(d_v));
+
+    double flops = 2.0 * kFullM * 1536 * 256;
+    float best_ms = *std::min_element(times_ms.begin(), times_ms.end());
+    float median_ms = percentile(times_ms, 0.5f);
+    double tflops = flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
+    std::printf(
+        "  %-10s tile=%dx%dx%d grid=(%u,%u,%u) fullM=%d mem=%.2f GiB best=%.3f ms median=%.3f ms %.2f TF/s roof=%.1f%% checksum=%.4f\n",
+        variant_name, TM, TN, TK, grid.x, grid.y, grid.z, kFullM, gib,
         best_ms, median_ms, tflops, tflops * 100.0 / kA10gDenseBf16Tflops,
         __bfloat162float(checksum_bf16));
 }
@@ -2490,6 +3426,10 @@ void run_shape(const Shape& shape, const Options& opts) {
         run_static_qkv_bkn_tiled_variant<32, 128, 16>(
             shape, opts, "qkv_t32x128x16bkn");
     }
+    if (opts.variant == "all" || opts.variant == "qkv_t64x128x16bkn") {
+        run_static_qkv_bkn_tiled_variant<64, 128, 16>(
+            shape, opts, "qkv_t64x128x16bkn");
+    }
     if (opts.variant == "all" || opts.variant == "qkv_t32x256x8bkn") {
         run_static_qkv_bkn_tiled_variant<32, 256, 8>(
             shape, opts, "qkv_t32x256x8bkn");
@@ -2532,6 +3472,10 @@ void run_shape(const Shape& shape, const Options& opts) {
     if (opts.variant == "all" || opts.variant == "qkv_t32x256x16bkn_lat2") {
         run_static_qkv_bkn_tiled_latency_variant<2>(shape, opts, "qkv_t32x256x16bkn_lat2");
     }
+    if (opts.variant == "all" || opts.variant == "qkv_t64x128x16bkn_lat2") {
+        run_static_qkv_bkn_tiled_latency_variant<2, 2, 2, 64, 128, 16>(
+            shape, opts, "qkv_t64x128x16bkn_lat2");
+    }
     if (opts.variant == "all" || opts.variant == "qkv_t32x256x16bkn_lat4") {
         run_static_qkv_bkn_tiled_latency_variant<4>(shape, opts, "qkv_t32x256x16bkn_lat4");
     }
@@ -2540,6 +3484,14 @@ void run_shape(const Shape& shape, const Options& opts) {
     }
     if (opts.variant == "all" || opts.variant == "qkv_t32x256x16bkn_lat10") {
         run_static_qkv_bkn_tiled_latency_variant<10>(shape, opts, "qkv_t32x256x16bkn_lat10");
+    }
+    if (opts.variant == "all" || opts.variant == "qkv_t32x256x16bkn_a2_b2_s0") {
+        run_static_qkv_bkn_tiled_latency_variant<2, 2, 0>(
+            shape, opts, "qkv_t32x256x16bkn_a2_b2_s0");
+    }
+    if (opts.variant == "all" || opts.variant == "qkv_t32x256x16bkn_a2_b1_s0") {
+        run_static_qkv_bkn_tiled_latency_variant<2, 1, 0>(
+            shape, opts, "qkv_t32x256x16bkn_a2_b1_s0");
     }
     if (opts.variant == "all" || opts.variant == "qkv_t32x256p128x16bkn") {
         run_static_qkv_bkn_compound_256p128_variant(
@@ -2561,9 +3513,136 @@ void run_shape(const Shape& shape, const Options& opts) {
         run_static_qkv_bkn_tiled_split_contig_variant<32, 256, 16>(
             shape, opts, "qkv_t32x256x16bkn_split_contig");
     }
+    if (opts.variant == "all" ||
+        opts.variant == "qkv_t32x256x16bkn_split_contig_direct_store") {
+        run_static_qkv_bkn_tiled_split_contig_direct_store_variant<32, 256, 16>(
+            shape, opts, "qkv_t32x256x16bkn_split_contig_direct_store");
+    }
+    if (opts.variant == "all" ||
+        opts.variant == "qkv_t32x256x16bkn_split_contig_latecast") {
+        run_static_qkv_bkn_tiled_split_contig_variant<32, 256, 16, 0, 0, 0, true>(
+            shape, opts, "qkv_t32x256x16bkn_split_contig_latecast");
+    }
+    if (opts.variant == "all" ||
+        opts.variant == "qkv_t32x256x16bkn_split_contig_lateview") {
+        run_static_qkv_bkn_tiled_split_contig_variant<32,
+                                                      256,
+                                                      16,
+                                                      0,
+                                                      0,
+                                                      0,
+                                                      false,
+                                                      true>(
+            shape, opts, "qkv_t32x256x16bkn_split_contig_lateview");
+    }
+    if (opts.variant == "all" || opts.variant == "qkv_t16x256x16bkn_split_contig_lat2") {
+        run_static_qkv_bkn_tiled_split_contig_variant<16, 256, 16, 2>(
+            shape, opts, "qkv_t16x256x16bkn_split_contig_lat2");
+    }
+    if (opts.variant == "all" || opts.variant == "qkv_t32x512x16bkn_split_contig") {
+        run_static_qkv_bkn_tiled_split_contig_variant<32, 512, 16>(
+            shape, opts, "qkv_t32x512x16bkn_split_contig");
+    }
+    if (opts.variant == "all" ||
+        opts.variant == "qkv_t32x256x16bkn_split_contig_components") {
+        run_static_qkv_bkn_tiled_split_contig_component_variant<32, 256, 16>(
+            shape, opts, "qkv_t32x256x16bkn_split_contig_components");
+    }
+    if (opts.variant == "all" ||
+        opts.variant == "qkv_t32x256x16bkn_split_contig_zcomponents") {
+        run_static_qkv_bkn_tiled_split_contig_zcomponent_variant<32, 256, 16>(
+            shape, opts, "qkv_t32x256x16bkn_split_contig_zcomponents");
+    }
+    if (opts.variant == "all" || opts.variant == "qkv_t32x32x16bkn_split_contig_lat2") {
+        run_static_qkv_bkn_tiled_split_contig_variant<32, 32, 16, 2>(
+            shape, opts, "qkv_t32x32x16bkn_split_contig_lat2");
+    }
+    if (opts.variant == "all" || opts.variant == "qkv_t32x64x16bkn_split_contig_lat2") {
+        run_static_qkv_bkn_tiled_split_contig_variant<32, 64, 16, 2>(
+            shape, opts, "qkv_t32x64x16bkn_split_contig_lat2");
+    }
+    if (opts.variant == "all" || opts.variant == "qkv_t32x128x16bkn_split_contig_lat2") {
+        run_static_qkv_bkn_tiled_split_contig_variant<32, 128, 16, 2>(
+            shape, opts, "qkv_t32x128x16bkn_split_contig_lat2");
+    }
     if (opts.variant == "all" || opts.variant == "qkv_t32x256x16bkn_split_contig_lat2") {
         run_static_qkv_bkn_tiled_split_contig_variant<32, 256, 16, 2>(
             shape, opts, "qkv_t32x256x16bkn_split_contig_lat2");
+    }
+    if (opts.variant == "all" || opts.variant == "qkv_t64x256x16bkn_split_contig_lat2") {
+        run_static_qkv_bkn_tiled_split_contig_variant<64, 256, 16, 2>(
+            shape, opts, "qkv_t64x256x16bkn_split_contig_lat2");
+    }
+    if (opts.variant == "all" ||
+        opts.variant == "qkv_t32x256x16bkn_split_contig_direct_store_lat2") {
+        run_static_qkv_bkn_tiled_split_contig_direct_store_variant<32, 256, 16, 2>(
+            shape, opts, "qkv_t32x256x16bkn_split_contig_direct_store_lat2");
+    }
+    if (opts.variant == "all" ||
+        opts.variant == "qkv_t32x256x16bkn_split_contig_latecast_lat2") {
+        run_static_qkv_bkn_tiled_split_contig_variant<32, 256, 16, 2, 2, 2, true>(
+            shape, opts, "qkv_t32x256x16bkn_split_contig_latecast_lat2");
+    }
+    if (opts.variant == "all" ||
+        opts.variant == "qkv_t32x256x16bkn_split_contig_lateview_lat2") {
+        run_static_qkv_bkn_tiled_split_contig_variant<32,
+                                                      256,
+                                                      16,
+                                                      2,
+                                                      2,
+                                                      2,
+                                                      false,
+                                                      true>(
+            shape, opts, "qkv_t32x256x16bkn_split_contig_lateview_lat2");
+    }
+    if (opts.variant == "all" || opts.variant == "qkv_t32x512x16bkn_split_contig_lat2") {
+        run_static_qkv_bkn_tiled_split_contig_variant<32, 512, 16, 2>(
+            shape, opts, "qkv_t32x512x16bkn_split_contig_lat2");
+    }
+    if (opts.variant == "all" ||
+        opts.variant == "qkv_t32x256x16bkn_split_contig_components_lat2") {
+        run_static_qkv_bkn_tiled_split_contig_component_variant<32, 256, 16, 2>(
+            shape, opts, "qkv_t32x256x16bkn_split_contig_components_lat2");
+    }
+    if (opts.variant == "all" ||
+        opts.variant == "qkv_t32x256x16bkn_split_contig_zcomponents_lat2") {
+        run_static_qkv_bkn_tiled_split_contig_zcomponent_variant<32, 256, 16, 2>(
+            shape, opts, "qkv_t32x256x16bkn_split_contig_zcomponents_lat2");
+    }
+    if (opts.variant == "all" ||
+        opts.variant == "qkv_t32x256x16bkn_split_contig_a2_b0_s0") {
+        run_static_qkv_bkn_tiled_split_contig_variant<32, 256, 16, 2, 0, 0>(
+            shape, opts, "qkv_t32x256x16bkn_split_contig_a2_b0_s0");
+    }
+    if (opts.variant == "all" ||
+        opts.variant == "qkv_t32x256x16bkn_split_contig_a0_b2_s0") {
+        run_static_qkv_bkn_tiled_split_contig_variant<32, 256, 16, 0, 2, 0>(
+            shape, opts, "qkv_t32x256x16bkn_split_contig_a0_b2_s0");
+    }
+    if (opts.variant == "all" ||
+        opts.variant == "qkv_t32x256x16bkn_split_contig_a0_b0_s2") {
+        run_static_qkv_bkn_tiled_split_contig_variant<32, 256, 16, 0, 0, 2>(
+            shape, opts, "qkv_t32x256x16bkn_split_contig_a0_b0_s2");
+    }
+    if (opts.variant == "all" ||
+        opts.variant == "qkv_t32x256x16bkn_split_contig_a2_b1_s2") {
+        run_static_qkv_bkn_tiled_split_contig_variant<32, 256, 16, 2, 1, 2>(
+            shape, opts, "qkv_t32x256x16bkn_split_contig_a2_b1_s2");
+    }
+    if (opts.variant == "all" ||
+        opts.variant == "qkv_t32x256x16bkn_split_contig_a2_b1_s0") {
+        run_static_qkv_bkn_tiled_split_contig_variant<32, 256, 16, 2, 1, 0>(
+            shape, opts, "qkv_t32x256x16bkn_split_contig_a2_b1_s0");
+    }
+    if (opts.variant == "all" ||
+        opts.variant == "qkv_t32x256x16bkn_split_contig_a1_b2_s2") {
+        run_static_qkv_bkn_tiled_split_contig_variant<32, 256, 16, 1, 2, 2>(
+            shape, opts, "qkv_t32x256x16bkn_split_contig_a1_b2_s2");
+    }
+    if (opts.variant == "all" ||
+        opts.variant == "qkv_t32x256x16bkn_split_contig_a2_b2_s0") {
+        run_static_qkv_bkn_tiled_split_contig_variant<32, 256, 16, 2, 2, 0>(
+            shape, opts, "qkv_t32x256x16bkn_split_contig_a2_b2_s0");
     }
     if (opts.variant == "all" || opts.variant == "qkv_t32x256x64bkn") {
         run_static_qkv_bkn_tiled_variant<32, 256, 64>(

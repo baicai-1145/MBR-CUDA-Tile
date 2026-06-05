@@ -17,6 +17,8 @@ bool bias_bf16_enabled();
 
 bool norm_gamma_bf16_enabled();
 
+bool bands_per_freq_bf16_enabled();
+
 bool rotary_freqs_bf16_enabled();
 
 bool linear_bkn_long_enabled();
@@ -85,6 +87,12 @@ bool time_qkv_pair_rotary_producer_enabled();
 
 bool time_q_rotary_in_attention_enabled();
 
+void set_time_attention_context_chunk(int chunk_index);
+
+void set_time_attention_context_depth(int depth_index);
+
+bool time_attention_stats_enabled_for_current_context();
+
 void launch_ffn12_fused256_cutile(int gelu_mode,
                                   bool full_bf16,
                                   bool split2_output,
@@ -126,7 +134,8 @@ void launch_time_attention1301_split_contig_main_cutile(const Tensor& q,
                                                         Tensor& out,
                                                         float scale,
                                                         bool use_exp2,
-                                                        bool skip_keytail);
+                                                        bool skip_keytail,
+                                                        bool approx_softmax);
 
 void launch_time_attention1301_split_contig_qrot_main_cutile(const Tensor& q,
                                                              const Tensor& k,
@@ -244,6 +253,11 @@ Tensor apply_mask_and_scatter(const Tensor& stft_repr,
 Tensor tanh_act(const Tensor& x);
 
 Tensor glu_last_dim(const Tensor& x);
+
+bool try_linear_glu_last_dim_bf16_output(const Tensor& x,
+                                         const Tensor& weight,
+                                         const Tensor& bias,
+                                         Tensor& out);
 
 void zero_dc(Tensor& complex_spec);
 

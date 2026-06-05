@@ -20,6 +20,9 @@
 #endif
 
 namespace cudasep::mbr_tile {
+
+bool try_residual_add_bf16_cutile(const Tensor& x, const Tensor& residual, Tensor& out);
+
 namespace {
 
 namespace ct = cuda::tiles;
@@ -64,6 +67,7 @@ constexpr int kGeluErfPoly5L25 = 4;
 constexpr int kGeluErfPoly7L25 = 5;
 constexpr int kGeluErfPoly9L30 = 6;
 constexpr int kGeluErfPoly9TinyBlendL30 = 7;
+constexpr int kGeluErfOdd5L175 = 8;
 using I64Tile = ct::tile<long long, ct::shape<kTile>>;
 using F32Tile = ct::tile<float, ct::shape<kTile>>;
 using RmsI64Tile = ct::tile<long long, ct::shape<kRmsTile>>;
@@ -76,6 +80,9 @@ using SmallSoftmaxBF16Tile = ct::tile<__nv_bfloat16, ct::shape<kSmallSoftmaxTile
 using SoftmaxI64Tile = ct::tile<long long, ct::shape<kSoftmaxTile>>;
 using SoftmaxF16Tile = ct::tile<__half, ct::shape<kSoftmaxTile>>;
 using SoftmaxBF16Tile = ct::tile<__nv_bfloat16, ct::shape<kSoftmaxTile>>;
+
+thread_local int g_time_attention_context_chunk = -1;
+thread_local int g_time_attention_context_depth = -1;
 
 static inline int64_t ceildiv(int64_t a, int64_t b) {
     return (a + b - 1) / b;
@@ -100,6 +107,13 @@ bool env_flag_enabled(const char* name) {
     std::string value(raw);
     return !(value.empty() || value == "0" || value == "false" || value == "FALSE" ||
              value == "off" || value == "OFF");
+}
+
+int env_nonnegative_int_or(const char* name, int fallback) {
+    const char* raw = std::getenv(name);
+    if (raw == nullptr || raw[0] == '\0') return fallback;
+    int parsed = std::atoi(raw);
+    return parsed >= 0 ? parsed : fallback;
 }
 
 bool custom_bf16_path_enabled() {
@@ -207,6 +221,18 @@ bool freq_split_skip_qk_pad_zero_enabled() {
            !env_flag_enabled("CUDASEP_DISABLE_FREQ_SPLIT_SKIP_QK_PAD_ZERO");
 }
 
+bool freq_split_skip_v_pad_zero_enabled() {
+    return freq_split_skip_qk_pad_zero_enabled() &&
+           env_flag_enabled("CUDASEP_ENABLE_FREQ_SPLIT_SKIP_V_PAD_ZERO") &&
+           !env_flag_enabled("CUDASEP_DISABLE_FREQ_SPLIT_SKIP_V_PAD_ZERO");
+}
+
+bool freq_attention60_v32_enabled() {
+    return freq_attention60_cutile_padded_enabled() &&
+           env_flag_enabled("CUDASEP_ENABLE_FREQ_ATTENTION60_V32") &&
+           !env_flag_enabled("CUDASEP_DISABLE_FREQ_ATTENTION60_V32");
+}
+
 bool time_attention_fused_fragscale_enabled() {
     return g_quantize_bf16 &&
            (custom_bf16_path_enabled() || env_flag_enabled("CUDASEP_TIME_ATTENTION_FUSED_FRAGSCALE"));
@@ -273,6 +299,50 @@ bool time_attention_cutile_skip_keytail_enabled() {
            !env_flag_enabled("CUDASEP_DISABLE_TIME_ATTENTION_SKIP_KEYTAIL");
 }
 
+bool time_attention_approx_softmax_enabled_impl() {
+    return g_quantize_bf16 &&
+           env_flag_enabled("CUDASEP_ENABLE_TIME_ATTENTION_APPROX_SOFTMAX") &&
+           !env_flag_enabled("CUDASEP_DISABLE_TIME_ATTENTION_APPROX_SOFTMAX");
+}
+
+bool time_attention_approx_softmax_enabled_for_call() {
+    if (!time_attention_approx_softmax_enabled_impl()) return false;
+    static int start_call = env_nonnegative_int_or(
+        "CUDASEP_TIME_ATTENTION_APPROX_SOFTMAX_START_CALL", 0);
+    static int max_calls = env_nonnegative_int_or(
+        "CUDASEP_TIME_ATTENTION_APPROX_SOFTMAX_MAX_CALLS", -1);
+    static int target_chunk = env_nonnegative_int_or(
+        "CUDASEP_TIME_ATTENTION_APPROX_SOFTMAX_CHUNK", -1);
+    static int target_depth = env_nonnegative_int_or(
+        "CUDASEP_TIME_ATTENTION_APPROX_SOFTMAX_DEPTH", -1);
+    static int calls = 0;
+    int call = calls++;
+    if (target_chunk >= 0 && g_time_attention_context_chunk != target_chunk) {
+        return false;
+    }
+    if (target_depth >= 0 && g_time_attention_context_depth != target_depth) {
+        return false;
+    }
+    if (call < start_call) return false;
+    if (max_calls < 0) return true;
+    return call < start_call + max_calls;
+}
+
+bool time_attention_stats_enabled_for_current_context_impl() {
+    if (!env_flag_enabled("CUDASEP_ENABLE_TIME_ATTENTION_STATS")) return false;
+    static int target_chunk = env_nonnegative_int_or(
+        "CUDASEP_TIME_ATTENTION_STATS_CHUNK", -1);
+    static int target_depth = env_nonnegative_int_or(
+        "CUDASEP_TIME_ATTENTION_STATS_DEPTH", -1);
+    if (target_chunk >= 0 && g_time_attention_context_chunk != target_chunk) {
+        return false;
+    }
+    if (target_depth >= 0 && g_time_attention_context_depth != target_depth) {
+        return false;
+    }
+    return true;
+}
+
 bool mask_scatter_bf16_enabled() {
     return bf16_experiment_enabled("CUDASEP_MASK_SCATTER_BF16");
 }
@@ -287,6 +357,17 @@ bool tanh_bf16_input_enabled() {
 
 bool glu_bf16_input_enabled() {
     return remaining_bf16_experiment_enabled("CUDASEP_GLU_BF16_INPUT");
+}
+
+bool linear_glu_last_dim_fused_enabled() {
+    return g_quantize_bf16 &&
+           env_flag_enabled("CUDASEP_ENABLE_LINEAR_GLU_LAST_DIM_FUSED") &&
+           !env_flag_enabled("CUDASEP_DISABLE_LINEAR_GLU_LAST_DIM_FUSED");
+}
+
+bool linear_glu_last_dim_fused_tk32_enabled() {
+    return linear_glu_last_dim_fused_enabled() &&
+           env_flag_enabled("CUDASEP_ENABLE_LINEAR_GLU_LAST_DIM_FUSED_TK32");
 }
 
 bool linear_direct_bf16_output_enabled() {
@@ -310,6 +391,11 @@ bool norm_gamma_bf16_enabled_impl() {
            !env_flag_enabled("CUDASEP_DISABLE_NORM_GAMMA_BF16");
 }
 
+bool bands_per_freq_bf16_enabled_impl() {
+    return g_quantize_bf16 &&
+           !env_flag_enabled("CUDASEP_DISABLE_BANDS_PER_FREQ_BF16");
+}
+
 bool rotary_freqs_bf16_enabled_impl() {
     return g_quantize_bf16 &&
            !env_flag_enabled("CUDASEP_DISABLE_ROTARY_FREQS_BF16");
@@ -325,6 +411,20 @@ bool linear_bkn_long_path_enabled() {
 
 bool linear_bkn_qkv_tk16_enabled() {
     return g_quantize_bf16 && !env_flag_enabled("CUDASEP_DISABLE_LINEAR_BKN_QKV_TK16");
+}
+
+bool linear_bkn_qkv_m64_tn128_enabled() {
+    return linear_bkn_qkv_tk16_enabled() &&
+           !env_flag_enabled("CUDASEP_DISABLE_LINEAR_BKN_QKV_M64_TN128");
+}
+
+bool linear_bkn_qkv_m64_tn128_lat1_enabled() {
+    return linear_bkn_qkv_m64_tn128_enabled() &&
+           !env_flag_enabled("CUDASEP_DISABLE_LINEAR_BKN_QKV_M64_TN128_LAT1");
+}
+
+bool time_qkv_bkn_m64_tn128_enabled() {
+    return g_quantize_bf16 && !env_flag_enabled("CUDASEP_DISABLE_TIME_QKV_BKN_M64_TN128");
 }
 
 bool linear_bkn_ffn_long_path_enabled() {
@@ -479,6 +579,10 @@ bool ffn12_fused_poly7_gelu_enabled() {
     return g_quantize_bf16 && env_flag_enabled("CUDASEP_ENABLE_FFN12_FUSED_POLY7_GELU");
 }
 
+bool ffn12_fused_odd5_gelu_enabled() {
+    return g_quantize_bf16 && env_flag_enabled("CUDASEP_ENABLE_FFN12_FUSED_ODD5_GELU");
+}
+
 bool ffn12_fused_tinyblend_gelu_enabled() {
     return g_quantize_bf16 && env_flag_enabled("CUDASEP_ENABLE_FFN12_FUSED_TINYBLEND_GELU");
 }
@@ -491,6 +595,7 @@ bool ffn12_fused_poly9_gelu_enabled() {
         return true;
     }
     return !ffn12_fused_poly7_gelu_enabled() &&
+           !ffn12_fused_odd5_gelu_enabled() &&
            !ffn12_fused_poly5_gelu_enabled() &&
            !ffn12_fused_tinyblend_gelu_enabled() &&
            !ffn12_fused_tanh_gelu_enabled() &&
@@ -519,8 +624,12 @@ bool ffn12_fused_pairh32_tk64_enabled() {
 
 bool ffn12_fused_residual_enabled() {
     return ffn12_fused_cutile_enabled() &&
-           env_flag_enabled("CUDASEP_ENABLE_FFN12_FUSED_RESIDUAL") &&
            !env_flag_enabled("CUDASEP_DISABLE_FFN12_FUSED_RESIDUAL");
+}
+
+bool ffn12_residual_two_kernel_enabled() {
+    return ffn12_fused_residual_enabled() &&
+           !env_flag_enabled("CUDASEP_DISABLE_FFN12_RESIDUAL_TWO_KERNEL");
 }
 
 bool split_qkv_time_cutile_fixed_enabled() {
@@ -662,10 +771,29 @@ static __tile__ auto gelu_erf_poly9_l30(TileT x) {
     return bf16_round_if<FullBF16>(gelu);
 }
 
+template <bool FullBF16, typename TileT>
+static __tile__ auto gelu_erf_odd5_l175(TileT x) {
+    auto zero = x * 0.0f;
+    auto one = zero + 1.0f;
+    auto ax = ct::select(x < zero, zero - x, x);
+    auto z = ax * ax;
+    z = bf16_round_if<FullBF16>(z);
+    auto p = (0.04752145079070458f * z - 0.32203058651122096f) * z +
+             1.1212825366624732f;
+    p = bf16_round_if<FullBF16>(p);
+    auto erf_abs = ct::min(ct::max(ax * p, zero), one);
+    erf_abs = bf16_round_if<FullBF16>(erf_abs);
+    auto erf_approx = ct::select(x < zero, zero - erf_abs, erf_abs);
+    auto gelu = 0.5f * x * (one + erf_approx);
+    return bf16_round_if<FullBF16>(gelu);
+}
+
 template <int GeluMode, bool FullBF16, typename TileT>
 static __tile__ auto gelu_selected(TileT x) {
     if constexpr (GeluMode == kGeluErfPoly9L30) {
         return gelu_erf_poly9_l30<FullBF16>(x);
+    } else if constexpr (GeluMode == kGeluErfOdd5L175) {
+        return gelu_erf_odd5_l175<FullBF16>(x);
     } else if constexpr (GeluMode == kGeluErfPoly7L25) {
         return gelu_erf_poly7_l25<FullBF16>(x);
     } else if constexpr (GeluMode == kGeluErfPoly5L25) {
@@ -842,6 +970,64 @@ __tile_global__ void linear_cutile_static_full_bkn_bf16_kernel(
     }
 }
 
+template <int TM,
+          int TN,
+          int TK,
+          int M,
+          int N,
+          int K,
+          int TailStart,
+          int LoadLatency = 0>
+__tile_global__ void linear_cutile_static_bkn_masked_tail_bf16_kernel(
+    const __nv_bfloat16* __restrict__ a,
+    const __nv_bfloat16* __restrict__ b_kn,
+    __nv_bfloat16* __restrict__ c) {
+    static_assert(TailStart % TM == 0);
+    static_assert(TailStart < M);
+    static_assert(N % TN == 0);
+    static_assert(K % TK == 0);
+    using AccTile = ct::tile<float, ct::shape<TM, TN>>;
+    using ATile = ct::tile<__nv_bfloat16, ct::shape<TM, TK>>;
+    using BTile = ct::tile<__nv_bfloat16, ct::shape<TK, TN>>;
+
+    a = ct::assume_aligned(a, 16_ic);
+    b_kn = ct::assume_aligned(b_kn, 16_ic);
+    c = ct::assume_aligned(c, 16_ic);
+
+    auto a_view = ct::partition_view{
+        ct::tensor_span{a, ct::shape<M, K>{}},
+        ct::shape<TM, TK>{}
+    };
+    auto b_view = ct::partition_view{
+        ct::tensor_span{b_kn, ct::shape<K, N>{}},
+        ct::shape<TK, TN>{}
+    };
+    auto c_view = ct::partition_view{
+        ct::tensor_span{c, ct::shape<M, N>{}},
+        ct::shape<TM, TN>{}
+    };
+
+    auto [tail_tile_m, tile_n, tile_z] = ct::bid();
+    (void)tile_z;
+    int tile_m = TailStart / TM + tail_tile_m;
+    auto acc = ct::full<AccTile>(0.0f);
+    for (auto kk : ct::irange(std::size_t{0}, std::size_t{K / TK})) {
+        if constexpr (LoadLatency > 0) {
+            ATile a_tile;
+            BTile b_tile;
+            [[ cutile::hint(0, latency=LoadLatency) ]]
+            a_tile = a_view.load_masked(tile_m, kk);
+            [[ cutile::hint(0, latency=LoadLatency) ]]
+            b_tile = b_view.load(kk, tile_n);
+            acc = ct::mma(a_tile, b_tile, acc);
+        } else {
+            acc = ct::mma(a_view.load_masked(tile_m, kk), b_view.load(kk, tile_n), acc);
+        }
+    }
+
+    c_view.store_masked(ct::element_cast<__nv_bfloat16>(acc), tile_m, tile_n);
+}
+
 template <int N,
           int K,
           bool AddBias,
@@ -910,6 +1096,7 @@ __tile_global__ void qkv_bkn_split_contig_static_full_kernel(
     static_assert(N == 3 * kQkvFusedHeads * kTimeAttnD);
     static_assert((N / 3) % TN == 0);
     static_assert(K % TK == 0);
+    constexpr int kComponentTiles = (N / 3) / TN;
     using AccTile = ct::tile<float, ct::shape<TM, TN>>;
     using ATile = ct::tile<__nv_bfloat16, ct::shape<TM, TK>>;
     using BTile = ct::tile<__nv_bfloat16, ct::shape<TK, TN>>;
@@ -959,26 +1146,26 @@ __tile_global__ void qkv_bkn_split_contig_static_full_kernel(
     }
 
     auto out = ct::element_cast<__nv_bfloat16>(acc);
-    if (tile_n < 2) {
+    if (tile_n < kComponentTiles) {
         if constexpr (LoadLatency > 0) {
             [[ cutile::hint(0, latency=LoadLatency) ]]
             q_view.store(out, tile_m, tile_n);
         } else {
             q_view.store(out, tile_m, tile_n);
         }
-    } else if (tile_n < 4) {
+    } else if (tile_n < 2 * kComponentTiles) {
         if constexpr (LoadLatency > 0) {
             [[ cutile::hint(0, latency=LoadLatency) ]]
-            k_view.store(out, tile_m, tile_n - 2);
+            k_view.store(out, tile_m, tile_n - kComponentTiles);
         } else {
-            k_view.store(out, tile_m, tile_n - 2);
+            k_view.store(out, tile_m, tile_n - kComponentTiles);
         }
     } else {
         if constexpr (LoadLatency > 0) {
             [[ cutile::hint(0, latency=LoadLatency) ]]
-            v_view.store(out, tile_m, tile_n - 4);
+            v_view.store(out, tile_m, tile_n - 2 * kComponentTiles);
         } else {
-            v_view.store(out, tile_m, tile_n - 4);
+            v_view.store(out, tile_m, tile_n - 2 * kComponentTiles);
         }
     }
 }
@@ -1027,12 +1214,84 @@ __tile_global__ void qkv_bkn_split_contig_tail_kernel(
     ct::store_masked(v + out_offset, out, in_bounds && (part == 2LL));
 }
 
-template <int TM, int TN, int TK, int M, int N, int K>
+template <int TM, int TN, int TK, int M, int N, int K, int TailStart, int LoadLatency = 0>
+__tile_global__ void qkv_bkn_split_contig_masked_tail_kernel(
+    const __nv_bfloat16* __restrict__ a,
+    const __nv_bfloat16* __restrict__ b_kn,
+    __nv_bfloat16* __restrict__ q,
+    __nv_bfloat16* __restrict__ k_out,
+    __nv_bfloat16* __restrict__ v) {
+    static_assert(TailStart % TM == 0);
+    static_assert(TailStart < M);
+    static_assert(N == 3 * kQkvFusedHeads * kTimeAttnD);
+    static_assert((N / 3) % TN == 0);
+    static_assert(K % TK == 0);
+    constexpr int kComponentTiles = (N / 3) / TN;
+    using AccTile = ct::tile<float, ct::shape<TM, TN>>;
+    using ATile = ct::tile<__nv_bfloat16, ct::shape<TM, TK>>;
+    using BTile = ct::tile<__nv_bfloat16, ct::shape<TK, TN>>;
+
+    a = ct::assume_aligned(a, 16_ic);
+    b_kn = ct::assume_aligned(b_kn, 16_ic);
+    q = ct::assume_aligned(q, 16_ic);
+    k_out = ct::assume_aligned(k_out, 16_ic);
+    v = ct::assume_aligned(v, 16_ic);
+
+    auto a_view = ct::partition_view{
+        ct::tensor_span{a, ct::shape<M, K>{}},
+        ct::shape<TM, TK>{}
+    };
+    auto b_view = ct::partition_view{
+        ct::tensor_span{b_kn, ct::shape<K, N>{}},
+        ct::shape<TK, TN>{}
+    };
+    auto q_view = ct::partition_view{
+        ct::tensor_span{q, ct::shape<M, N / 3>{}},
+        ct::shape<TM, TN>{}
+    };
+    auto k_view = ct::partition_view{
+        ct::tensor_span{k_out, ct::shape<M, N / 3>{}},
+        ct::shape<TM, TN>{}
+    };
+    auto v_view = ct::partition_view{
+        ct::tensor_span{v, ct::shape<M, N / 3>{}},
+        ct::shape<TM, TN>{}
+    };
+
+    auto [tail_tile_m, tile_n, tile_z] = ct::bid();
+    (void)tile_z;
+    int tile_m = TailStart / TM + tail_tile_m;
+    auto acc = ct::full<AccTile>(0.0f);
+    for (auto kk : ct::irange(std::size_t{0}, std::size_t{K / TK})) {
+        if constexpr (LoadLatency > 0) {
+            ATile a_tile;
+            BTile b_tile;
+            [[ cutile::hint(0, latency=LoadLatency) ]]
+            a_tile = a_view.load_masked(tile_m, kk);
+            [[ cutile::hint(0, latency=LoadLatency) ]]
+            b_tile = b_view.load(kk, tile_n);
+            acc = ct::mma(a_tile, b_tile, acc);
+        } else {
+            acc = ct::mma(a_view.load_masked(tile_m, kk), b_view.load(kk, tile_n), acc);
+        }
+    }
+
+    auto out = ct::element_cast<__nv_bfloat16>(acc);
+    if (tile_n < kComponentTiles) {
+        q_view.store_masked(out, tile_m, tile_n);
+    } else if (tile_n < 2 * kComponentTiles) {
+        k_view.store_masked(out, tile_m, tile_n - kComponentTiles);
+    } else {
+        v_view.store_masked(out, tile_m, tile_n - 2 * kComponentTiles);
+    }
+}
+
+template <int TM, int TN, int TK, int M, int N, int K, typename TrigT = float>
 __tile_global__ void qkv_bkn_rotary_split_contig_static_full_kernel(
     const __nv_bfloat16* __restrict__ a,
     const __nv_bfloat16* __restrict__ b_kn,
-    const float* __restrict__ cos_f,
-    const float* __restrict__ sin_f,
+    const TrigT* __restrict__ cos_f,
+    const TrigT* __restrict__ sin_f,
     __nv_bfloat16* __restrict__ q,
     __nv_bfloat16* __restrict__ k_out,
     __nv_bfloat16* __restrict__ v,
@@ -1099,8 +1358,10 @@ __tile_global__ void qkv_bkn_rotary_split_contig_static_full_kernel(
                     local / (kHeadsPerTile * kHalfDim);
         auto pair = local % kHalfDim;
         auto token = rows % kTimeAttnN;
-        PairTile c = ct::load(cos_f + token * kHalfDim + pair);
-        PairTile s = ct::load(sin_f + token * kHalfDim + pair);
+        PairTile c = ct::element_cast<float>(
+            ct::load(cos_f + token * kHalfDim + pair));
+        PairTile s = ct::element_cast<float>(
+            ct::load(sin_f + token * kHalfDim + pair));
         c = ct::select(full_bf16, bf16_round(c), c);
         s = ct::select(full_bf16, bf16_round(s), s);
 
@@ -1121,12 +1382,12 @@ __tile_global__ void qkv_bkn_rotary_split_contig_static_full_kernel(
     }
 }
 
-template <int N, int K>
+template <int N, int K, typename TrigT = float>
 __tile_global__ void qkv_bkn_rotary_split_contig_tail_kernel(
     const __nv_bfloat16* __restrict__ a,
     const __nv_bfloat16* __restrict__ b,
-    const float* __restrict__ cos_f,
-    const float* __restrict__ sin_f,
+    const TrigT* __restrict__ cos_f,
+    const TrigT* __restrict__ sin_f,
     __nv_bfloat16* __restrict__ q,
     __nv_bfloat16* __restrict__ k_out,
     __nv_bfloat16* __restrict__ v,
@@ -1177,8 +1438,10 @@ __tile_global__ void qkv_bkn_rotary_split_contig_tail_kernel(
     auto batch = row / kTimeAttnN;
     auto token = row - batch * kTimeAttnN;
     auto pair = dim / 2LL;
-    auto c = ct::load_masked(cos_f + token * kHalfDim + pair, needs_rot);
-    auto s = ct::load_masked(sin_f + token * kHalfDim + pair, needs_rot);
+    auto c = ct::element_cast<float>(
+        ct::load_masked(cos_f + token * kHalfDim + pair, needs_rot));
+    auto s = ct::element_cast<float>(
+        ct::load_masked(sin_f + token * kHalfDim + pair, needs_rot));
     c = ct::select(full_bf16, bf16_round(c), c);
     s = ct::select(full_bf16, bf16_round(s), s);
     auto even_out = acc * c - pair_acc * s;
@@ -1195,12 +1458,12 @@ __tile_global__ void qkv_bkn_rotary_split_contig_tail_kernel(
     ct::store_masked(v + out_offset, out, in_bounds && (part == 2LL));
 }
 
-template <int TM, int TPairs, int TK, int M, int K>
+template <int TM, int TPairs, int TK, int M, int K, typename TrigT = float>
 __tile_global__ void qkv_time_rotary_pair_split_contig_static_full_kernel(
     const __nv_bfloat16* __restrict__ x,
     const __nv_bfloat16* __restrict__ weight,
-    const float* __restrict__ cos_f,
-    const float* __restrict__ sin_f,
+    const TrigT* __restrict__ cos_f,
+    const TrigT* __restrict__ sin_f,
     __nv_bfloat16* __restrict__ q,
     __nv_bfloat16* __restrict__ k_out,
     __nv_bfloat16* __restrict__ v,
@@ -1282,8 +1545,8 @@ __tile_global__ void qkv_time_rotary_pair_split_contig_static_full_kernel(
         return;
     }
 
-    auto c = ct::load(cos_f + token * TPairs + pair);
-    auto s = ct::load(sin_f + token * TPairs + pair);
+    auto c = ct::element_cast<float>(ct::load(cos_f + token * TPairs + pair));
+    auto s = ct::element_cast<float>(ct::load(sin_f + token * TPairs + pair));
     c = ct::select(full_bf16, bf16_round(c), c);
     s = ct::select(full_bf16, bf16_round(s), s);
     auto rot_even = even * c - odd * s;
@@ -1577,12 +1840,91 @@ __tile_global__ void linear_cutile_static_masked_mn_bf16_kernel(
     }
 }
 
-template <int TM, int TPairs, int TK, int M, int K>
+template <int TM, int TNOut, int TK, int M, int NOut, int K>
+__tile_global__ void linear_glu_last_dim_static_masked_mn_bf16_kernel(
+    const __nv_bfloat16* __restrict__ a,
+    const __nv_bfloat16* __restrict__ b_nt,
+    const __nv_bfloat16* __restrict__ bias,
+    __nv_bfloat16* __restrict__ c,
+    bool full_bf16) {
+    static_assert(NOut <= TNOut);
+    using AccTile = ct::tile<float, ct::shape<TM, TNOut>>;
+    using I64OutTile = ct::tile<long long, ct::shape<TM, TNOut>>;
+
+    a = ct::assume_aligned(a, 16_ic);
+    b_nt = ct::assume_aligned(b_nt, 16_ic);
+    bias = ct::assume_aligned(bias, 16_ic);
+    c = ct::assume_aligned(c, 16_ic);
+
+    auto a_view = ct::partition_view{
+        ct::tensor_span{a, ct::shape<M, K>{}},
+        ct::shape<TM, TK>{}
+    };
+    auto b_first_view = ct::partition_view{
+        ct::tensor_span{b_nt, ct::shape<K, NOut>{}, ct::layout_left{}},
+        ct::shape<TK, TNOut>{}
+    };
+    auto b_gate_view = ct::partition_view{
+        ct::tensor_span{b_nt + static_cast<std::size_t>(NOut) * K,
+                        ct::shape<K, NOut>{},
+                        ct::layout_left{}},
+        ct::shape<TK, TNOut>{}
+    };
+    auto c_view = ct::partition_view{
+        ct::tensor_span{c, ct::shape<M, NOut>{}},
+        ct::shape<TM, TNOut>{}
+    };
+
+    auto [tile_m, tile_n, tile_z] = ct::bid();
+    (void)tile_z;
+    bool full_m_tile = tile_m < M / TM;
+    bool full_n_tile = false;
+    if constexpr (NOut >= TNOut) {
+        full_n_tile = tile_n < NOut / TNOut;
+    }
+
+    auto first = ct::full<AccTile>(0.0f);
+    auto gate = ct::full<AccTile>(0.0f);
+    for (auto kk : ct::irange(std::size_t{0}, std::size_t{K / TK})) {
+        auto a_tile = full_m_tile ? a_view.load(tile_m, kk)
+                                  : a_view.load_masked(tile_m, kk);
+        auto first_w = full_n_tile ? b_first_view.load(kk, tile_n)
+                                   : b_first_view.load_masked(kk, tile_n);
+        auto gate_w = full_n_tile ? b_gate_view.load(kk, tile_n)
+                                  : b_gate_view.load_masked(kk, tile_n);
+        first = ct::mma(a_tile, first_w, first);
+        gate = ct::mma(a_tile, gate_w, gate);
+    }
+
+    I64OutTile local = ct::iota<I64OutTile>();
+    auto cols = static_cast<long long>(tile_n) * TNOut + (local % TNOut);
+    first = bf16_round(first);
+    gate = bf16_round(gate);
+    auto first_bias = ct::element_cast<float>(ct::load_masked(bias + cols, cols < NOut));
+    auto gate_bias = ct::element_cast<float>(ct::load_masked(bias + NOut + cols, cols < NOut));
+    first = first + first_bias;
+    gate = gate + gate_bias;
+    first = ct::select(full_bf16, bf16_round(first), first);
+    gate = ct::select(full_bf16, bf16_round(gate), gate);
+    gate = 1.0f / (1.0f + ct::exp(-gate));
+    gate = ct::select(full_bf16, bf16_round(gate), gate);
+    auto value = first * gate;
+    value = ct::select(full_bf16, bf16_round(value), value);
+    auto out = ct::element_cast<__nv_bfloat16>(value);
+
+    if (full_m_tile && full_n_tile) {
+        c_view.store(out, tile_m, tile_n);
+    } else {
+        c_view.store_masked(out, tile_m, tile_n);
+    }
+}
+
+template <int TM, int TPairs, int TK, int M, int K, typename TrigT = float>
 __tile_global__ void qkv_freq60_rotary_pad64_cutile_static_full_kernel(
     const __nv_bfloat16* __restrict__ x,
     const __nv_bfloat16* __restrict__ weight,
-    const float* __restrict__ cos_f,
-    const float* __restrict__ sin_f,
+    const TrigT* __restrict__ cos_f,
+    const TrigT* __restrict__ sin_f,
     __nv_bfloat16* __restrict__ q,
     __nv_bfloat16* __restrict__ k,
     __nv_bfloat16* __restrict__ v,
@@ -1663,8 +2005,8 @@ __tile_global__ void qkv_freq60_rotary_pad64_cutile_static_full_kernel(
         return;
     }
 
-    auto c = ct::load(cos_f + n * TPairs + pair);
-    auto s = ct::load(sin_f + n * TPairs + pair);
+    auto c = ct::element_cast<float>(ct::load(cos_f + n * TPairs + pair));
+    auto s = ct::element_cast<float>(ct::load(sin_f + n * TPairs + pair));
     c = ct::select(full_bf16, bf16_round(c), c);
     s = ct::select(full_bf16, bf16_round(s), s);
     auto rot_even = even * c - odd * s;
@@ -1680,12 +2022,12 @@ __tile_global__ void qkv_freq60_rotary_pad64_cutile_static_full_kernel(
                      rows < M);
 }
 
-template <int K>
+template <int K, typename TrigT = float>
 __tile_global__ void qkv_freq60_rotary_pad64_cutile_tail_kernel(
     const __nv_bfloat16* __restrict__ x,
     const __nv_bfloat16* __restrict__ weight,
-    const float* __restrict__ cos_f,
-    const float* __restrict__ sin_f,
+    const TrigT* __restrict__ cos_f,
+    const TrigT* __restrict__ sin_f,
     __nv_bfloat16* __restrict__ q,
     __nv_bfloat16* __restrict__ k,
     __nv_bfloat16* __restrict__ v,
@@ -1749,8 +2091,10 @@ __tile_global__ void qkv_freq60_rotary_pad64_cutile_tail_kernel(
         return;
     }
 
-    auto c = ct::load_masked(cos_f + n * (kFreqAttnD / 2) + pair, in_bounds);
-    auto s = ct::load_masked(sin_f + n * (kFreqAttnD / 2) + pair, in_bounds);
+    auto c = ct::element_cast<float>(
+        ct::load_masked(cos_f + n * (kFreqAttnD / 2) + pair, in_bounds));
+    auto s = ct::element_cast<float>(
+        ct::load_masked(sin_f + n * (kFreqAttnD / 2) + pair, in_bounds));
     c = ct::select(full_bf16, bf16_round(c), c);
     s = ct::select(full_bf16, bf16_round(s), s);
     auto rot_even = even * c - odd * s;
@@ -1765,12 +2109,12 @@ __tile_global__ void qkv_freq60_rotary_pad64_cutile_tail_kernel(
                      in_bounds);
 }
 
-template <int TM, int TN, int TK, int M, int N, int K>
+template <int TM, int TN, int TK, int M, int N, int K, typename TrigT = float>
 __tile_global__ void qkv_freq60_rotary_pad64_bkn_cutile_static_full_kernel(
     const __nv_bfloat16* __restrict__ x,
     const __nv_bfloat16* __restrict__ weight_bkn,
-    const float* __restrict__ cos_f,
-    const float* __restrict__ sin_f,
+    const TrigT* __restrict__ cos_f,
+    const TrigT* __restrict__ sin_f,
     __nv_bfloat16* __restrict__ q,
     __nv_bfloat16* __restrict__ k,
     __nv_bfloat16* __restrict__ v,
@@ -1854,8 +2198,8 @@ __tile_global__ void qkv_freq60_rotary_pad64_bkn_cutile_static_full_kernel(
         return;
     }
 
-    auto c = ct::load(cos_f + n * kHalfDim + pair);
-    auto s = ct::load(sin_f + n * kHalfDim + pair);
+    auto c = ct::element_cast<float>(ct::load(cos_f + n * kHalfDim + pair));
+    auto s = ct::element_cast<float>(ct::load(sin_f + n * kHalfDim + pair));
     c = ct::select(full_bf16, bf16_round(c), c);
     s = ct::select(full_bf16, bf16_round(s), s);
     auto rot_even = even * c - odd * s;
@@ -1871,12 +2215,12 @@ __tile_global__ void qkv_freq60_rotary_pad64_bkn_cutile_static_full_kernel(
                      rows < M);
 }
 
-template <int K, int N>
+template <int K, int N, typename TrigT = float>
 __tile_global__ void qkv_freq60_rotary_pad64_bkn_cutile_tail_kernel(
     const __nv_bfloat16* __restrict__ x,
     const __nv_bfloat16* __restrict__ weight_bkn,
-    const float* __restrict__ cos_f,
-    const float* __restrict__ sin_f,
+    const TrigT* __restrict__ cos_f,
+    const TrigT* __restrict__ sin_f,
     __nv_bfloat16* __restrict__ q,
     __nv_bfloat16* __restrict__ k,
     __nv_bfloat16* __restrict__ v,
@@ -1943,8 +2287,10 @@ __tile_global__ void qkv_freq60_rotary_pad64_bkn_cutile_tail_kernel(
         return;
     }
 
-    auto c = ct::load_masked(cos_f + n * kHalfDim + pair, in_bounds);
-    auto s = ct::load_masked(sin_f + n * kHalfDim + pair, in_bounds);
+    auto c = ct::element_cast<float>(
+        ct::load_masked(cos_f + n * kHalfDim + pair, in_bounds));
+    auto s = ct::element_cast<float>(
+        ct::load_masked(sin_f + n * kHalfDim + pair, in_bounds));
     c = ct::select(full_bf16, bf16_round(c), c);
     s = ct::select(full_bf16, bf16_round(s), s);
     auto rot_even = even * c - odd * s;
@@ -2157,6 +2503,33 @@ void launch_linear_cutile_static_bkn_bf16_tiled_selected(const Tensor& x,
 
     int tail_rows = total_batch - StaticM;
     if (tail_rows > 0) {
+        if constexpr (StaticM == kLinearCutileStaticM64 &&
+                      TM == 64 &&
+                      TN == 128 &&
+                      TK == 16 &&
+                      N == 1536 &&
+                      K == 256 &&
+                      !AddBias &&
+                      !ApplyGelu) {
+            if (total_batch == kLinearCutileExpectedM) {
+                dim3 tail_grid((unsigned int)ceildiv(tail_rows, TM),
+                               N / TN,
+                               1);
+                linear_cutile_static_bkn_masked_tail_bf16_kernel<TM,
+                                                                 TN,
+                                                                 TK,
+                                                                 kLinearCutileExpectedM,
+                                                                 N,
+                                                                 K,
+                                                                 StaticM,
+                                                                 LoadLatency>
+                    <<<tail_grid, 1>>>(
+                        x.data_bf16(),
+                        weight_bkn.data_bf16(),
+                        out.data_bf16());
+                return;
+            }
+        }
         int tail_total = tail_rows * N;
         linear_cutile_tail_bf16_kernel<N, K, AddBias, ApplyGelu, GeluMode, FullBF16>
             <<<(int)ceildiv(tail_total, kTile), 1>>>(
@@ -2783,6 +3156,28 @@ void launch_linear_cutile_static_masked_mn_bf16_tiled(const Tensor& x,
         full_bf16);
 }
 
+template <int StaticM, int TM, int TNOut, int TK, int NOut, int K>
+void launch_linear_glu_last_dim_static_masked_mn_bf16_tiled(const Tensor& x,
+                                                            const Tensor& weight,
+                                                            const Tensor& bias,
+                                                            Tensor& out,
+                                                            bool full_bf16) {
+    dim3 grid((unsigned int)ceildiv(StaticM, TM),
+              (unsigned int)ceildiv(NOut, TNOut),
+              1);
+    linear_glu_last_dim_static_masked_mn_bf16_kernel<TM,
+                                                     TNOut,
+                                                     TK,
+                                                     StaticM,
+                                                     NOut,
+                                                     K><<<grid, 1>>>(
+        x.data_bf16(),
+        weight.data_bf16(),
+        bias.data_bf16(),
+        out.data_bf16(),
+        full_bf16);
+}
+
 template <int N>
 void launch_linear_cutile_small_k1024_masked_n_bf16(const Tensor& x,
                                                     const Tensor& weight,
@@ -3132,6 +3527,53 @@ bool try_linear_cutile_static_small_bf16_bias_output(const Tensor& x,
     return true;
 }
 
+bool try_linear_glu_last_dim_bf16_output_impl(const Tensor& x,
+                                              const Tensor& weight,
+                                              const Tensor& bias,
+                                              Tensor& out) {
+    if (!linear_glu_last_dim_fused_enabled()) return false;
+    if (x.dtype() != DType::BFloat16 || weight.dtype() != DType::BFloat16 ||
+        bias.dtype() != DType::BFloat16) {
+        return false;
+    }
+    if (x.ndim() == 0 || weight.ndim() != 2 || bias.ndim() != 1) return false;
+
+    int64_t in_features = weight.size(1);
+    int64_t out_features = weight.size(0);
+    if ((out_features % 2) != 0 || bias.size(0) != out_features) return false;
+
+    int64_t total_batch = x.numel() / in_features;
+    int64_t out_half = out_features / 2;
+    if (total_batch != kLinearCutileSmallExpectedM || in_features != 1024 ||
+        out_half != 24) {
+        return false;
+    }
+
+    Tensor xb = x.contiguous();
+    Tensor wb = weight.contiguous();
+    Tensor bb = bias.contiguous();
+    out = Tensor::empty({total_batch, out_half}, DType::BFloat16);
+    if (linear_glu_last_dim_fused_tk32_enabled()) {
+        launch_linear_glu_last_dim_static_masked_mn_bf16_tiled<
+            kLinearCutileSmallExpectedM,
+            32,
+            32,
+            32,
+            24,
+            1024>(xb, wb, bb, out, full_bf16_arith_enabled());
+    } else {
+        launch_linear_glu_last_dim_static_masked_mn_bf16_tiled<
+            kLinearCutileSmallExpectedM,
+            32,
+            32,
+            64,
+            24,
+            1024>(xb, wb, bb, out, full_bf16_arith_enabled());
+    }
+    CUDA_CHECK(cudaGetLastError());
+    return true;
+}
+
 bool try_linear_cutile_static_bf16_bias_output(const Tensor& x,
                                                const Tensor& weight,
                                                const Tensor& bias,
@@ -3250,16 +3692,42 @@ bool try_linear_cutile_static_bkn_bf16_output(const Tensor& x,
         !add_bias && !apply_gelu &&
         linear_cutile_static_qkv_candidate(total_batch, out_features, in_features)) {
         if (linear_bkn_qkv_tk16_enabled()) {
-            launch_linear_cutile_static_bkn_bf16_tiled<kLinearCutileStaticM,
-                                                       32,
-                                                       256,
-                                                       16,
-                                                       1536,
-                                                       256,
-                                                       false,
-                                                       false,
-                                                       2>(
-                x, weight, weight_bkn, nullptr, out, (int)total_batch, false);
+            if (linear_bkn_qkv_m64_tn128_enabled()) {
+                if (linear_bkn_qkv_m64_tn128_lat1_enabled()) {
+                    launch_linear_cutile_static_bkn_bf16_tiled<kLinearCutileStaticM64,
+                                                               64,
+                                                               128,
+                                                               16,
+                                                               1536,
+                                                               256,
+                                                               false,
+                                                               false,
+                                                               1>(
+                        x, weight, weight_bkn, nullptr, out, (int)total_batch, false);
+                } else {
+                    launch_linear_cutile_static_bkn_bf16_tiled<kLinearCutileStaticM64,
+                                                               64,
+                                                               128,
+                                                               16,
+                                                               1536,
+                                                               256,
+                                                               false,
+                                                               false,
+                                                               2>(
+                        x, weight, weight_bkn, nullptr, out, (int)total_batch, false);
+                }
+            } else {
+                launch_linear_cutile_static_bkn_bf16_tiled<kLinearCutileStaticM,
+                                                           32,
+                                                           256,
+                                                           16,
+                                                           1536,
+                                                           256,
+                                                           false,
+                                                           false,
+                                                           2>(
+                    x, weight, weight_bkn, nullptr, out, (int)total_batch, false);
+            }
         } else {
             launch_linear_cutile_static_bkn_bf16_tiled<kLinearCutileStaticM,
                                                        32,
@@ -3508,17 +3976,19 @@ __tile_global__ void split_qkv_heads_rotary_bf16_kernel(const float* __restrict_
     ct::store_masked(v + out_base + pair_d + 1, ct::element_cast<__nv_bfloat16>(v1), in_bounds);
 }
 
-__tile_global__ void split_qkv_heads_rotary_qkv_bf16_kernel(const __nv_bfloat16* __restrict__ qkv,
-                                                            const float* __restrict__ cos_f,
-                                                            const float* __restrict__ sin_f,
-                                                            __nv_bfloat16* __restrict__ q,
-                                                            __nv_bfloat16* __restrict__ k,
-                                                            __nv_bfloat16* __restrict__ v,
-                                                            long long total,
-                                                            int heads,
-                                                            int n_tokens,
-                                                            int dim_head,
-                                                            bool full_bf16) {
+template <typename TrigT = float>
+__tile_global__ void split_qkv_heads_rotary_qkv_bf16_kernel(
+    const __nv_bfloat16* __restrict__ qkv,
+    const TrigT* __restrict__ cos_f,
+    const TrigT* __restrict__ sin_f,
+    __nv_bfloat16* __restrict__ q,
+    __nv_bfloat16* __restrict__ k,
+    __nv_bfloat16* __restrict__ v,
+    long long total,
+    int heads,
+    int n_tokens,
+    int dim_head,
+    bool full_bf16) {
     qkv = ct::assume_aligned(qkv, 16_ic);
     cos_f = ct::assume_aligned(cos_f, 16_ic);
     sin_f = ct::assume_aligned(sin_f, 16_ic);
@@ -3540,8 +4010,10 @@ __tile_global__ void split_qkv_heads_rotary_qkv_bf16_kernel(const __nv_bfloat16*
     auto head_offset = h * dim_head + pair_d;
     auto out_base = ((b * heads + h) * n_tokens + n) * dim_head;
 
-    auto c = ct::load_masked(cos_f + n * half_dim + i, in_bounds);
-    auto s = ct::load_masked(sin_f + n * half_dim + i, in_bounds);
+    auto c = ct::element_cast<float>(
+        ct::load_masked(cos_f + n * half_dim + i, in_bounds));
+    auto s = ct::element_cast<float>(
+        ct::load_masked(sin_f + n * half_dim + i, in_bounds));
     c = ct::select(full_bf16, bf16_round(c), c);
     s = ct::select(full_bf16, bf16_round(s), s);
 
@@ -3575,10 +4047,11 @@ __tile_global__ void split_qkv_heads_rotary_qkv_bf16_kernel(const __nv_bfloat16*
     ct::store_masked(v + out_base + pair_d + 1, v1, in_bounds);
 }
 
+template <typename TrigT = float>
 __tile_global__ void split_qkv_heads_rotary_qkv_bf16_time1301_d64_kernel(
     const __nv_bfloat16* __restrict__ qkv,
-    const float* __restrict__ cos_f,
-    const float* __restrict__ sin_f,
+    const TrigT* __restrict__ cos_f,
+    const TrigT* __restrict__ sin_f,
     __nv_bfloat16* __restrict__ q,
     __nv_bfloat16* __restrict__ k,
     __nv_bfloat16* __restrict__ v,
@@ -3609,8 +4082,10 @@ __tile_global__ void split_qkv_heads_rotary_qkv_bf16_time1301_d64_kernel(
     auto head_offset = h * kTimeAttnD + pair_d;
     auto out_base = ((b * kQkvFusedHeads + h) * kTimeAttnN + n) * kTimeAttnD;
 
-    auto c = ct::load_masked(cos_f + n * kHalfDim + i, in_bounds);
-    auto s = ct::load_masked(sin_f + n * kHalfDim + i, in_bounds);
+    auto c = ct::element_cast<float>(
+        ct::load_masked(cos_f + n * kHalfDim + i, in_bounds));
+    auto s = ct::element_cast<float>(
+        ct::load_masked(sin_f + n * kHalfDim + i, in_bounds));
     c = ct::select(full_bf16, bf16_round(c), c);
     s = ct::select(full_bf16, bf16_round(s), s);
 
@@ -3759,11 +4234,12 @@ __tile_global__ void rotary_time_split_contig_k_only_inplace_kernel(
     ct::store_masked(k + offset + 1, ct::element_cast<__nv_bfloat16>(k_rot1), in_bounds);
 }
 
+template <typename TrigT = float>
 __tile_global__ void rotary_time_split_contig_row_tile_inplace_kernel(
     __nv_bfloat16* __restrict__ q,
     __nv_bfloat16* __restrict__ k,
-    const float* __restrict__ cos_f,
-    const float* __restrict__ sin_f,
+    const TrigT* __restrict__ cos_f,
+    const TrigT* __restrict__ sin_f,
     long long total_rows,
     bool full_bf16) {
     q = ct::assume_aligned(q, 16_ic);
@@ -3786,9 +4262,9 @@ __tile_global__ void rotary_time_split_contig_row_tile_inplace_kernel(
                   h * kTimeAttnD + pair_d;
 
     CosI64Tile cos_i = ct::iota<CosI64Tile>();
-    auto c = ct::broadcast(ct::load(cos_f + n * kHalfDim + cos_i),
+    auto c = ct::broadcast(ct::element_cast<float>(ct::load(cos_f + n * kHalfDim + cos_i)),
                            ct::shape<kQkvFusedHeads, kHalfDim>{});
-    auto s = ct::broadcast(ct::load(sin_f + n * kHalfDim + cos_i),
+    auto s = ct::broadcast(ct::element_cast<float>(ct::load(sin_f + n * kHalfDim + cos_i)),
                            ct::shape<kQkvFusedHeads, kHalfDim>{});
     c = ct::select(full_bf16, bf16_round(c), c);
     s = ct::select(full_bf16, bf16_round(s), s);
@@ -3817,11 +4293,12 @@ __tile_global__ void rotary_time_split_contig_row_tile_inplace_kernel(
     ct::store_masked(k + offset + 1, ct::element_cast<__nv_bfloat16>(k_rot1), row_valid);
 }
 
+template <typename TrigT = float>
 __tile_global__ void rotary_time_split_contig_tail_inplace_kernel(
     __nv_bfloat16* __restrict__ q,
     __nv_bfloat16* __restrict__ k,
-    const float* __restrict__ cos_f,
-    const float* __restrict__ sin_f,
+    const TrigT* __restrict__ cos_f,
+    const TrigT* __restrict__ sin_f,
     long long total_rows,
     long long row_start,
     bool full_bf16) {
@@ -3848,8 +4325,10 @@ __tile_global__ void rotary_time_split_contig_tail_inplace_kernel(
     auto offset =
         ((b * kTimeAttnN + n) * kQkvFusedHeads + h) * kTimeAttnD + pair_d;
 
-    auto c = ct::load_masked(cos_f + n * kHalfDim + i, in_bounds);
-    auto s = ct::load_masked(sin_f + n * kHalfDim + i, in_bounds);
+    auto c = ct::element_cast<float>(
+        ct::load_masked(cos_f + n * kHalfDim + i, in_bounds));
+    auto s = ct::element_cast<float>(
+        ct::load_masked(sin_f + n * kHalfDim + i, in_bounds));
     c = ct::select(full_bf16, bf16_round(c), c);
     s = ct::select(full_bf16, bf16_round(s), s);
 
@@ -4889,6 +5368,89 @@ __tile_global__ void freq_attention60_cutile_padded_out60_kernel(
                      out_valid);
 }
 
+template <int QRows, int VCols, bool ConstNegInf = false>
+__tile_global__ void freq_attention60_cutile_padded_out60_vsplit_kernel(
+    const __nv_bfloat16* __restrict__ q,
+    const __nv_bfloat16* __restrict__ k,
+    const __nv_bfloat16* __restrict__ v,
+    __nv_bfloat16* __restrict__ out,
+    float scale) {
+    constexpr int kVCols = VCols;
+    static_assert(kFreqAttnD % kVCols == 0);
+    using ScoreTile = ct::tile<float, ct::shape<QRows, kFreqAttnPadN>>;
+    using OutTile = ct::tile<float, ct::shape<QRows, kVCols>>;
+    using I64ScoreTile = ct::tile<long long, ct::shape<QRows, kFreqAttnPadN>>;
+    using I64OutTile = ct::tile<long long, ct::shape<QRows, kVCols>>;
+
+    q = ct::assume_aligned(q, 16_ic);
+    k = ct::assume_aligned(k, 16_ic);
+    v = ct::assume_aligned(v, 16_ic);
+    out = ct::assume_aligned(out, 16_ic);
+
+    auto [q_block, bh, tile_z] = ct::bid();
+    (void)tile_z;
+    const __nv_bfloat16* q_batch =
+        q + static_cast<std::size_t>(bh) * kFreqAttnPadN * kFreqAttnD;
+    const __nv_bfloat16* k_batch =
+        k + static_cast<std::size_t>(bh) * kFreqAttnPadN * kFreqAttnD;
+    const __nv_bfloat16* v_batch =
+        v + static_cast<std::size_t>(bh) * kFreqAttnPadN * kFreqAttnD;
+    __nv_bfloat16* out_batch =
+        out + static_cast<std::size_t>(bh) * kFreqAttnN * kFreqAttnD;
+
+    auto q_view = ct::partition_view{
+        ct::tensor_span{q_batch, ct::shape<kFreqAttnPadN, kFreqAttnD>{}},
+        ct::shape<QRows, kFreqAttnD>{}
+    };
+    auto k_t_view = ct::partition_view{
+        ct::tensor_span{k_batch, ct::shape<kFreqAttnD, kFreqAttnPadN>{}, ct::layout_left{}},
+        ct::shape<kFreqAttnD, kFreqAttnPadN>{}
+    };
+    auto v_view = ct::partition_view{
+        ct::tensor_span{v_batch, ct::shape<kFreqAttnPadN, kFreqAttnD>{}},
+        ct::shape<kFreqAttnPadN, kVCols>{}
+    };
+
+    auto scores = ct::mma(q_view.load(q_block, 0), k_t_view.load(0, 0),
+                          ct::full<ScoreTile>(0.0f));
+    I64ScoreTile score_local = ct::iota<I64ScoreTile>();
+    auto score_rows = static_cast<long long>(q_block) * QRows +
+                      score_local / kFreqAttnPadN;
+    auto score_cols = score_local % kFreqAttnPadN;
+    auto score_valid = (score_rows < kFreqAttnN) && (score_cols < kFreqAttnN);
+    auto neg_inf = [&]() {
+        if constexpr (ConstNegInf) {
+            return ct::full<ScoreTile>(-3.402823466e38f);
+        } else {
+            return scores * 0.0f - 3.402823466e38f;
+        }
+    }();
+    scores = ct::select(score_valid, scores * scale, neg_inf);
+
+    auto row_max = ct::reduce_max<1>(scores);
+    auto probs_f32 = ct::select(score_valid, ct::exp(scores - row_max),
+                                scores * 0.0f);
+    auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+    auto denom = ct::sum<1>(probs_f32);
+
+#pragma unroll
+    for (int d_part = 0; d_part < kFreqAttnD / kVCols; ++d_part) {
+        auto out_acc = ct::mma(probs_bf16, v_view.load(0, d_part),
+                               ct::full<OutTile>(0.0f));
+        out_acc = out_acc / denom;
+
+        I64OutTile out_local = ct::iota<I64OutTile>();
+        auto out_rows = static_cast<long long>(q_block) * QRows +
+                        out_local / kVCols;
+        auto out_cols = d_part * kVCols + out_local % kVCols;
+        auto out_valid = out_rows < kFreqAttnN;
+        auto safe_rows = ct::select(out_valid, out_rows, out_rows * 0LL);
+        ct::store_masked(out_batch + safe_rows * kFreqAttnD + out_cols,
+                         ct::element_cast<__nv_bfloat16>(out_acc),
+                         out_valid);
+    }
+}
+
 __tile_global__ void add_bias_kernel(float* __restrict__ out,
                                      const float* __restrict__ bias,
                                      long long total,
@@ -5001,11 +5563,12 @@ __tile_global__ void add_bias_gelu_to_bf16_kernel(const float* __restrict__ out,
     ct::store_masked(dst + idx, ct::element_cast<__nv_bfloat16>(gelu), in_bounds);
 }
 
+template <typename BandsT = float>
 __tile_global__ void apply_mask_and_scatter_kernel(const float* __restrict__ stft,
                                                    const float* __restrict__ mask0,
                                                    const float* __restrict__ mask1,
                                                    const int64_t* __restrict__ freq_indices,
-                                                   const float* __restrict__ bands_per_freq,
+                                                   const BandsT* __restrict__ bands_per_freq,
                                                    float* __restrict__ out,
                                                    long long total,
                                                    int num_stems,
@@ -5034,7 +5597,8 @@ __tile_global__ void apply_mask_and_scatter_kernel(const float* __restrict__ stf
     auto batch_idx = tmp_stem / num_stems;
 
     auto freq = ct::load_masked(freq_indices + band_f, in_bounds);
-    auto denom = ct::load_masked(bands_per_freq + freq, in_bounds);
+    auto denom = ct::element_cast<float>(
+        ct::load_masked(bands_per_freq + freq, in_bounds));
     auto eps = denom * 0.0f + 1.0e-8f;
     denom = ct::select(denom > eps, denom, eps);
 
@@ -5063,20 +5627,22 @@ __tile_global__ void apply_mask_and_scatter_kernel(const float* __restrict__ stf
     ct::atomic_add_masked<ct::memory_order::relaxed>(out + out_idx, value, in_bounds);
 }
 
-__tile_global__ void apply_mask_and_scatter_bf16_kernel(const float* __restrict__ stft,
-                                                        const __nv_bfloat16* __restrict__ mask0,
-                                                        const __nv_bfloat16* __restrict__ mask1,
-                                                        const int64_t* __restrict__ freq_indices,
-                                                        const float* __restrict__ bands_per_freq,
-                                                        float* __restrict__ out,
-                                                        long long total,
-                                                        int num_stems,
-                                                        int total_band_freqs,
-                                                        int frames,
-                                                        int total_freq,
-                                                        int audio_channels,
-                                                        int freq_bins,
-                                                        bool full_bf16) {
+template <typename BandsT = float>
+__tile_global__ void apply_mask_and_scatter_bf16_kernel(
+    const float* __restrict__ stft,
+    const __nv_bfloat16* __restrict__ mask0,
+    const __nv_bfloat16* __restrict__ mask1,
+    const int64_t* __restrict__ freq_indices,
+    const BandsT* __restrict__ bands_per_freq,
+    float* __restrict__ out,
+    long long total,
+    int num_stems,
+    int total_band_freqs,
+    int frames,
+    int total_freq,
+    int audio_channels,
+    int freq_bins,
+    bool full_bf16) {
     stft = ct::assume_aligned(stft, 16_ic);
     mask0 = ct::assume_aligned(mask0, 16_ic);
     mask1 = ct::assume_aligned(mask1, 16_ic);
@@ -5097,7 +5663,8 @@ __tile_global__ void apply_mask_and_scatter_bf16_kernel(const float* __restrict_
     auto batch_idx = tmp_stem / num_stems;
 
     auto freq = ct::load_masked(freq_indices + band_f, in_bounds);
-    auto denom = ct::load_masked(bands_per_freq + freq, in_bounds);
+    auto denom = ct::element_cast<float>(
+        ct::load_masked(bands_per_freq + freq, in_bounds));
     auto eps = denom * 0.0f + 1.0e-8f;
     denom = ct::select(denom > eps, denom, eps);
 
@@ -5295,6 +5862,18 @@ void launch_rotary_time_split_contig_inplace_by_tile(Tensor& q,
 
 }  // namespace
 
+void set_time_attention_context_chunk(int chunk_index) {
+    g_time_attention_context_chunk = chunk_index;
+}
+
+void set_time_attention_context_depth(int depth_index) {
+    g_time_attention_context_depth = depth_index;
+}
+
+bool time_attention_stats_enabled_for_current_context() {
+    return time_attention_stats_enabled_for_current_context_impl();
+}
+
 bool residual_bf16_enabled() {
     return residual_bf16_enabled_impl();
 }
@@ -5307,8 +5886,19 @@ bool norm_gamma_bf16_enabled() {
     return norm_gamma_bf16_enabled_impl();
 }
 
+bool bands_per_freq_bf16_enabled() {
+    return bands_per_freq_bf16_enabled_impl();
+}
+
 bool rotary_freqs_bf16_enabled() {
     return rotary_freqs_bf16_enabled_impl();
+}
+
+bool try_linear_glu_last_dim_bf16_output(const Tensor& x,
+                                         const Tensor& weight,
+                                         const Tensor& bias,
+                                         Tensor& out) {
+    return try_linear_glu_last_dim_bf16_output_impl(x, weight, bias, out);
 }
 
 bool linear_bkn_long_enabled() {
@@ -5389,10 +5979,13 @@ void split_qkv_heads_rotary(const Tensor& qkv, int heads, int dim_head,
                                 q.data_bf16(), k.data_bf16(), v.data_bf16(),
                                 total_nonpad, heads, full_bf16_arith_enabled());
                     }
-                    long long v_pad_total =
-                        (long long)B * heads * (kFreqAttnPadN - kFreqAttnN) * kFreqAttnD;
-                    freq60_v_pad_rows_zero_kernel<<<(int)ceildiv(v_pad_total, kTile), 1>>>(
-                        v.data_bf16(), v_pad_total, heads);
+                    if (!freq_split_skip_v_pad_zero_enabled()) {
+                        long long v_pad_total =
+                            (long long)B * heads *
+                            (kFreqAttnPadN - kFreqAttnN) * kFreqAttnD;
+                        freq60_v_pad_rows_zero_kernel<<<(int)ceildiv(v_pad_total, kTile), 1>>>(
+                            v.data_bf16(), v_pad_total, heads);
+                    }
                 } else {
                     long long total_pad =
                         (long long)B * heads * kFreqAttnPadN * (kFreqAttnD / 2);
@@ -5424,19 +6017,49 @@ void split_qkv_heads_rotary(const Tensor& qkv, int heads, int dim_head,
                        N == kTimeAttnN &&
                        heads == kQkvFusedHeads &&
                        dim_head == kTimeAttnD) {
-                Tensor cos_work = (cos_freqs.dtype() == DType::Float32) ? cos_freqs.contiguous() : cos_freqs.to_f32().contiguous();
-                Tensor sin_work = (sin_freqs.dtype() == DType::Float32) ? sin_freqs.contiguous() : sin_freqs.to_f32().contiguous();
-                split_qkv_heads_rotary_qkv_bf16_time1301_d64_kernel<<<(int)ceildiv(total, kTile), 1>>>(
-                    qkv_work.data_bf16(), cos_work.data_f32(), sin_work.data_f32(),
-                    q.data_bf16(), k.data_bf16(), v.data_bf16(),
-                    total, full_bf16_arith_enabled());
+                bool trig_bf16 = cos_freqs.dtype() == DType::BFloat16 &&
+                                  sin_freqs.dtype() == DType::BFloat16;
+                if (trig_bf16) {
+                    Tensor cos_work = cos_freqs.contiguous();
+                    Tensor sin_work = sin_freqs.contiguous();
+                    split_qkv_heads_rotary_qkv_bf16_time1301_d64_kernel<__nv_bfloat16>
+                        <<<(int)ceildiv(total, kTile), 1>>>(
+                            qkv_work.data_bf16(), cos_work.data_bf16(), sin_work.data_bf16(),
+                            q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                            total, full_bf16_arith_enabled());
+                } else {
+                    Tensor cos_work = (cos_freqs.dtype() == DType::Float32) ? cos_freqs.contiguous() : cos_freqs.to_f32().contiguous();
+                    Tensor sin_work = (sin_freqs.dtype() == DType::Float32) ? sin_freqs.contiguous() : sin_freqs.to_f32().contiguous();
+                    split_qkv_heads_rotary_qkv_bf16_time1301_d64_kernel<float>
+                        <<<(int)ceildiv(total, kTile), 1>>>(
+                            qkv_work.data_bf16(), cos_work.data_f32(), sin_work.data_f32(),
+                            q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                            total, full_bf16_arith_enabled());
+                }
             } else {
-                Tensor cos_work = (cos_freqs.dtype() == DType::Float32) ? cos_freqs.contiguous() : cos_freqs.to_f32().contiguous();
-                Tensor sin_work = (sin_freqs.dtype() == DType::Float32) ? sin_freqs.contiguous() : sin_freqs.to_f32().contiguous();
-                split_qkv_heads_rotary_qkv_bf16_kernel<<<(int)ceildiv(total, kTile), 1>>>(
-                    qkv_work.data_bf16(), cos_work.data_f32(), sin_work.data_f32(),
-                    q.data_bf16(), k.data_bf16(), v.data_bf16(),
-                    total, heads, N, dim_head, full_bf16_arith_enabled());
+                bool trig_bf16 = cos_freqs.dtype() == DType::BFloat16 &&
+                                  sin_freqs.dtype() == DType::BFloat16;
+                if (trig_bf16) {
+                    Tensor cos_work = cos_freqs.contiguous();
+                    Tensor sin_work = sin_freqs.contiguous();
+                    split_qkv_heads_rotary_qkv_bf16_kernel<__nv_bfloat16>
+                        <<<(int)ceildiv(total, kTile), 1>>>(
+                            qkv_work.data_bf16(), cos_work.data_bf16(), sin_work.data_bf16(),
+                            q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                            total, heads, N, dim_head, full_bf16_arith_enabled());
+                } else {
+                    Tensor cos_work = (cos_freqs.dtype() == DType::Float32)
+                        ? cos_freqs.contiguous()
+                        : cos_freqs.to_f32().contiguous();
+                    Tensor sin_work = (sin_freqs.dtype() == DType::Float32)
+                        ? sin_freqs.contiguous()
+                        : sin_freqs.to_f32().contiguous();
+                    split_qkv_heads_rotary_qkv_bf16_kernel<float>
+                        <<<(int)ceildiv(total, kTile), 1>>>(
+                            qkv_work.data_bf16(), cos_work.data_f32(), sin_work.data_f32(),
+                            q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                            total, heads, N, dim_head, full_bf16_arith_enabled());
+                }
             }
         } else {
             Tensor cos_work = (cos_freqs.dtype() == DType::Float32) ? cos_freqs.contiguous() : cos_freqs.to_f32().contiguous();
@@ -5699,8 +6322,9 @@ Tensor scaled_dot_product_attention_time_split_contig(const Tensor& q,
 
     bool use_exp2 = time_attention_cutile_exp2_enabled();
     bool skip_keytail = time_attention_cutile_skip_keytail_enabled();
+    bool approx_softmax = time_attention_approx_softmax_enabled_for_call();
     launch_time_attention1301_split_contig_main_cutile(
-        qb, kb, vb, out, scale, use_exp2, skip_keytail);
+        qb, kb, vb, out, scale, use_exp2, skip_keytail, approx_softmax);
     launch_time_attention1301_split_contig_tail_cutile(
         qb, kb, vb, out, scale,
         time_attention_cutile_split_tail_q32_enabled(),
@@ -5748,12 +6372,16 @@ Tensor scaled_dot_product_attention_time_split_contig_q_rotary(const Tensor& q,
     Tensor qb = q.is_contiguous() ? q : q.contiguous();
     Tensor kb = k.is_contiguous() ? k : k.contiguous();
     Tensor vb = v.is_contiguous() ? v : v.contiguous();
-    Tensor cos_work = (cos_freqs.dtype() == DType::Float32)
-        ? cos_freqs.contiguous()
-        : cos_freqs.to_f32().contiguous();
-    Tensor sin_work = (sin_freqs.dtype() == DType::Float32)
-        ? sin_freqs.contiguous()
-        : sin_freqs.to_f32().contiguous();
+    bool trig_bf16 = cos_freqs.dtype() == DType::BFloat16 &&
+                     sin_freqs.dtype() == DType::BFloat16;
+    Tensor cos_work = trig_bf16 ? cos_freqs.contiguous()
+                                : ((cos_freqs.dtype() == DType::Float32)
+                                       ? cos_freqs.contiguous()
+                                       : cos_freqs.to_f32().contiguous());
+    Tensor sin_work = trig_bf16 ? sin_freqs.contiguous()
+                                : ((sin_freqs.dtype() == DType::Float32)
+                                       ? sin_freqs.contiguous()
+                                       : sin_freqs.to_f32().contiguous());
     Tensor out = Tensor::empty({bh, kTimeAttnN, kTimeAttnD}, DType::BFloat16);
 
     bool use_exp2 = time_attention_cutile_exp2_enabled();
@@ -5803,7 +6431,18 @@ Tensor scaled_dot_product_attention(const Tensor& q,
         Tensor out = Tensor::empty({BH, kFreqAttnN, kFreqAttnD}, DType::BFloat16);
         dim3 grid((unsigned int)ceildiv(kFreqAttnN, kFreqAttnCutileQRows),
                   (unsigned int)BH);
-        if (freq_split_skip_qk_pad_zero_enabled()) {
+        bool use_v32 = freq_attention60_v32_enabled();
+        if (use_v32 && freq_split_skip_qk_pad_zero_enabled()) {
+            freq_attention60_cutile_padded_out60_vsplit_kernel<
+                kFreqAttnCutileQRows, 32, true>
+                <<<grid, 1>>>(qb.data_bf16(), kb.data_bf16(), vb.data_bf16(),
+                              out.data_bf16(), scale);
+        } else if (use_v32) {
+            freq_attention60_cutile_padded_out60_vsplit_kernel<
+                kFreqAttnCutileQRows, 32>
+                <<<grid, 1>>>(qb.data_bf16(), kb.data_bf16(), vb.data_bf16(),
+                              out.data_bf16(), scale);
+        } else if (freq_split_skip_qk_pad_zero_enabled()) {
             freq_attention60_cutile_padded_out60_kernel<kFreqAttnCutileQRows, true>
                 <<<grid, 1>>>(qb.data_bf16(), kb.data_bf16(), vb.data_bf16(),
                               out.data_bf16(), scale);
@@ -5970,10 +6609,10 @@ Tensor linear_gemm_bf16_output(const Tensor& x,
     out_shape = xb.shape();
     out_shape.back() = out_features;
 
-    Tensor wmma_out;
+    Tensor tile_out;
     if (try_linear_cutile_static_bf16_output(
-            xb, wb, total_batch, out_features, in_features, wmma_out)) {
-        return wmma_out;
+            xb, wb, total_batch, out_features, in_features, tile_out)) {
+        return tile_out;
     }
     unsupported_gemm_path("mbr_tile::linear_gemm_bf16_output");
 }
@@ -5988,7 +6627,7 @@ bool try_feedforward_fused_impl(const Tensor& x,
     if (!ffn12_fused_cutile_enabled()) return false;
     if (residual && !ffn12_fused_residual_enabled()) return false;
     if (residual &&
-        (!ffn12_fused_poly9_gelu_enabled() ||
+        (!(ffn12_fused_poly9_gelu_enabled() || ffn12_fused_odd5_gelu_enabled()) ||
          full_bf16_arith_enabled() ||
          !ffn12_fused_split2_output_enabled() ||
          !ffn12_fused_split2_pairh32_enabled() ||
@@ -6038,6 +6677,8 @@ bool try_feedforward_fused_impl(const Tensor& x,
     int gelu_mode = kGeluErf;
     if (ffn12_fused_tinyblend_gelu_enabled()) {
         gelu_mode = kGeluErfPoly9TinyBlendL30;
+    } else if (ffn12_fused_odd5_gelu_enabled()) {
+        gelu_mode = kGeluErfOdd5L175;
     } else if (ffn12_fused_poly9_gelu_enabled()) {
         gelu_mode = kGeluErfPoly9L30;
     } else if (ffn12_fused_poly7_gelu_enabled()) {
@@ -6051,7 +6692,24 @@ bool try_feedforward_fused_impl(const Tensor& x,
     } else if (ffn12_fused_hard_gelu_enabled() || linear_hard_gelu_enabled()) {
         gelu_mode = kGeluHard;
     }
-    if (residual) {
+    if (residual && ffn12_residual_two_kernel_enabled()) {
+        Tensor ff_out_flat = Tensor::empty({total_batch, 256}, DType::BFloat16);
+        launch_ffn12_fused256_cutile(gelu_mode,
+                                     full_bf16_arith_enabled(),
+                                     ffn12_fused_split2_output_enabled(),
+                                     ffn12_fused_split2_pairh32_enabled(),
+                                     ffn12_fused_pairh32_tk64_enabled(),
+                                     xb,
+                                     w1,
+                                     b1,
+                                     w2,
+                                     b2,
+                                     ff_out_flat);
+        CUDA_CHECK(cudaGetLastError());
+        if (!try_residual_add_bf16_cutile(ff_out_flat, residual_flat, out_flat)) {
+            return false;
+        }
+    } else if (residual) {
         launch_ffn12_fused256_residual_cutile(gelu_mode,
                                               full_bf16_arith_enabled(),
                                               ffn12_fused_split2_output_enabled(),
@@ -6306,10 +6964,10 @@ Tensor linear_no_bias_bf16_output(const Tensor& x, const Tensor& weight) {
     std::vector<int64_t> out_shape = xb.shape();
     out_shape.back() = out_features;
 
-    Tensor wmma_out;
+    Tensor tile_out;
     if (try_linear_cutile_static_bf16_output(
-            xb, wb, total_batch, out_features, in_features, wmma_out)) {
-        return wmma_out.reshape(out_shape);
+            xb, wb, total_batch, out_features, in_features, tile_out)) {
+        return tile_out.reshape(out_shape);
     }
     unsupported_gemm_path("mbr_tile::linear_no_bias_bf16_output");
 #else
@@ -6410,26 +7068,60 @@ void linear_qkv_bkn_split_contig_time(const Tensor& x,
     v = Tensor::empty({batches, kTimeAttnN, kQkvFusedHeads, kTimeAttnD},
                       DType::BFloat16);
 
-    dim3 full_grid(kLinearCutileStaticM / 32, kOutFeatures / 256, 1);
-    qkv_bkn_split_contig_static_full_kernel<32,
-                                            256,
-                                            16,
-                                            kLinearCutileStaticM,
-                                            kOutFeatures,
-                                            kInFeatures,
-                                            2>
-        <<<full_grid, 1>>>(
-            x_work.data_bf16(), weight_bkn_work.data_bf16(),
-            q.data_bf16(), k.data_bf16(), v.data_bf16());
+    bool use_m64_tn128 = time_qkv_bkn_m64_tn128_enabled();
+    int static_rows = kLinearCutileStaticM;
+    if (use_m64_tn128) {
+        static_rows = kLinearCutileStaticM64;
+        dim3 full_grid(kLinearCutileStaticM64 / 64, kOutFeatures / 128, 1);
+        qkv_bkn_split_contig_static_full_kernel<64,
+                                                128,
+                                                16,
+                                                kLinearCutileStaticM64,
+                                                kOutFeatures,
+                                                kInFeatures,
+                                                2>
+            <<<full_grid, 1>>>(
+                x_work.data_bf16(), weight_bkn_work.data_bf16(),
+                q.data_bf16(), k.data_bf16(), v.data_bf16());
+    } else {
+        dim3 full_grid(kLinearCutileStaticM / 32, kOutFeatures / 256, 1);
+        qkv_bkn_split_contig_static_full_kernel<32,
+                                                256,
+                                                16,
+                                                kLinearCutileStaticM,
+                                                kOutFeatures,
+                                                kInFeatures,
+                                                2>
+            <<<full_grid, 1>>>(
+                x_work.data_bf16(), weight_bkn_work.data_bf16(),
+                q.data_bf16(), k.data_bf16(), v.data_bf16());
+    }
 
-    int tail_rows = (int)(total_batch - kLinearCutileStaticM);
+    int tail_rows = (int)(total_batch - static_rows);
     if (tail_rows > 0) {
-        int tail_total = tail_rows * kOutFeatures;
-        qkv_bkn_split_contig_tail_kernel<kOutFeatures, kInFeatures>
-            <<<(int)ceildiv(tail_total, kTile), 1>>>(
-                x_work.data_bf16(), weight_work.data_bf16(),
-                q.data_bf16(), k.data_bf16(), v.data_bf16(),
-                (int)total_batch, kLinearCutileStaticM);
+        if (use_m64_tn128) {
+            dim3 tail_grid((unsigned int)ceildiv(tail_rows, 64),
+                           kOutFeatures / 128,
+                           1);
+            qkv_bkn_split_contig_masked_tail_kernel<64,
+                                                    128,
+                                                    16,
+                                                    kLinearCutileExpectedM,
+                                                    kOutFeatures,
+                                                    kInFeatures,
+                                                    kLinearCutileStaticM64,
+                                                    2>
+                <<<tail_grid, 1>>>(
+                    x_work.data_bf16(), weight_bkn_work.data_bf16(),
+                    q.data_bf16(), k.data_bf16(), v.data_bf16());
+        } else {
+            int tail_total = tail_rows * kOutFeatures;
+            qkv_bkn_split_contig_tail_kernel<kOutFeatures, kInFeatures>
+                <<<(int)ceildiv(tail_total, kTile), 1>>>(
+                    x_work.data_bf16(), weight_work.data_bf16(),
+                    q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                    (int)total_batch, static_rows);
+        }
     }
     CUDA_CHECK(cudaGetLastError());
 }
@@ -6484,12 +7176,16 @@ void linear_qkv_bkn_rotary_split_contig_time(const Tensor& x,
     Tensor x_work = x.contiguous();
     Tensor weight_work = weight.contiguous();
     Tensor weight_bkn_work = weight_bkn.contiguous();
-    Tensor cos_work = (cos_freqs.dtype() == DType::Float32)
-        ? cos_freqs.contiguous()
-        : cos_freqs.to_f32().contiguous();
-    Tensor sin_work = (sin_freqs.dtype() == DType::Float32)
-        ? sin_freqs.contiguous()
-        : sin_freqs.to_f32().contiguous();
+    bool trig_bf16 = cos_freqs.dtype() == DType::BFloat16 &&
+                     sin_freqs.dtype() == DType::BFloat16;
+    Tensor cos_work = trig_bf16 ? cos_freqs.contiguous()
+                                : ((cos_freqs.dtype() == DType::Float32)
+                                       ? cos_freqs.contiguous()
+                                       : cos_freqs.to_f32().contiguous());
+    Tensor sin_work = trig_bf16 ? sin_freqs.contiguous()
+                                : ((sin_freqs.dtype() == DType::Float32)
+                                       ? sin_freqs.contiguous()
+                                       : sin_freqs.to_f32().contiguous());
     q = Tensor::empty({batches, kTimeAttnN, kQkvFusedHeads, kTimeAttnD},
                       DType::BFloat16);
     k = Tensor::empty({batches, kTimeAttnN, kQkvFusedHeads, kTimeAttnD},
@@ -6498,17 +7194,33 @@ void linear_qkv_bkn_rotary_split_contig_time(const Tensor& x,
                       DType::BFloat16);
 
     dim3 full_grid(kLinearCutileStaticM / 32, kOutFeatures / 256, 1);
-    qkv_bkn_rotary_split_contig_static_full_kernel<32,
-                                                   256,
-                                                   16,
-                                                   kLinearCutileStaticM,
-                                                   kOutFeatures,
-                                                   kInFeatures>
-        <<<full_grid, 1>>>(
-            x_work.data_bf16(), weight_bkn_work.data_bf16(),
-            cos_work.data_f32(), sin_work.data_f32(),
-            q.data_bf16(), k.data_bf16(), v.data_bf16(),
-            full_bf16_arith_enabled());
+    if (trig_bf16) {
+        qkv_bkn_rotary_split_contig_static_full_kernel<32,
+                                                       256,
+                                                       16,
+                                                       kLinearCutileStaticM,
+                                                       kOutFeatures,
+                                                       kInFeatures,
+                                                       __nv_bfloat16>
+            <<<full_grid, 1>>>(
+                x_work.data_bf16(), weight_bkn_work.data_bf16(),
+                cos_work.data_bf16(), sin_work.data_bf16(),
+                q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                full_bf16_arith_enabled());
+    } else {
+        qkv_bkn_rotary_split_contig_static_full_kernel<32,
+                                                       256,
+                                                       16,
+                                                       kLinearCutileStaticM,
+                                                       kOutFeatures,
+                                                       kInFeatures,
+                                                       float>
+            <<<full_grid, 1>>>(
+                x_work.data_bf16(), weight_bkn_work.data_bf16(),
+                cos_work.data_f32(), sin_work.data_f32(),
+                q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                full_bf16_arith_enabled());
+    }
 
     int tail_rows = (int)(total_batch - kLinearCutileStaticM);
     if (tail_rows > 0) {
@@ -6520,10 +7232,21 @@ void linear_qkv_bkn_rotary_split_contig_time(const Tensor& x,
                 (int)total_batch, kLinearCutileStaticM);
         long long tail_pairs =
             (long long)tail_rows * kQkvFusedHeads * (kTimeAttnD / 2);
-        rotary_time_split_contig_tail_inplace_kernel<<<(int)ceildiv(tail_pairs, kTile), 1>>>(
-            q.data_bf16(), k.data_bf16(),
-            cos_work.data_f32(), sin_work.data_f32(),
-            total_batch, kLinearCutileStaticM, full_bf16_arith_enabled());
+        if (trig_bf16) {
+            rotary_time_split_contig_tail_inplace_kernel<__nv_bfloat16>
+                <<<(int)ceildiv(tail_pairs, kTile), 1>>>(
+                    q.data_bf16(), k.data_bf16(),
+                    cos_work.data_bf16(), sin_work.data_bf16(),
+                    total_batch, kLinearCutileStaticM,
+                    full_bf16_arith_enabled());
+        } else {
+            rotary_time_split_contig_tail_inplace_kernel<float>
+                <<<(int)ceildiv(tail_pairs, kTile), 1>>>(
+                    q.data_bf16(), k.data_bf16(),
+                    cos_work.data_f32(), sin_work.data_f32(),
+                    total_batch, kLinearCutileStaticM,
+                    full_bf16_arith_enabled());
+        }
     }
     CUDA_CHECK(cudaGetLastError());
 }
@@ -6570,12 +7293,16 @@ void linear_qkv_pair_rotary_split_contig_time(const Tensor& x,
 
     Tensor x_work = x.contiguous();
     Tensor weight_work = weight.contiguous();
-    Tensor cos_work = (cos_freqs.dtype() == DType::Float32)
-        ? cos_freqs.contiguous()
-        : cos_freqs.to_f32().contiguous();
-    Tensor sin_work = (sin_freqs.dtype() == DType::Float32)
-        ? sin_freqs.contiguous()
-        : sin_freqs.to_f32().contiguous();
+    bool trig_bf16 = cos_freqs.dtype() == DType::BFloat16 &&
+                     sin_freqs.dtype() == DType::BFloat16;
+    Tensor cos_work = trig_bf16 ? cos_freqs.contiguous()
+                                : ((cos_freqs.dtype() == DType::Float32)
+                                       ? cos_freqs.contiguous()
+                                       : cos_freqs.to_f32().contiguous());
+    Tensor sin_work = trig_bf16 ? sin_freqs.contiguous()
+                                : ((sin_freqs.dtype() == DType::Float32)
+                                       ? sin_freqs.contiguous()
+                                       : sin_freqs.to_f32().contiguous());
     q = Tensor::empty({batches, kTimeAttnN, kQkvFusedHeads, kTimeAttnD},
                       DType::BFloat16);
     k = Tensor::empty({batches, kTimeAttnN, kQkvFusedHeads, kTimeAttnD},
@@ -6584,16 +7311,31 @@ void linear_qkv_pair_rotary_split_contig_time(const Tensor& x,
                       DType::BFloat16);
 
     dim3 full_grid(kLinearCutileStaticM / 32, 3 * kQkvFusedHeads, 1);
-    qkv_time_rotary_pair_split_contig_static_full_kernel<32,
-                                                         kTimeAttnD / 2,
-                                                         16,
-                                                         kLinearCutileStaticM,
-                                                         kInFeatures>
-        <<<full_grid, 1>>>(
-            x_work.data_bf16(), weight_work.data_bf16(),
-            cos_work.data_f32(), sin_work.data_f32(),
-            q.data_bf16(), k.data_bf16(), v.data_bf16(),
-            full_bf16_arith_enabled());
+    if (trig_bf16) {
+        qkv_time_rotary_pair_split_contig_static_full_kernel<32,
+                                                             kTimeAttnD / 2,
+                                                             16,
+                                                             kLinearCutileStaticM,
+                                                             kInFeatures,
+                                                             __nv_bfloat16>
+            <<<full_grid, 1>>>(
+                x_work.data_bf16(), weight_work.data_bf16(),
+                cos_work.data_bf16(), sin_work.data_bf16(),
+                q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                full_bf16_arith_enabled());
+    } else {
+        qkv_time_rotary_pair_split_contig_static_full_kernel<32,
+                                                             kTimeAttnD / 2,
+                                                             16,
+                                                             kLinearCutileStaticM,
+                                                             kInFeatures,
+                                                             float>
+            <<<full_grid, 1>>>(
+                x_work.data_bf16(), weight_work.data_bf16(),
+                cos_work.data_f32(), sin_work.data_f32(),
+                q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                full_bf16_arith_enabled());
+    }
 
     int tail_rows = (int)(total_batch - kLinearCutileStaticM);
     if (tail_rows > 0) {
@@ -6605,10 +7347,19 @@ void linear_qkv_pair_rotary_split_contig_time(const Tensor& x,
                 (int)total_batch, kLinearCutileStaticM);
         long long tail_pairs =
             (long long)tail_rows * kQkvFusedHeads * (kTimeAttnD / 2);
-        rotary_time_split_contig_tail_inplace_kernel<<<(int)ceildiv(tail_pairs, kTile), 1>>>(
-            q.data_bf16(), k.data_bf16(),
-            cos_work.data_f32(), sin_work.data_f32(),
-            total_batch, kLinearCutileStaticM, full_bf16_arith_enabled());
+        if (trig_bf16) {
+            rotary_time_split_contig_tail_inplace_kernel<__nv_bfloat16>
+                <<<(int)ceildiv(tail_pairs, kTile), 1>>>(
+                    q.data_bf16(), k.data_bf16(),
+                    cos_work.data_bf16(), sin_work.data_bf16(),
+                    total_batch, kLinearCutileStaticM, full_bf16_arith_enabled());
+        } else {
+            rotary_time_split_contig_tail_inplace_kernel<float>
+                <<<(int)ceildiv(tail_pairs, kTile), 1>>>(
+                    q.data_bf16(), k.data_bf16(),
+                    cos_work.data_f32(), sin_work.data_f32(),
+                    total_batch, kLinearCutileStaticM, full_bf16_arith_enabled());
+        }
     }
     CUDA_CHECK(cudaGetLastError());
 }
@@ -6645,17 +7396,30 @@ void apply_rotary_time_split_contig_inplace(Tensor& q,
     long long total = batches * (long long)kTimeAttnN *
                       kQkvFusedHeads * (kTimeAttnD / 2);
     if (time_rotary_row_tile_enabled_impl()) {
-        Tensor cos_work = (cos_freqs.dtype() == DType::Float32)
-            ? cos_freqs.contiguous()
-            : cos_freqs.to_f32().contiguous();
-        Tensor sin_work = (sin_freqs.dtype() == DType::Float32)
-            ? sin_freqs.contiguous()
-            : sin_freqs.to_f32().contiguous();
         long long total_rows = batches * (long long)kTimeAttnN;
-        rotary_time_split_contig_row_tile_inplace_kernel<<<(int)total_rows, 1>>>(
-            q.data_bf16(), k.data_bf16(),
-            cos_work.data_f32(), sin_work.data_f32(),
-            total_rows, full_bf16_arith_enabled());
+        bool trig_bf16 = cos_freqs.dtype() == DType::BFloat16 &&
+                          sin_freqs.dtype() == DType::BFloat16;
+        if (trig_bf16) {
+            Tensor cos_work = cos_freqs.contiguous();
+            Tensor sin_work = sin_freqs.contiguous();
+            rotary_time_split_contig_row_tile_inplace_kernel<__nv_bfloat16>
+                <<<(int)total_rows, 1>>>(
+                    q.data_bf16(), k.data_bf16(),
+                    cos_work.data_bf16(), sin_work.data_bf16(),
+                    total_rows, full_bf16_arith_enabled());
+        } else {
+            Tensor cos_work = (cos_freqs.dtype() == DType::Float32)
+                ? cos_freqs.contiguous()
+                : cos_freqs.to_f32().contiguous();
+            Tensor sin_work = (sin_freqs.dtype() == DType::Float32)
+                ? sin_freqs.contiguous()
+                : sin_freqs.to_f32().contiguous();
+            rotary_time_split_contig_row_tile_inplace_kernel<float>
+                <<<(int)total_rows, 1>>>(
+                    q.data_bf16(), k.data_bf16(),
+                    cos_work.data_f32(), sin_work.data_f32(),
+                    total_rows, full_bf16_arith_enabled());
+        }
     } else {
         bool trig_bf16 = cos_freqs.dtype() == DType::BFloat16 &&
                           sin_freqs.dtype() == DType::BFloat16;
@@ -6757,12 +7521,16 @@ bool try_linear_qkv_freq_rotary_cutile_fused(const Tensor& x,
 
     Tensor x_work = x.contiguous();
     Tensor weight_work = weight.contiguous();
-    Tensor cos_work = (cos_freqs.dtype() == DType::Float32)
-        ? cos_freqs.contiguous()
-        : cos_freqs.to_f32().contiguous();
-    Tensor sin_work = (sin_freqs.dtype() == DType::Float32)
-        ? sin_freqs.contiguous()
-        : sin_freqs.to_f32().contiguous();
+    bool trig_bf16 = cos_freqs.dtype() == DType::BFloat16 &&
+                     sin_freqs.dtype() == DType::BFloat16;
+    Tensor cos_work = trig_bf16 ? cos_freqs.contiguous()
+                                : ((cos_freqs.dtype() == DType::Float32)
+                                       ? cos_freqs.contiguous()
+                                       : cos_freqs.to_f32().contiguous());
+    Tensor sin_work = trig_bf16 ? sin_freqs.contiguous()
+                                : ((sin_freqs.dtype() == DType::Float32)
+                                       ? sin_freqs.contiguous()
+                                       : sin_freqs.to_f32().contiguous());
 
     q = Tensor::empty({batches, heads, kFreqAttnPadN, dim_head}, DType::BFloat16);
     k = Tensor::empty({batches, heads, kFreqAttnPadN, dim_head}, DType::BFloat16);
@@ -6774,28 +7542,54 @@ bool try_linear_qkv_freq_rotary_cutile_fused(const Tensor& x,
     dim3 full_grid(kLinearCutileStaticM / kQkvFreqFusedTileM,
                    3 * kQkvFusedHeads,
                    1);
-    qkv_freq60_rotary_pad64_cutile_static_full_kernel<kQkvFreqFusedTileM,
-                                                      kPairs,
-                                                      kLinearCutileTileK,
-                                                      kLinearCutileStaticM,
-                                                      kInFeatures>
-        <<<full_grid, 1>>>(
-            x_work.data_bf16(), weight_work.data_bf16(),
-            cos_work.data_f32(), sin_work.data_f32(),
-            q.data_bf16(), k.data_bf16(), v.data_bf16(),
-            full_bf16_arith_enabled());
+    if (trig_bf16) {
+        qkv_freq60_rotary_pad64_cutile_static_full_kernel<kQkvFreqFusedTileM,
+                                                          kPairs,
+                                                          kLinearCutileTileK,
+                                                          kLinearCutileStaticM,
+                                                          kInFeatures,
+                                                          __nv_bfloat16>
+            <<<full_grid, 1>>>(
+                x_work.data_bf16(), weight_work.data_bf16(),
+                cos_work.data_bf16(), sin_work.data_bf16(),
+                q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                full_bf16_arith_enabled());
+    } else {
+        qkv_freq60_rotary_pad64_cutile_static_full_kernel<kQkvFreqFusedTileM,
+                                                          kPairs,
+                                                          kLinearCutileTileK,
+                                                          kLinearCutileStaticM,
+                                                          kInFeatures,
+                                                          float>
+            <<<full_grid, 1>>>(
+                x_work.data_bf16(), weight_work.data_bf16(),
+                cos_work.data_f32(), sin_work.data_f32(),
+                q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                full_bf16_arith_enabled());
+    }
 
     int tail_rows = (int)(total_batch - kLinearCutileStaticM);
     if (tail_rows > 0) {
         dim3 tail_grid((unsigned int)ceildiv((long long)tail_rows * kPairs, kTile),
                        3 * kQkvFusedHeads,
                        1);
-        qkv_freq60_rotary_pad64_cutile_tail_kernel<kInFeatures>
-            <<<tail_grid, 1>>>(
-                x_work.data_bf16(), weight_work.data_bf16(),
-                cos_work.data_f32(), sin_work.data_f32(),
-                q.data_bf16(), k.data_bf16(), v.data_bf16(),
-                (int)total_batch, kLinearCutileStaticM, full_bf16_arith_enabled());
+        if (trig_bf16) {
+            qkv_freq60_rotary_pad64_cutile_tail_kernel<kInFeatures, __nv_bfloat16>
+                <<<tail_grid, 1>>>(
+                    x_work.data_bf16(), weight_work.data_bf16(),
+                    cos_work.data_bf16(), sin_work.data_bf16(),
+                    q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                    (int)total_batch, kLinearCutileStaticM,
+                    full_bf16_arith_enabled());
+        } else {
+            qkv_freq60_rotary_pad64_cutile_tail_kernel<kInFeatures, float>
+                <<<tail_grid, 1>>>(
+                    x_work.data_bf16(), weight_work.data_bf16(),
+                    cos_work.data_f32(), sin_work.data_f32(),
+                    q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                    (int)total_batch, kLinearCutileStaticM,
+                    full_bf16_arith_enabled());
+        }
     }
 
     long long pad_total = batches * (long long)heads *
@@ -6841,12 +7635,16 @@ bool try_linear_qkv_freq_rotary_bkn_cutile_fused(const Tensor& x,
 
     Tensor x_work = x.contiguous();
     Tensor weight_bkn_work = weight_bkn.contiguous();
-    Tensor cos_work = (cos_freqs.dtype() == DType::Float32)
-        ? cos_freqs.contiguous()
-        : cos_freqs.to_f32().contiguous();
-    Tensor sin_work = (sin_freqs.dtype() == DType::Float32)
-        ? sin_freqs.contiguous()
-        : sin_freqs.to_f32().contiguous();
+    bool trig_bf16 = cos_freqs.dtype() == DType::BFloat16 &&
+                     sin_freqs.dtype() == DType::BFloat16;
+    Tensor cos_work = trig_bf16 ? cos_freqs.contiguous()
+                                : ((cos_freqs.dtype() == DType::Float32)
+                                       ? cos_freqs.contiguous()
+                                       : cos_freqs.to_f32().contiguous());
+    Tensor sin_work = trig_bf16 ? sin_freqs.contiguous()
+                                : ((sin_freqs.dtype() == DType::Float32)
+                                       ? sin_freqs.contiguous()
+                                       : sin_freqs.to_f32().contiguous());
 
     q = Tensor::empty({batches, heads, kFreqAttnPadN, dim_head}, DType::BFloat16);
     k = Tensor::empty({batches, heads, kFreqAttnPadN, dim_head}, DType::BFloat16);
@@ -6857,47 +7655,95 @@ bool try_linear_qkv_freq_rotary_bkn_cutile_fused(const Tensor& x,
         dim3 full_grid(kLinearCutileStaticM / 32,
                        kOutFeatures / 64,
                        1);
-        qkv_freq60_rotary_pad64_bkn_cutile_static_full_kernel<32,
-                                                              64,
-                                                              16,
-                                                              kLinearCutileStaticM,
-                                                              kOutFeatures,
-                                                              kInFeatures>
-            <<<full_grid, 1>>>(
-                x_work.data_bf16(), weight_bkn_work.data_bf16(),
-                cos_work.data_f32(), sin_work.data_f32(),
-                q.data_bf16(), k.data_bf16(), v.data_bf16(),
-                full_bf16_arith_enabled());
+        if (trig_bf16) {
+            qkv_freq60_rotary_pad64_bkn_cutile_static_full_kernel<32,
+                                                                  64,
+                                                                  16,
+                                                                  kLinearCutileStaticM,
+                                                                  kOutFeatures,
+                                                                  kInFeatures,
+                                                                  __nv_bfloat16>
+                <<<full_grid, 1>>>(
+                    x_work.data_bf16(), weight_bkn_work.data_bf16(),
+                    cos_work.data_bf16(), sin_work.data_bf16(),
+                    q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                    full_bf16_arith_enabled());
+        } else {
+            qkv_freq60_rotary_pad64_bkn_cutile_static_full_kernel<32,
+                                                                  64,
+                                                                  16,
+                                                                  kLinearCutileStaticM,
+                                                                  kOutFeatures,
+                                                                  kInFeatures,
+                                                                  float>
+                <<<full_grid, 1>>>(
+                    x_work.data_bf16(), weight_bkn_work.data_bf16(),
+                    cos_work.data_f32(), sin_work.data_f32(),
+                    q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                    full_bf16_arith_enabled());
+        }
     } else if (tile_n == 128) {
         dim3 full_grid(kLinearCutileStaticM / 32,
                        kOutFeatures / 128,
                        1);
-        qkv_freq60_rotary_pad64_bkn_cutile_static_full_kernel<32,
-                                                              128,
-                                                              16,
-                                                              kLinearCutileStaticM,
-                                                              kOutFeatures,
-                                                              kInFeatures>
-            <<<full_grid, 1>>>(
-                x_work.data_bf16(), weight_bkn_work.data_bf16(),
-                cos_work.data_f32(), sin_work.data_f32(),
-                q.data_bf16(), k.data_bf16(), v.data_bf16(),
-                full_bf16_arith_enabled());
+        if (trig_bf16) {
+            qkv_freq60_rotary_pad64_bkn_cutile_static_full_kernel<32,
+                                                                  128,
+                                                                  16,
+                                                                  kLinearCutileStaticM,
+                                                                  kOutFeatures,
+                                                                  kInFeatures,
+                                                                  __nv_bfloat16>
+                <<<full_grid, 1>>>(
+                    x_work.data_bf16(), weight_bkn_work.data_bf16(),
+                    cos_work.data_bf16(), sin_work.data_bf16(),
+                    q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                    full_bf16_arith_enabled());
+        } else {
+            qkv_freq60_rotary_pad64_bkn_cutile_static_full_kernel<32,
+                                                                  128,
+                                                                  16,
+                                                                  kLinearCutileStaticM,
+                                                                  kOutFeatures,
+                                                                  kInFeatures,
+                                                                  float>
+                <<<full_grid, 1>>>(
+                    x_work.data_bf16(), weight_bkn_work.data_bf16(),
+                    cos_work.data_f32(), sin_work.data_f32(),
+                    q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                    full_bf16_arith_enabled());
+        }
     } else {
         dim3 full_grid(kLinearCutileStaticM / 32,
                        kOutFeatures / 256,
                        1);
-        qkv_freq60_rotary_pad64_bkn_cutile_static_full_kernel<32,
-                                                              256,
-                                                              16,
-                                                              kLinearCutileStaticM,
-                                                              kOutFeatures,
-                                                              kInFeatures>
-            <<<full_grid, 1>>>(
-                x_work.data_bf16(), weight_bkn_work.data_bf16(),
-                cos_work.data_f32(), sin_work.data_f32(),
-                q.data_bf16(), k.data_bf16(), v.data_bf16(),
-                full_bf16_arith_enabled());
+        if (trig_bf16) {
+            qkv_freq60_rotary_pad64_bkn_cutile_static_full_kernel<32,
+                                                                  256,
+                                                                  16,
+                                                                  kLinearCutileStaticM,
+                                                                  kOutFeatures,
+                                                                  kInFeatures,
+                                                                  __nv_bfloat16>
+                <<<full_grid, 1>>>(
+                    x_work.data_bf16(), weight_bkn_work.data_bf16(),
+                    cos_work.data_bf16(), sin_work.data_bf16(),
+                    q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                    full_bf16_arith_enabled());
+        } else {
+            qkv_freq60_rotary_pad64_bkn_cutile_static_full_kernel<32,
+                                                                  256,
+                                                                  16,
+                                                                  kLinearCutileStaticM,
+                                                                  kOutFeatures,
+                                                                  kInFeatures,
+                                                                  float>
+                <<<full_grid, 1>>>(
+                    x_work.data_bf16(), weight_bkn_work.data_bf16(),
+                    cos_work.data_f32(), sin_work.data_f32(),
+                    q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                    full_bf16_arith_enabled());
+        }
     }
 
     int tail_rows = (int)(total_batch - kLinearCutileStaticM);
@@ -6905,12 +7751,27 @@ bool try_linear_qkv_freq_rotary_bkn_cutile_fused(const Tensor& x,
         dim3 tail_grid((unsigned int)ceildiv((long long)tail_rows * (kFreqAttnD / 2), kTile),
                        3 * kQkvFusedHeads,
                        1);
-        qkv_freq60_rotary_pad64_bkn_cutile_tail_kernel<kInFeatures, kOutFeatures>
-            <<<tail_grid, 1>>>(
-                x_work.data_bf16(), weight_bkn_work.data_bf16(),
-                cos_work.data_f32(), sin_work.data_f32(),
-                q.data_bf16(), k.data_bf16(), v.data_bf16(),
-                (int)total_batch, kLinearCutileStaticM, full_bf16_arith_enabled());
+        if (trig_bf16) {
+            qkv_freq60_rotary_pad64_bkn_cutile_tail_kernel<kInFeatures,
+                                                           kOutFeatures,
+                                                           __nv_bfloat16>
+                <<<tail_grid, 1>>>(
+                    x_work.data_bf16(), weight_bkn_work.data_bf16(),
+                    cos_work.data_bf16(), sin_work.data_bf16(),
+                    q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                    (int)total_batch, kLinearCutileStaticM,
+                    full_bf16_arith_enabled());
+        } else {
+            qkv_freq60_rotary_pad64_bkn_cutile_tail_kernel<kInFeatures,
+                                                           kOutFeatures,
+                                                           float>
+                <<<tail_grid, 1>>>(
+                    x_work.data_bf16(), weight_bkn_work.data_bf16(),
+                    cos_work.data_f32(), sin_work.data_f32(),
+                    q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                    (int)total_batch, kLinearCutileStaticM,
+                    full_bf16_arith_enabled());
+        }
     }
 
     long long pad_total = batches * (long long)heads *
@@ -7036,6 +7897,12 @@ Tensor apply_mask_and_scatter(const Tensor& stft_repr,
     if (audio_channels < 1 || total_freq % audio_channels != 0) {
         throw std::runtime_error("mbr_tile::apply_mask_and_scatter: invalid audio channel count");
     }
+    if (bands_per_freq.dtype() != DType::Float32 &&
+        bands_per_freq.dtype() != DType::BFloat16) {
+        throw std::runtime_error("mbr_tile::apply_mask_and_scatter: expected FP32/BF16 bands_per_freq");
+    }
+    Tensor bands_work = bands_per_freq.contiguous();
+    bool bands_bf16 = bands_work.dtype() == DType::BFloat16;
 
     int64_t freq_bins = total_freq / audio_channels;
     Tensor out = Tensor::zeros({batch * num_stems * audio_channels, freq_bins, frames, 2});
@@ -7043,19 +7910,39 @@ Tensor apply_mask_and_scatter(const Tensor& stft_repr,
     if (use_bf16_masks) {
         const __nv_bfloat16* mask0 = mask_work[0].data_bf16();
         const __nv_bfloat16* mask1 = (num_stems == 2) ? mask_work[1].data_bf16() : mask_work[0].data_bf16();
-        apply_mask_and_scatter_bf16_kernel<<<(int)ceildiv(total, kTile), 1>>>(
-            stft_repr.data_f32(), mask0, mask1, freq_indices.data_i64(),
-            bands_per_freq.data_f32(), out.data_f32(), total, (int)num_stems,
-            (int)total_band_freqs, (int)frames, (int)total_freq,
-            (int)audio_channels, (int)freq_bins, full_bf16_arith_enabled());
+        if (bands_bf16) {
+            apply_mask_and_scatter_bf16_kernel<__nv_bfloat16>
+                <<<(int)ceildiv(total, kTile), 1>>>(
+                    stft_repr.data_f32(), mask0, mask1, freq_indices.data_i64(),
+                    bands_work.data_bf16(), out.data_f32(), total, (int)num_stems,
+                    (int)total_band_freqs, (int)frames, (int)total_freq,
+                    (int)audio_channels, (int)freq_bins, full_bf16_arith_enabled());
+        } else {
+            apply_mask_and_scatter_bf16_kernel<float>
+                <<<(int)ceildiv(total, kTile), 1>>>(
+                    stft_repr.data_f32(), mask0, mask1, freq_indices.data_i64(),
+                    bands_work.data_f32(), out.data_f32(), total, (int)num_stems,
+                    (int)total_band_freqs, (int)frames, (int)total_freq,
+                    (int)audio_channels, (int)freq_bins, full_bf16_arith_enabled());
+        }
     } else {
         const float* mask0 = mask_work[0].data_f32();
         const float* mask1 = (num_stems == 2) ? mask_work[1].data_f32() : mask_work[0].data_f32();
-        apply_mask_and_scatter_kernel<<<(int)ceildiv(total, kTile), 1>>>(
-            stft_repr.data_f32(), mask0, mask1, freq_indices.data_i64(),
-            bands_per_freq.data_f32(), out.data_f32(), total, (int)num_stems,
-            (int)total_band_freqs, (int)frames, (int)total_freq,
-            (int)audio_channels, (int)freq_bins);
+        if (bands_bf16) {
+            apply_mask_and_scatter_kernel<__nv_bfloat16>
+                <<<(int)ceildiv(total, kTile), 1>>>(
+                    stft_repr.data_f32(), mask0, mask1, freq_indices.data_i64(),
+                    bands_work.data_bf16(), out.data_f32(), total, (int)num_stems,
+                    (int)total_band_freqs, (int)frames, (int)total_freq,
+                    (int)audio_channels, (int)freq_bins);
+        } else {
+            apply_mask_and_scatter_kernel<float>
+                <<<(int)ceildiv(total, kTile), 1>>>(
+                    stft_repr.data_f32(), mask0, mask1, freq_indices.data_i64(),
+                    bands_work.data_f32(), out.data_f32(), total, (int)num_stems,
+                    (int)total_band_freqs, (int)frames, (int)total_freq,
+                    (int)audio_channels, (int)freq_bins);
+        }
     }
     CUDA_CHECK(cudaGetLastError());
     return out;

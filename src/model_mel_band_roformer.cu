@@ -301,6 +301,9 @@ void MelBandRoformer::load(const ModelWeights& weights) {
 
     std::vector<float> nbpf_float(num_bands_per_freq_.begin(), num_bands_per_freq_.end());
     num_bands_per_freq_gpu_ = Tensor::from_cpu_f32(nbpf_float.data(), {(int64_t)total_freq});
+    if (mbr_tile::bands_per_freq_bf16_enabled()) {
+        num_bands_per_freq_gpu_ = num_bands_per_freq_gpu_.to_bf16();
+    }
 
     std::cout << "[MelBandRoformer] Using precomputed mel bands from .csm file" << std::endl;
 
@@ -794,7 +797,19 @@ Tensor MelBandRoformer::apply_mask_estimator(const Tensor& x,
         int num_linears = (int)mlp.linear_w.size();
 
         Tensor h = band_x;
+        bool used_fused_glu = false;
         for (int i = 0; i < num_linears; i++) {
+            if (i == num_linears - 1) {
+                Tensor fused_glu;
+                if (mbr_tile::try_linear_glu_last_dim_bf16_output(
+                        h, mlp.linear_w[i], mlp.linear_b[i], fused_glu)) {
+                    std::vector<int64_t> fused_shape = h.shape();
+                    fused_shape.back() = mlp.linear_w[i].size(0) / 2;
+                    h = fused_glu.reshape(fused_shape);
+                    used_fused_glu = true;
+                    break;
+                }
+            }
             h = mbr_tile::linear(h, mlp.linear_w[i], mlp.linear_b[i]);
             // Apply Tanh activation between linear layers (not after the last one)
             if (i < num_linears - 1) {
@@ -804,7 +819,9 @@ Tensor MelBandRoformer::apply_mask_estimator(const Tensor& x,
 
         // Apply GLU: splits last dim in half, applies sigmoid gate
         // h: [B, T, band_freq_dim * 2] -> [B, T, band_freq_dim]
-        h = mbr_tile::glu_last_dim(h);
+        if (!used_fused_glu) {
+            h = mbr_tile::glu_last_dim(h);
+        }
 
         band_outputs.push_back(h);
     }
@@ -881,6 +898,7 @@ Tensor MelBandRoformer::forward(const Tensor& audio) {
         skip_store.resize(cfg_.depth);
     }
 
+    mbr_tile::set_time_attention_context_depth(-1);
     for (int d = 0; d < cfg_.depth; d++) {
         // Skip connections: sum all previous
         if (cfg_.skip_connection) {
@@ -905,7 +923,9 @@ Tensor MelBandRoformer::forward(const Tensor& audio) {
         const Tensor& time_cos = time_cached.first;
         const Tensor& time_sin = time_cached.second;
 
+        mbr_tile::set_time_attention_context_depth(d);
         x = apply_transformer(x, depth_blocks_[d].time_transformer, time_cos, time_sin);
+        mbr_tile::set_time_attention_context_depth(-1);
 
         // Reshape back: [B*F, T, D] -> [B, F, T, D] -> [B, T, F, D]
         x = x.reshape({batch, (int64_t)num_bands, T, (int64_t)dim});
@@ -935,6 +955,7 @@ Tensor MelBandRoformer::forward(const Tensor& audio) {
             skip_store[d] = maybe_residual_bf16(x);
         }
     }
+    mbr_tile::set_time_attention_context_depth(-1);
 
     // ---- 9. Mask estimation ----
     // x: [B, T, num_bands, dim]

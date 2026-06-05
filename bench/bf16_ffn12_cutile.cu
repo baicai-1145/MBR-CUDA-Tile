@@ -8,6 +8,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace {
@@ -42,6 +43,7 @@ constexpr int kGeluErfPoly7L25 = 5;
 constexpr int kGeluErfPoly9L30 = 6;
 constexpr int kGeluIdentity = 7;
 constexpr int kGeluErfPoly9TinyBlend = 8;
+constexpr int kGeluErfOdd5L175 = 9;
 
 using I64InitTile = ct::tile<long long, ct::shape<kInitTile>>;
 using F32InitTile = ct::tile<float, ct::shape<kInitTile>>;
@@ -124,6 +126,7 @@ Options parse_args(int argc, char** argv) {
 		                "                  fused_h32_poly9_split2_pairh32_tk64_w1lat2,\n"
 		                "                  fused_h32_poly9_split2_pairh32_tk64_w1batched2,\n"
 		                "                  fused_h32_poly9_split2_pairh32_tk64_w2batched2,\n"
+		                "                  fused_h32_poly9_split2_pairh32_tk64_w2batched2_outnoround,\n"
 		                "                  fused_h32_poly9_split2_pairh32_tk64_hsplit2_partial,\n"
 		                "                  fused_h32_poly9_split2_pairh32_tk64_hsplit4_partial,\n"
 		                "                  fused_h32_poly9_split2_pairh32_tk64_stagedhidden,\n"
@@ -132,15 +135,46 @@ Options parse_args(int argc, char** argv) {
                 "                  fused_h32_poly9_split2_pairh32_tk64_accgroup,\n"
                 "                  fused_h32_poly9_split2_pairh32_tk64_w2lat8,\n"
                 "                  fused_h32_poly9_split2_pairh32_tk64_w2lat2,\n"
+                "                  fused_h32_poly9_split2_pairh32_tk64_w1w2lat1,\n"
+                "                  fused_h32_poly9_split2_pairh32_tk64_w1lat1_w2lat2,\n"
                 "                  fused_h32_poly9_split2_pairh32_tk64_w1w2lat2,\n"
+                "                  fused_h32_poly9_split2_pairh32_tk64_w1w2lat2_outnoround,\n"
+                "                  fused_h32_poly5_split2_pairh32_tk64_w1w2lat2_outnoround,\n"
+                "                  fused_h32_poly7_split2_pairh32_tk64_w1w2lat2_outnoround,\n"
+                "                  fused_h32_odd5_l175_split2_pairh32_tk64_w1w2lat2_outnoround,\n"
+                "                  fused_h32_poly9_tinyblend_split2_pairh32_tk64_w1w2lat2_outnoround,\n"
+                "                  fused_h32_hard_split2_pairh32_tk64_w1w2lat2_outnoround,\n"
+                "                  fused_h32_quick_split2_pairh32_tk64_w1w2lat2_outnoround,\n"
+                "                  fused_h32_identity_split2_pairh32_tk64_w1w2lat2_outnoround,\n"
+                "                  fused_h32_poly9_split2_pairh32_tk64_w1w2lat2_outnoround_bf16gelu,\n"
+                "                  fused_h32_poly9_split2_pairh32_tk64_w1w2lat2_outnoround_fullbf16,\n"
+                "                  fused_h32_poly9_split2_pairh32_tk64_w1w2lat2_outnoround_roundhidden,\n"
+                "                  fused_h32_poly9_split2_pairh32_tk64_w1w2lat2_outnoround_roundout,\n"
+                "                  fused_h32_poly9_split2_pairh32_tk64_w1w2lat2_outnoround_w2accbf16,\n"
+                "                  fused_h32_poly9_split2_pairh32_tk64_w1w2lat2_outnoround_storelat2,\n"
+                "                  fused_h32_poly9_split2_pairh32_tk64_w1w2lat2_outnoround_w2pregelu,\n"
+                "                  fused_h32_poly9_split2_pairh32_tk64_w1w2lat2_outnoround_bcastbias,\n"
+                "                  fused_h32_poly9_split2_pairh32_tk64_w1w2lat2_outnoround_cachebias,\n"
+                "                  fused_h32_poly9_split2_pairh32_tk64_alat2_w2lat2_outnoround,\n"
+                "                  fused_h32_poly9_split2_pairh32_tk64_w1weightlat2_w2lat2_outnoround,\n"
+                "                  fused_h32_poly9_split2_pairh32_tk64_alat2_w2lat2,\n"
+                "                  fused_h32_poly9_split2_pairh32_tk64_w1weightlat2_w2lat2,\n"
+                "                  fused_h32_poly9_split2_pairh32_tk64_w1lat2_w2lat0,\n"
+                "                  fused_h32_poly9_split2_pairh32_tk64_storelat2,\n"
+                "                  fused_h32_poly9_split2_pairh32_tk64_w1w2lat2_storelat2,\n"
+                "                  fused_h32_poly9_split2_pairh32_tk64_w1lat2_w2lat1,\n"
+                "                  fused_h32_poly9_split2_pairh32_tk64_w1w2lat3,\n"
+                "                  fused_h32_poly9_split2_pairh32_tk64_w1w2lat2_accgroup,\n"
                 "                  fused_h32_poly9_split2_pairh32_tk64_w2temp,\n"
                 "                  fused_h32_poly9_split2_pairh32_tk64_w2splitspan,\n"
                 "                  fused_h32_poly9_split2_pairh32_tk64_w2manual,\n"
                 "                  fused_h32_poly9_split2_pairh32_tk64_occ2,\n"
                 "                  fused_h16_poly9_split2_pairh16_tk64,\n"
+                "                  fused_h16_poly9_split2_pairh16_tk64_w1w2lat2_outnoround,\n"
                 "                  fused_h64_poly9_split2_pairh64_tk64,\n"
                 "                  fused_m16_h32_poly9_split2_pairh32,\n"
                 "                  fused_m16_h32_poly9_split2_pairh32_tk64,\n"
+                "                  fused_m16_h32_poly9_split2_pairh32_tk64_w1w2lat2_outnoround,\n"
                 "                  fused_h32_poly9_tinyblend_split2_pairh32,\n"
                 "                  fused_h32_poly9_tinyblend_split2_pairh32_tk64,\n"
                 "                  fused_h32_identity_split2_pairh32,\n"
@@ -248,6 +282,19 @@ static __tile__ auto gelu_erf_poly7_l25(TileT x) {
 }
 
 template <typename TileT>
+static __tile__ auto gelu_erf_odd5_l175(TileT x) {
+    auto zero = x * 0.0f;
+    auto one = zero + 1.0f;
+    auto ax = ct::abs(x);
+    auto z = ax * ax;
+    auto p = (0.04752145079070458f * z - 0.32203058651122096f) * z +
+             1.1212825366624732f;
+    auto erf_abs = ct::min(ct::max(ax * p, zero), one);
+    auto erf_approx = ct::select(x < zero, zero - erf_abs, erf_abs);
+    return 0.5f * x * (one + erf_approx);
+}
+
+template <typename TileT>
 static __tile__ auto gelu_erf_poly9_l30(TileT x) {
     auto zero = x * 0.0f;
     auto one = zero + 1.0f;
@@ -279,6 +326,8 @@ static __tile__ auto gelu_selected(TileT x) {
         return gelu_erf_poly9_tinyblend_l30(x);
     } else if constexpr (GeluMode == kGeluErfPoly7L25) {
         return gelu_erf_poly7_l25(x);
+    } else if constexpr (GeluMode == kGeluErfOdd5L175) {
+        return gelu_erf_odd5_l175(x);
     } else if constexpr (GeluMode == kGeluErfPoly5L25) {
         return gelu_erf_poly5_l25(x);
     } else if constexpr (GeluMode == kGeluTanh) {
@@ -636,8 +685,21 @@ template <int TM,
 	          bool W2TempLoads = false,
 	          bool W1BatchedMMA = false,
 	          bool W2BatchedMMA = false,
-	          int MemoryLatency = 8>
-static __tile__ void ffn12_fused_split2_pairh32_bf16_body(
+	          int MemoryLatency = 8,
+		          int W2MemoryLatency = MemoryLatency,
+		          bool StoreLatencyHint = false,
+		          int StoreMemoryLatency = MemoryLatency,
+			          bool ALoadLatencyHint = W1LatencyHint,
+			          bool W1WeightLatencyHint = W1LatencyHint,
+			          bool BroadcastBiasLoads = false,
+			          bool CacheBiasOffsets = false,
+			          bool PreloadW2BeforeGelu = false,
+			          bool FullBF16Epilogue = false,
+			          bool RoundHiddenBiasBF16 = FullBF16Epilogue,
+			          bool FullBF16Gelu = FullBF16Epilogue,
+			          bool RoundOutputBiasBF16 = FullBF16Epilogue,
+			          bool RoundW2AccBF16 = false>
+	static __tile__ void ffn12_fused_split2_pairh32_bf16_body(
     const __nv_bfloat16* __restrict__ a,
     const __nv_bfloat16* __restrict__ w1_nt,
     const __nv_bfloat16* __restrict__ b1,
@@ -658,8 +720,17 @@ static __tile__ void ffn12_fused_split2_pairh32_bf16_body(
     using W2PairTile = ct::tile<__nv_bfloat16, ct::shape<2, THidden, OutHalf>>;
     using IndexHiddenTile = ct::tile<IndexElement, ct::shape<TM, THidden>>;
     using IndexOutTile = ct::tile<IndexElement, ct::shape<TM, OutHalf>>;
-    static_assert(!W2BatchedMMA || (!W2LatencyHint && !GroupOutputOrder &&
-                                    !StagedHiddenEpilogue && !W2TempLoads));
+    using BiasHiddenIndexTile =
+        std::conditional_t<BroadcastBiasLoads,
+                           ct::tile<IndexElement, ct::shape<1, THidden>>,
+                           IndexHiddenTile>;
+	    using BiasOutIndexTile =
+	        std::conditional_t<BroadcastBiasLoads,
+	                           ct::tile<IndexElement, ct::shape<1, OutHalf>>,
+	                           IndexOutTile>;
+	    static_assert(!PreloadW2BeforeGelu || (!StagedHiddenEpilogue && !W2BatchedMMA));
+	    static_assert(!W2BatchedMMA || (!W2LatencyHint && !GroupOutputOrder &&
+	                                    !StagedHiddenEpilogue && !W2TempLoads));
 
     a = ct::assume_aligned(a, 16_ic);
     w1_nt = ct::assume_aligned(w1_nt, 16_ic);
@@ -692,7 +763,8 @@ static __tile__ void ffn12_fused_split2_pairh32_bf16_body(
     auto out_acc0 = ct::full<OutAccTile>(0.0f);
     auto out_acc1 = ct::full<OutAccTile>(0.0f);
     auto out_pair_acc = ct::full<OutPairAccTile>(0.0f);
-    IndexHiddenTile hidden_local = ct::iota<IndexHiddenTile>();
+    BiasHiddenIndexTile hidden_local = ct::iota<BiasHiddenIndexTile>();
+    auto hidden_col_offsets = hidden_local % THidden;
     for (auto hidden_pair : ct::irange(std::size_t{0},
                                        std::size_t{kHidden / (2 * THidden)})) {
         auto hidden_tile0 = hidden_pair * 2;
@@ -719,16 +791,25 @@ static __tile__ void ffn12_fused_split2_pairh32_bf16_body(
                 ct::shape<TM, THidden>{});
         } else {
             for (auto kk : ct::irange(std::size_t{0}, std::size_t{kIn / TK})) {
-                if constexpr (W1LatencyHint) {
+                if constexpr (W1LatencyHint || ALoadLatencyHint || W1WeightLatencyHint) {
                     ATile a_tile;
                     W1Tile w1_0;
                     W1Tile w1_1;
-                    [[cutile::hint(0, latency=MemoryLatency)]]
-                    a_tile = a_view.load(tile_m, kk);
-                    [[cutile::hint(0, latency=MemoryLatency)]]
-                    w1_0 = w1_view.load(kk, hidden_tile0);
-                    [[cutile::hint(0, latency=MemoryLatency)]]
-                    w1_1 = w1_view.load(kk, hidden_tile1);
+                    if constexpr (W1LatencyHint || ALoadLatencyHint) {
+                        [[cutile::hint(0, latency=MemoryLatency)]]
+                        a_tile = a_view.load(tile_m, kk);
+                    } else {
+                        a_tile = a_view.load(tile_m, kk);
+                    }
+                    if constexpr (W1LatencyHint || W1WeightLatencyHint) {
+                        [[cutile::hint(0, latency=MemoryLatency)]]
+                        w1_0 = w1_view.load(kk, hidden_tile0);
+                        [[cutile::hint(0, latency=MemoryLatency)]]
+                        w1_1 = w1_view.load(kk, hidden_tile1);
+                    } else {
+                        w1_0 = w1_view.load(kk, hidden_tile0);
+                        w1_1 = w1_view.load(kk, hidden_tile1);
+                    }
                     hidden_acc0 = ct::mma(a_tile, w1_0, hidden_acc0);
                     hidden_acc1 = ct::mma(a_tile, w1_1, hidden_acc1);
                 } else {
@@ -739,10 +820,12 @@ static __tile__ void ffn12_fused_split2_pairh32_bf16_body(
             }
         }
 
-        auto hidden_cols0 =
-            static_cast<IndexElement>(hidden_tile0) * THidden + (hidden_local % THidden);
-        auto hidden_cols1 =
-            static_cast<IndexElement>(hidden_tile1) * THidden + (hidden_local % THidden);
+        auto hidden_cols0 = static_cast<IndexElement>(hidden_tile0) * THidden +
+                            (CacheBiasOffsets ? hidden_col_offsets
+                                              : (hidden_local % THidden));
+        auto hidden_cols1 = static_cast<IndexElement>(hidden_tile1) * THidden +
+                            (CacheBiasOffsets ? hidden_col_offsets
+                                              : (hidden_local % THidden));
         if constexpr (StagedHiddenEpilogue) {
             static_assert(!GroupOutputOrder);
             auto hidden_value0 = bf16_round_if<RoundHiddenAcc>(hidden_acc0);
@@ -758,9 +841,9 @@ static __tile__ void ffn12_fused_split2_pairh32_bf16_body(
                 W2Tile w2_00;
                 W2Tile w2_01;
                 if constexpr (W2LatencyHint) {
-                    [[cutile::hint(0, latency=MemoryLatency)]]
+                    [[cutile::hint(0, latency=W2MemoryLatency)]]
                     w2_00 = w2_view.load(hidden_tile0, 0);
-                    [[cutile::hint(0, latency=MemoryLatency)]]
+                    [[cutile::hint(0, latency=W2MemoryLatency)]]
                     w2_01 = w2_view.load(hidden_tile0, 1);
                 } else {
                     w2_00 = w2_view.load(hidden_tile0, 0);
@@ -772,6 +855,8 @@ static __tile__ void ffn12_fused_split2_pairh32_bf16_body(
                 out_acc0 = ct::mma(hidden_bf16_0, w2_view.load(hidden_tile0, 0), out_acc0);
                 out_acc1 = ct::mma(hidden_bf16_0, w2_view.load(hidden_tile0, 1), out_acc1);
             }
+            out_acc0 = bf16_round_if<RoundW2AccBF16>(out_acc0);
+            out_acc1 = bf16_round_if<RoundW2AccBF16>(out_acc1);
 
             auto hidden_value1 = bf16_round_if<RoundHiddenAcc>(hidden_acc1);
             if constexpr (UseHiddenBias) {
@@ -786,9 +871,9 @@ static __tile__ void ffn12_fused_split2_pairh32_bf16_body(
                 W2Tile w2_10;
                 W2Tile w2_11;
                 if constexpr (W2LatencyHint) {
-                    [[cutile::hint(0, latency=MemoryLatency)]]
+                    [[cutile::hint(0, latency=W2MemoryLatency)]]
                     w2_10 = w2_view.load(hidden_tile1, 0);
-                    [[cutile::hint(0, latency=MemoryLatency)]]
+                    [[cutile::hint(0, latency=W2MemoryLatency)]]
                     w2_11 = w2_view.load(hidden_tile1, 1);
                 } else {
                     w2_10 = w2_view.load(hidden_tile1, 0);
@@ -800,7 +885,30 @@ static __tile__ void ffn12_fused_split2_pairh32_bf16_body(
                 out_acc0 = ct::mma(hidden_bf16_1, w2_view.load(hidden_tile1, 0), out_acc0);
                 out_acc1 = ct::mma(hidden_bf16_1, w2_view.load(hidden_tile1, 1), out_acc1);
             }
+            out_acc0 = bf16_round_if<RoundW2AccBF16>(out_acc0);
+            out_acc1 = bf16_round_if<RoundW2AccBF16>(out_acc1);
         } else {
+            W2Tile pre_w2_00;
+            W2Tile pre_w2_01;
+            W2Tile pre_w2_10;
+            W2Tile pre_w2_11;
+            if constexpr (PreloadW2BeforeGelu) {
+                if constexpr (W2LatencyHint) {
+                    [[cutile::hint(0, latency=W2MemoryLatency)]]
+                    pre_w2_00 = w2_view.load(hidden_tile0, 0);
+                    [[cutile::hint(0, latency=W2MemoryLatency)]]
+                    pre_w2_01 = w2_view.load(hidden_tile0, 1);
+                    [[cutile::hint(0, latency=W2MemoryLatency)]]
+                    pre_w2_10 = w2_view.load(hidden_tile1, 0);
+                    [[cutile::hint(0, latency=W2MemoryLatency)]]
+                    pre_w2_11 = w2_view.load(hidden_tile1, 1);
+                } else {
+                    pre_w2_00 = w2_view.load(hidden_tile0, 0);
+                    pre_w2_01 = w2_view.load(hidden_tile0, 1);
+                    pre_w2_10 = w2_view.load(hidden_tile1, 0);
+                    pre_w2_11 = w2_view.load(hidden_tile1, 1);
+                }
+            }
             auto hidden_value0 = bf16_round_if<RoundHiddenAcc>(hidden_acc0);
             auto hidden_value1 = bf16_round_if<RoundHiddenAcc>(hidden_acc1);
             if constexpr (UseHiddenBias) {
@@ -812,8 +920,17 @@ static __tile__ void ffn12_fused_split2_pairh32_bf16_body(
                 (void)hidden_cols0;
                 (void)hidden_cols1;
             }
-            hidden_value0 = gelu_selected<GeluMode>(hidden_value0);
-            hidden_value1 = gelu_selected<GeluMode>(hidden_value1);
+            if constexpr (RoundHiddenBiasBF16) {
+                hidden_value0 = bf16_round(hidden_value0);
+                hidden_value1 = bf16_round(hidden_value1);
+            }
+            if constexpr (FullBF16Gelu) {
+                hidden_value0 = gelu_selected_source_style<GeluMode, true>(hidden_value0);
+                hidden_value1 = gelu_selected_source_style<GeluMode, true>(hidden_value1);
+            } else {
+                hidden_value0 = gelu_selected<GeluMode>(hidden_value0);
+                hidden_value1 = gelu_selected<GeluMode>(hidden_value1);
+            }
             auto hidden_bf16_0 = ct::element_cast<__nv_bfloat16>(hidden_value0);
             auto hidden_bf16_1 = ct::element_cast<__nv_bfloat16>(hidden_value1);
             if constexpr (W2BatchedMMA) {
@@ -830,20 +947,31 @@ static __tile__ void ffn12_fused_split2_pairh32_bf16_body(
                                w2_view.load(hidden_tile1, 1)),
                     ct::shape<2, THidden, OutHalf>{});
                 out_pair_acc = ct::mma(hidden_pair0, w2_pair0, out_pair_acc);
+                out_pair_acc = bf16_round_if<RoundW2AccBF16>(out_pair_acc);
                 out_pair_acc = ct::mma(hidden_pair1, w2_pair1, out_pair_acc);
+                out_pair_acc = bf16_round_if<RoundW2AccBF16>(out_pair_acc);
+            } else if constexpr (PreloadW2BeforeGelu) {
+                out_acc0 = ct::mma(hidden_bf16_0, pre_w2_00, out_acc0);
+                out_acc1 = ct::mma(hidden_bf16_0, pre_w2_01, out_acc1);
+                out_acc0 = bf16_round_if<RoundW2AccBF16>(out_acc0);
+                out_acc1 = bf16_round_if<RoundW2AccBF16>(out_acc1);
+                out_acc0 = ct::mma(hidden_bf16_1, pre_w2_10, out_acc0);
+                out_acc1 = ct::mma(hidden_bf16_1, pre_w2_11, out_acc1);
+                out_acc0 = bf16_round_if<RoundW2AccBF16>(out_acc0);
+                out_acc1 = bf16_round_if<RoundW2AccBF16>(out_acc1);
             } else if constexpr (W2LatencyHint || W2TempLoads) {
                 W2Tile w2_00;
                 W2Tile w2_01;
                 W2Tile w2_10;
                 W2Tile w2_11;
                 if constexpr (W2LatencyHint) {
-                    [[cutile::hint(0, latency=MemoryLatency)]]
+                    [[cutile::hint(0, latency=W2MemoryLatency)]]
                     w2_00 = w2_view.load(hidden_tile0, 0);
-                    [[cutile::hint(0, latency=MemoryLatency)]]
+                    [[cutile::hint(0, latency=W2MemoryLatency)]]
                     w2_01 = w2_view.load(hidden_tile0, 1);
-                    [[cutile::hint(0, latency=MemoryLatency)]]
+                    [[cutile::hint(0, latency=W2MemoryLatency)]]
                     w2_10 = w2_view.load(hidden_tile1, 0);
-                    [[cutile::hint(0, latency=MemoryLatency)]]
+                    [[cutile::hint(0, latency=W2MemoryLatency)]]
                     w2_11 = w2_view.load(hidden_tile1, 1);
                 } else {
                     w2_00 = w2_view.load(hidden_tile0, 0);
@@ -853,18 +981,30 @@ static __tile__ void ffn12_fused_split2_pairh32_bf16_body(
                 }
                 out_acc0 = ct::mma(hidden_bf16_0, w2_00, out_acc0);
                 out_acc1 = ct::mma(hidden_bf16_0, w2_01, out_acc1);
+                out_acc0 = bf16_round_if<RoundW2AccBF16>(out_acc0);
+                out_acc1 = bf16_round_if<RoundW2AccBF16>(out_acc1);
                 out_acc0 = ct::mma(hidden_bf16_1, w2_10, out_acc0);
                 out_acc1 = ct::mma(hidden_bf16_1, w2_11, out_acc1);
+                out_acc0 = bf16_round_if<RoundW2AccBF16>(out_acc0);
+                out_acc1 = bf16_round_if<RoundW2AccBF16>(out_acc1);
             } else if constexpr (GroupOutputOrder) {
                 out_acc0 = ct::mma(hidden_bf16_0, w2_view.load(hidden_tile0, 0), out_acc0);
+                out_acc0 = bf16_round_if<RoundW2AccBF16>(out_acc0);
                 out_acc0 = ct::mma(hidden_bf16_1, w2_view.load(hidden_tile1, 0), out_acc0);
+                out_acc0 = bf16_round_if<RoundW2AccBF16>(out_acc0);
                 out_acc1 = ct::mma(hidden_bf16_0, w2_view.load(hidden_tile0, 1), out_acc1);
+                out_acc1 = bf16_round_if<RoundW2AccBF16>(out_acc1);
                 out_acc1 = ct::mma(hidden_bf16_1, w2_view.load(hidden_tile1, 1), out_acc1);
+                out_acc1 = bf16_round_if<RoundW2AccBF16>(out_acc1);
             } else {
                 out_acc0 = ct::mma(hidden_bf16_0, w2_view.load(hidden_tile0, 0), out_acc0);
                 out_acc1 = ct::mma(hidden_bf16_0, w2_view.load(hidden_tile0, 1), out_acc1);
+                out_acc0 = bf16_round_if<RoundW2AccBF16>(out_acc0);
+                out_acc1 = bf16_round_if<RoundW2AccBF16>(out_acc1);
                 out_acc0 = ct::mma(hidden_bf16_1, w2_view.load(hidden_tile1, 0), out_acc0);
                 out_acc1 = ct::mma(hidden_bf16_1, w2_view.load(hidden_tile1, 1), out_acc1);
+                out_acc0 = bf16_round_if<RoundW2AccBF16>(out_acc0);
+                out_acc1 = bf16_round_if<RoundW2AccBF16>(out_acc1);
             }
         }
     }
@@ -877,8 +1017,9 @@ static __tile__ void ffn12_fused_split2_pairh32_bf16_body(
             ct::extract(out_pair_acc, ct::shape<1, TM, OutHalf>{}, 1, 0, 0),
             ct::shape<TM, OutHalf>{});
     }
-    IndexOutTile out_local = ct::iota<IndexOutTile>();
-    auto out_cols = out_local % OutHalf;
+    BiasOutIndexTile out_local = ct::iota<BiasOutIndexTile>();
+    auto out_col_offsets = out_local % OutHalf;
+    auto out_cols = CacheBiasOffsets ? out_col_offsets : (out_local % OutHalf);
     auto value0 = bf16_round_if<RoundOutAcc>(out_acc0);
     auto value1 = bf16_round_if<RoundOutAcc>(out_acc1);
     if constexpr (UseOutBias) {
@@ -889,8 +1030,19 @@ static __tile__ void ffn12_fused_split2_pairh32_bf16_body(
     } else {
         (void)out_cols;
     }
-    out_view.store(ct::element_cast<__nv_bfloat16>(value0), tile_m, 0);
-    out_view.store(ct::element_cast<__nv_bfloat16>(value1), tile_m, 1);
+    if constexpr (RoundOutputBiasBF16) {
+        value0 = bf16_round(value0);
+        value1 = bf16_round(value1);
+    }
+    if constexpr (StoreLatencyHint) {
+        [[cutile::hint(0, latency=StoreMemoryLatency)]]
+        out_view.store(ct::element_cast<__nv_bfloat16>(value0), tile_m, 0);
+        [[cutile::hint(0, latency=StoreMemoryLatency)]]
+        out_view.store(ct::element_cast<__nv_bfloat16>(value1), tile_m, 1);
+    } else {
+        out_view.store(ct::element_cast<__nv_bfloat16>(value0), tile_m, 0);
+        out_view.store(ct::element_cast<__nv_bfloat16>(value1), tile_m, 1);
+    }
 }
 
 template <int TM,
@@ -909,8 +1061,21 @@ template <int TM,
 	          bool W2TempLoads = false,
 	          bool W1BatchedMMA = false,
 	          bool W2BatchedMMA = false,
-	          int MemoryLatency = 8>
-__tile_global__ void ffn12_fused_split2_pairh32_bf16_kernel(
+	          int MemoryLatency = 8,
+		          int W2MemoryLatency = MemoryLatency,
+		          bool StoreLatencyHint = false,
+		          int StoreMemoryLatency = MemoryLatency,
+			          bool ALoadLatencyHint = W1LatencyHint,
+			          bool W1WeightLatencyHint = W1LatencyHint,
+			          bool BroadcastBiasLoads = false,
+			          bool CacheBiasOffsets = false,
+			          bool PreloadW2BeforeGelu = false,
+			          bool FullBF16Epilogue = false,
+			          bool RoundHiddenBiasBF16 = FullBF16Epilogue,
+			          bool FullBF16Gelu = FullBF16Epilogue,
+			          bool RoundOutputBiasBF16 = FullBF16Epilogue,
+			          bool RoundW2AccBF16 = false>
+	__tile_global__ void ffn12_fused_split2_pairh32_bf16_kernel(
     const __nv_bfloat16* __restrict__ a,
     const __nv_bfloat16* __restrict__ w1_nt,
     const __nv_bfloat16* __restrict__ b1,
@@ -921,8 +1086,12 @@ __tile_global__ void ffn12_fused_split2_pairh32_bf16_kernel(
         <TM, GeluMode, TK, THidden, W2LatencyHint, GroupOutputOrder,
 	         UseHiddenBias, UseOutBias, W1LatencyHint, RoundHiddenAcc, RoundOutAcc,
 	         IndexElement, StagedHiddenEpilogue, W2TempLoads, W1BatchedMMA,
-	         W2BatchedMMA, MemoryLatency>(
-	        a, w1_nt, b1, w2_nt, b2, out);
+		         W2BatchedMMA, MemoryLatency, W2MemoryLatency, StoreLatencyHint,
+		         StoreMemoryLatency, ALoadLatencyHint, W1WeightLatencyHint,
+		         BroadcastBiasLoads, CacheBiasOffsets, PreloadW2BeforeGelu,
+		         FullBF16Epilogue, RoundHiddenBiasBF16, FullBF16Gelu,
+		         RoundOutputBiasBF16, RoundW2AccBF16>(
+		        a, w1_nt, b1, w2_nt, b2, out);
 }
 
 template <int TM,
@@ -941,9 +1110,22 @@ template <int TM,
 	          bool W2TempLoads = false,
 	          bool W1BatchedMMA = false,
 	          bool W2BatchedMMA = false,
-	          int MemoryLatency = 8>
-[[cutile::hint(860, occupancy=2)]]
-__tile_global__ void ffn12_fused_split2_pairh32_occ2_bf16_kernel(
+	          int MemoryLatency = 8,
+		          int W2MemoryLatency = MemoryLatency,
+		          bool StoreLatencyHint = false,
+		          int StoreMemoryLatency = MemoryLatency,
+			          bool ALoadLatencyHint = W1LatencyHint,
+			          bool W1WeightLatencyHint = W1LatencyHint,
+			          bool BroadcastBiasLoads = false,
+			          bool CacheBiasOffsets = false,
+			          bool PreloadW2BeforeGelu = false,
+			          bool FullBF16Epilogue = false,
+			          bool RoundHiddenBiasBF16 = FullBF16Epilogue,
+			          bool FullBF16Gelu = FullBF16Epilogue,
+			          bool RoundOutputBiasBF16 = FullBF16Epilogue,
+			          bool RoundW2AccBF16 = false>
+	[[cutile::hint(860, occupancy=2)]]
+	__tile_global__ void ffn12_fused_split2_pairh32_occ2_bf16_kernel(
     const __nv_bfloat16* __restrict__ a,
     const __nv_bfloat16* __restrict__ w1_nt,
     const __nv_bfloat16* __restrict__ b1,
@@ -954,8 +1136,12 @@ __tile_global__ void ffn12_fused_split2_pairh32_occ2_bf16_kernel(
         <TM, GeluMode, TK, THidden, W2LatencyHint, GroupOutputOrder,
 	         UseHiddenBias, UseOutBias, W1LatencyHint, RoundHiddenAcc, RoundOutAcc,
 	         IndexElement, StagedHiddenEpilogue, W2TempLoads, W1BatchedMMA,
-	         W2BatchedMMA, MemoryLatency>(
-	        a, w1_nt, b1, w2_nt, b2, out);
+		         W2BatchedMMA, MemoryLatency, W2MemoryLatency, StoreLatencyHint,
+		         StoreMemoryLatency, ALoadLatencyHint, W1WeightLatencyHint,
+		         BroadcastBiasLoads, CacheBiasOffsets, PreloadW2BeforeGelu,
+		         FullBF16Epilogue, RoundHiddenBiasBF16, FullBF16Gelu,
+		         RoundOutputBiasBF16, RoundW2AccBF16>(
+		        a, w1_nt, b1, w2_nt, b2, out);
 }
 
 #ifdef CUDASEP_FFN12_CANDIDATES_ONLY
@@ -2184,8 +2370,21 @@ template <int TM,
 	          bool W2TempLoads = false,
 	          bool W1BatchedMMA = false,
 	          bool W2BatchedMMA = false,
-	          int MemoryLatency = 8>
-void launch_fused_split2_pairh32(const __nv_bfloat16* d_a,
+	          int MemoryLatency = 8,
+		          int W2MemoryLatency = MemoryLatency,
+		          bool StoreLatencyHint = false,
+		          int StoreMemoryLatency = MemoryLatency,
+			          bool ALoadLatencyHint = W1LatencyHint,
+			          bool W1WeightLatencyHint = W1LatencyHint,
+			          bool BroadcastBiasLoads = false,
+			          bool CacheBiasOffsets = false,
+			          bool PreloadW2BeforeGelu = false,
+			          bool FullBF16Epilogue = false,
+			          bool RoundHiddenBiasBF16 = FullBF16Epilogue,
+			          bool FullBF16Gelu = FullBF16Epilogue,
+			          bool RoundOutputBiasBF16 = FullBF16Epilogue,
+			          bool RoundW2AccBF16 = false>
+	void launch_fused_split2_pairh32(const __nv_bfloat16* d_a,
                                  const __nv_bfloat16* d_w1,
                                  const __nv_bfloat16* d_b1,
                                  const __nv_bfloat16* d_w2,
@@ -2196,8 +2395,12 @@ void launch_fused_split2_pairh32(const __nv_bfloat16* d_a,
         <TM, GeluMode, TK, THidden, W2LatencyHint, GroupOutputOrder,
 	         UseHiddenBias, UseOutBias, W1LatencyHint, RoundHiddenAcc, RoundOutAcc,
 	         IndexElement, StagedHiddenEpilogue, W2TempLoads, W1BatchedMMA,
-	         W2BatchedMMA, MemoryLatency>
-	        <<<grid, 1>>>(d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+		         W2BatchedMMA, MemoryLatency, W2MemoryLatency, StoreLatencyHint,
+		         StoreMemoryLatency, ALoadLatencyHint, W1WeightLatencyHint,
+		         BroadcastBiasLoads, CacheBiasOffsets, PreloadW2BeforeGelu,
+		         FullBF16Epilogue, RoundHiddenBiasBF16, FullBF16Gelu,
+		         RoundOutputBiasBF16, RoundW2AccBF16>
+		        <<<grid, 1>>>(d_a, d_w1, d_b1, d_w2, d_b2, d_out);
 }
 
 template <int TM,
@@ -2216,8 +2419,21 @@ template <int TM,
 	          bool W2TempLoads = false,
 	          bool W1BatchedMMA = false,
 	          bool W2BatchedMMA = false,
-	          int MemoryLatency = 8>
-void launch_fused_split2_pairh32_occ2(const __nv_bfloat16* d_a,
+	          int MemoryLatency = 8,
+		          int W2MemoryLatency = MemoryLatency,
+		          bool StoreLatencyHint = false,
+		          int StoreMemoryLatency = MemoryLatency,
+			          bool ALoadLatencyHint = W1LatencyHint,
+			          bool W1WeightLatencyHint = W1LatencyHint,
+			          bool BroadcastBiasLoads = false,
+			          bool CacheBiasOffsets = false,
+			          bool PreloadW2BeforeGelu = false,
+			          bool FullBF16Epilogue = false,
+			          bool RoundHiddenBiasBF16 = FullBF16Epilogue,
+			          bool FullBF16Gelu = FullBF16Epilogue,
+			          bool RoundOutputBiasBF16 = FullBF16Epilogue,
+			          bool RoundW2AccBF16 = false>
+	void launch_fused_split2_pairh32_occ2(const __nv_bfloat16* d_a,
                                       const __nv_bfloat16* d_w1,
                                       const __nv_bfloat16* d_b1,
                                       const __nv_bfloat16* d_w2,
@@ -2228,8 +2444,12 @@ void launch_fused_split2_pairh32_occ2(const __nv_bfloat16* d_a,
         <TM, GeluMode, TK, THidden, W2LatencyHint, GroupOutputOrder,
 	         UseHiddenBias, UseOutBias, W1LatencyHint, RoundHiddenAcc, RoundOutAcc,
 	         IndexElement, StagedHiddenEpilogue, W2TempLoads, W1BatchedMMA,
-	         W2BatchedMMA, MemoryLatency>
-	        <<<grid, 1>>>(d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+		         W2BatchedMMA, MemoryLatency, W2MemoryLatency, StoreLatencyHint,
+		         StoreMemoryLatency, ALoadLatencyHint, W1WeightLatencyHint,
+		         BroadcastBiasLoads, CacheBiasOffsets, PreloadW2BeforeGelu,
+		         FullBF16Epilogue, RoundHiddenBiasBF16, FullBF16Gelu,
+		         RoundOutputBiasBF16, RoundW2AccBF16>
+		        <<<grid, 1>>>(d_a, d_w1, d_b1, d_w2, d_b2, d_out);
 }
 
 #ifdef CUDASEP_FFN12_CANDIDATES_ONLY
@@ -2750,9 +2970,20 @@ int main(int argc, char** argv) {
                             launch_fused_split2_pairh32
                                 <32, kGeluErfPoly9L30, 64, 32, false, false, true, true,
                                  false, true, true, long long, false, false, false, true>(
-	                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
-	                        });
-	        }
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_w2batched2_outnoround")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_w2batched2_outnoround",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, false, false, true, true,
+                                 false, true, false, long long, false, false, false, true>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
         if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_hsplit2_partial")) {
             run_variant("fused_h32_poly9_split2_pairh32_tk64_hsplit2_partial",
                         32, 256, 1, 2, opts,
@@ -2817,12 +3048,361 @@ int main(int argc, char** argv) {
                                     d_a, d_w1, d_b1, d_w2, d_b2, d_out);
                         });
         }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_w1w2lat1")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_w1w2lat1", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, true, false, true, true,
+                                 true, true, true, long long, false, false, false, false, 1>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_w1lat1_w2lat2")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_w1lat1_w2lat2",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, true, false, true, true,
+                                 true, true, true, long long, false, false, false, false, 1, 2>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
         if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_w1w2lat2")) {
             run_variant("fused_h32_poly9_split2_pairh32_tk64_w1w2lat2", 32, 256, 1, 1, opts,
                         d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
                         [&] {
                             launch_fused_split2_pairh32
                                 <32, kGeluErfPoly9L30, 64, 32, true, false, true, true,
+                                 true, true, true, long long, false, false, false, false, 2>(
+	                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_w1w2lat2_outnoround")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_w1w2lat2_outnoround",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, true, false, true, true,
+                                 true, true, false, long long, false, false, false, false, 2>(
+			                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_odd5_l175_split2_pairh32_tk64_w1w2lat2_outnoround")) {
+            run_variant("fused_h32_odd5_l175_split2_pairh32_tk64_w1w2lat2_outnoround",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfOdd5L175, 64, 32, true, false, true, true,
+                                 true, true, false, long long, false, false, false, false, 2>(
+                                            d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly5_split2_pairh32_tk64_w1w2lat2_outnoround")) {
+            run_variant("fused_h32_poly5_split2_pairh32_tk64_w1w2lat2_outnoround",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly5L25, 64, 32, true, false, true, true,
+                                 true, true, false, long long, false, false, false, false, 2>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly7_split2_pairh32_tk64_w1w2lat2_outnoround")) {
+            run_variant("fused_h32_poly7_split2_pairh32_tk64_w1w2lat2_outnoround",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly7L25, 64, 32, true, false, true, true,
+                                 true, true, false, long long, false, false, false, false, 2>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts,
+                       "fused_h32_poly9_tinyblend_split2_pairh32_tk64_w1w2lat2_outnoround")) {
+            run_variant("fused_h32_poly9_tinyblend_split2_pairh32_tk64_w1w2lat2_outnoround",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9TinyBlend, 64, 32, true, false, true, true,
+                                 true, true, false, long long, false, false, false, false, 2>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_hard_split2_pairh32_tk64_w1w2lat2_outnoround")) {
+            run_variant("fused_h32_hard_split2_pairh32_tk64_w1w2lat2_outnoround",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluHard, 64, 32, true, false, true, true,
+                                 true, true, false, long long, false, false, false, false, 2>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_quick_split2_pairh32_tk64_w1w2lat2_outnoround")) {
+            run_variant("fused_h32_quick_split2_pairh32_tk64_w1w2lat2_outnoround",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluQuick, 64, 32, true, false, true, true,
+                                 true, true, false, long long, false, false, false, false, 2>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_identity_split2_pairh32_tk64_w1w2lat2_outnoround")) {
+            run_variant("fused_h32_identity_split2_pairh32_tk64_w1w2lat2_outnoround",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluIdentity, 64, 32, true, false, true, true,
+                                 true, true, false, long long, false, false, false, false, 2>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts,
+                       "fused_h32_poly9_split2_pairh32_tk64_w1w2lat2_outnoround_roundhidden")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_w1w2lat2_outnoround_roundhidden",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, true, false, true, true,
+                                 true, true, false, long long, false, false, false, false,
+                                 2, 2, false, 2, true, true, false, false, false, false,
+                                 true, false, false>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts,
+                       "fused_h32_poly9_split2_pairh32_tk64_w1w2lat2_outnoround_bf16gelu")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_w1w2lat2_outnoround_bf16gelu",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, true, false, true, true,
+                                 true, true, false, long long, false, false, false, false,
+                                 2, 2, false, 2, true, true, false, false, false, false,
+                                 false, true, false>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts,
+                       "fused_h32_poly9_split2_pairh32_tk64_w1w2lat2_outnoround_roundout")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_w1w2lat2_outnoround_roundout",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, true, false, true, true,
+                                 true, true, false, long long, false, false, false, false,
+                                 2, 2, false, 2, true, true, false, false, false, false,
+                                 false, false, true>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts,
+                       "fused_h32_poly9_split2_pairh32_tk64_w1w2lat2_outnoround_fullbf16")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_w1w2lat2_outnoround_fullbf16",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, true, false, true, true,
+                                 true, true, false, long long, false, false, false, false,
+                                 2, 2, false, 2, true, true, false, false, false, true>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts,
+                       "fused_h32_poly9_split2_pairh32_tk64_w1w2lat2_outnoround_w2accbf16")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_w1w2lat2_outnoround_w2accbf16",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, true, false, true, true,
+                                 true, true, false, long long, false, false, false, false,
+                                 2, 2, false, 2, true, true, false, false, false, false,
+                                 false, false, false, true>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts,
+                       "fused_h32_poly9_split2_pairh32_tk64_w1w2lat2_outnoround_storelat2")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_w1w2lat2_outnoround_storelat2",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, true, false, true, true,
+                                 true, true, false, long long, false, false, false, false,
+                                 2, 2, true, 2>(
+	                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts,
+                       "fused_h32_poly9_split2_pairh32_tk64_w1w2lat2_outnoround_w2pregelu")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_w1w2lat2_outnoround_w2pregelu",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, true, false, true, true,
+                                 true, true, false, long long, false, false, false, false,
+                                 2, 2, false, 2, true, true, false, false, true>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts,
+                       "fused_h32_poly9_split2_pairh32_tk64_w1w2lat2_outnoround_bcastbias")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_w1w2lat2_outnoround_bcastbias",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, true, false, true, true,
+                                 true, true, false, long long, false, false, false, false,
+                                 2, 2, false, 2, true, true, true>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts,
+                       "fused_h32_poly9_split2_pairh32_tk64_w1w2lat2_outnoround_cachebias")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_w1w2lat2_outnoround_cachebias",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, true, false, true, true,
+                                 true, true, false, long long, false, false, false, false,
+                                 2, 2, false, 2, true, true, false, true>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_alat2_w2lat2")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_alat2_w2lat2",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, true, false, true, true,
+                                 false, true, true, long long, false, false, false, false,
+                                 2, 2, false, 2, true, false>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_w1weightlat2_w2lat2")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_w1weightlat2_w2lat2",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, true, false, true, true,
+                                 false, true, true, long long, false, false, false, false,
+                                 2, 2, false, 2, false, true>(
+	                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts,
+                       "fused_h32_poly9_split2_pairh32_tk64_alat2_w2lat2_outnoround")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_alat2_w2lat2_outnoround",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, true, false, true, true,
+                                 false, true, false, long long, false, false, false, false,
+                                 2, 2, false, 2, true, false>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts,
+                       "fused_h32_poly9_split2_pairh32_tk64_w1weightlat2_w2lat2_outnoround")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_w1weightlat2_w2lat2_outnoround",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, true, false, true, true,
+                                 false, true, false, long long, false, false, false, false,
+                                 2, 2, false, 2, false, true>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_w1lat2_w2lat0")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_w1lat2_w2lat0",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, false, false, true, true,
+                                 true, true, true, long long, false, false, false, false,
+                                 2, 2>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_storelat2")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_storelat2",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, false, false, true, true,
+                                 false, true, true, long long, false, false, false, false,
+                                 2, 2, true, 2>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_w1w2lat2_storelat2")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_w1w2lat2_storelat2",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, true, false, true, true,
+                                 true, true, true, long long, false, false, false, false,
+                                 2, 2, true, 2>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_w1lat2_w2lat1")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_w1lat2_w2lat1",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, true, false, true, true,
+                                 true, true, true, long long, false, false, false, false, 2, 1>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_w1w2lat3")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_w1w2lat3", 32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, true, false, true, true,
+                                 true, true, true, long long, false, false, false, false, 3>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h32_poly9_split2_pairh32_tk64_w1w2lat2_accgroup")) {
+            run_variant("fused_h32_poly9_split2_pairh32_tk64_w1w2lat2_accgroup",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 32, true, true, true, true,
                                  true, true, true, long long, false, false, false, false, 2>(
                                     d_a, d_w1, d_b1, d_w2, d_b2, d_out);
                         });
@@ -2854,6 +3434,28 @@ int main(int argc, char** argv) {
                         [&] {
                             launch_fused_split2_pairh32_w2manual
                                 <32, kGeluErfPoly9L30, 64>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_h16_poly9_split2_pairh16_tk64_w1w2lat2_outnoround")) {
+            run_variant("fused_h16_poly9_split2_pairh16_tk64_w1w2lat2_outnoround",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 16, true, false, true, true,
+                                 true, true, false, long long, false, false, false, false, 2>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_m16_h32_poly9_split2_pairh32_tk64_w1w2lat2_outnoround")) {
+            run_variant("fused_m16_h32_poly9_split2_pairh32_tk64_w1w2lat2_outnoround",
+                        16, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <16, kGeluErfPoly9L30, 64, 32, true, false, true, true,
+                                 true, true, false, long long, false, false, false, false, 2>(
                                     d_a, d_w1, d_b1, d_w2, d_b2, d_out);
                         });
         }
@@ -3118,6 +3720,17 @@ int main(int argc, char** argv) {
                                 d_a, d_w1, d_b1, d_w2, d_b2, d_out);
                         });
         }
+        if (should_run(opts, "fused_h16_poly9_split2_pairh16_tk64_w1w2lat2_outnoround")) {
+            run_variant("fused_h16_poly9_split2_pairh16_tk64_w1w2lat2_outnoround",
+                        32, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <32, kGeluErfPoly9L30, 64, 16, true, false, true, true,
+                                 true, true, false, long long, false, false, false, false, 2>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
         if (should_run(opts, "fused_h64_poly9_split2_pairh64_tk64")) {
             run_variant("fused_h64_poly9_split2_pairh64_tk64", 32, 256, 1, 1, opts,
                         d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
@@ -3140,6 +3753,17 @@ int main(int argc, char** argv) {
                         [&] {
                             launch_fused_split2_pairh32<16, kGeluErfPoly9L30, 64>(
                                 d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+                        });
+        }
+        if (should_run(opts, "fused_m16_h32_poly9_split2_pairh32_tk64_w1w2lat2_outnoround")) {
+            run_variant("fused_m16_h32_poly9_split2_pairh32_tk64_w1w2lat2_outnoround",
+                        16, 256, 1, 1, opts,
+                        d_a, d_w1, d_b1, d_w2, d_b2, d_hidden, d_out,
+                        [&] {
+                            launch_fused_split2_pairh32
+                                <16, kGeluErfPoly9L30, 64, 32, true, false, true, true,
+                                 true, true, false, long long, false, false, false, false, 2>(
+                                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
                         });
         }
         if (should_run(opts, "fused_h32_poly9_tinyblend_split2_pairh32")) {

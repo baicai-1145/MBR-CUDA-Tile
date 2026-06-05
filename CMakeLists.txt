@@ -53,6 +53,7 @@ set(ALL_SOURCES
     src/chunk_cuda_tile.cu
     src/mbr_cuda_tile.cu
     src/mbr_ffn12_cutile.cu
+    src/mbr_residual_cutile.cu
     src/mbr_time_attention_cutile.cu
     src/stft_cuda_tile.cu
     src/model_mel_band_roformer.cu
@@ -74,6 +75,30 @@ add_executable(bench_bf16_cutile_mma_gemm
 )
 
 target_link_libraries(bench_bf16_cutile_mma_gemm PRIVATE
+    CUDA::cudart
+)
+
+add_executable(bench_bf16_qkv_bkn_cutile
+    bench/bf16_qkv_bkn_cutile.cu
+)
+
+target_link_libraries(bench_bf16_qkv_bkn_cutile PRIVATE
+    CUDA::cudart
+)
+
+add_executable(bench_bf16_mask_hidden_cutile
+    bench/bf16_mask_hidden_cutile.cu
+)
+
+target_link_libraries(bench_bf16_mask_hidden_cutile PRIVATE
+    CUDA::cudart
+)
+
+add_executable(bench_bf16_gate_merge_cutile
+    bench/bf16_gate_merge_cutile.cu
+)
+
+target_link_libraries(bench_bf16_gate_merge_cutile PRIVATE
     CUDA::cudart
 )
 
@@ -110,6 +135,22 @@ target_compile_definitions(bench_bf16_ffn12_candidates_cutile PRIVATE
 )
 
 target_link_libraries(bench_bf16_ffn12_candidates_cutile PRIVATE
+    CUDA::cudart
+)
+
+add_executable(bench_bf16_ffn12_residual_cutile
+    bench/bf16_ffn12_residual_cutile.cu
+)
+
+target_link_libraries(bench_bf16_ffn12_residual_cutile PRIVATE
+    CUDA::cudart
+)
+
+add_executable(bench_bf16_ffn12_two_stage_cutile
+    bench/bf16_ffn12_two_stage_cutile.cu
+)
+
+target_link_libraries(bench_bf16_ffn12_two_stage_cutile PRIVATE
     CUDA::cudart
 )
 

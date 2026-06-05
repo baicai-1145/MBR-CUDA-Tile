@@ -2,6 +2,7 @@
 
 #include "chunk_cuda_tile.h"
 #include "cuda_context.h"
+#include "mbr_cuda_tile.h"
 
 #include <algorithm>
 #include <chrono>
@@ -27,6 +28,16 @@ std::string format_ms(double ms) {
     ss << std::fixed << std::setprecision(ms >= 100.0 ? 1 : 3) << ms << " ms";
     return ss.str();
 }
+
+struct TimeAttentionChunkContextGuard {
+    explicit TimeAttentionChunkContextGuard(int chunk_index) {
+        mbr_tile::set_time_attention_context_chunk(chunk_index);
+    }
+
+    ~TimeAttentionChunkContextGuard() {
+        mbr_tile::set_time_attention_context_chunk(-1);
+    }
+};
 
 int default_num_overlap(const JsonValue& config) {
     return std::max(1, config.get_int("num_overlap", 1));
@@ -99,6 +110,7 @@ Tensor process_chunked(const Tensor& audio, int chunk_size, int step, int chunk_
         int64_t start = chunk_starts.front();
         int64_t end = std::min(start + chunk_size, total_samples);
         Tensor first_chunk = prepare_input_chunk(start, end);
+        TimeAttentionChunkContextGuard guard(0);
         first_batch_out = model_forward(first_chunk);
     } else {
         std::vector<Tensor> first_group_inputs;
@@ -111,6 +123,7 @@ Tensor process_chunked(const Tensor& audio, int chunk_size, int step, int chunk_
         }
 
         Tensor first_batch_in = Tensor::cat(first_group_inputs, 0);
+        TimeAttentionChunkContextGuard guard(0);
         first_batch_out = model_forward(first_batch_in);
     }
 
@@ -156,6 +169,7 @@ Tensor process_chunked(const Tensor& audio, int chunk_size, int step, int chunk_
             int64_t start = chunk_starts[(size_t)group_start];
             int64_t end = std::min(start + chunk_size, total_samples);
             Tensor chunk_in = prepare_input_chunk(start, end);
+            TimeAttentionChunkContextGuard guard((int)group_start);
             batch_out = model_forward(chunk_in);
         } else {
             std::vector<Tensor> batch_inputs;
@@ -166,6 +180,7 @@ Tensor process_chunked(const Tensor& audio, int chunk_size, int step, int chunk_
                 batch_inputs.push_back(prepare_input_chunk(start, end));
             }
             Tensor batch_in = Tensor::cat(batch_inputs, 0);
+            TimeAttentionChunkContextGuard guard((int)group_start);
             batch_out = model_forward(batch_in);
         }
 

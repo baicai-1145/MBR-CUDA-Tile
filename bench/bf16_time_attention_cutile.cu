@@ -43,6 +43,7 @@ struct Options {
     int iters = 3;
     bool validate = false;
     bool compare_baseline = false;
+    bool describe = false;
     std::string variant = "all";
 };
 
@@ -74,6 +75,8 @@ Options parse_args(int argc, char** argv) {
             opts.compare_baseline = true;
         } else if (std::strcmp(argv[i], "--validate") == 0) {
             opts.validate = true;
+        } else if (std::strcmp(argv[i], "--describe") == 0) {
+            opts.describe = true;
         } else if (std::strcmp(argv[i], "--help") == 0) {
             std::printf(
                 "Usage: bench_bf16_time_attention_cutile [options]\n"
@@ -91,14 +94,68 @@ Options parse_args(int argc, char** argv) {
                 "                  main1280_q64k32_exp2_split_d32,\n"
                 "                  main1280_q64k32_exp2_qkv_direct_rotary,\n"
                 "                  main1280_q64k32_exp2_split_contig_input,\n"
+                "                  main1280_q64k32_exp2_split_contig_kt_input,\n"
+                "                  main1280_q64k32_exp2_split_contig_kt_input_no_keytail,\n"
                 "                  main1280_q64k32_exp2_split_contig_tail_idx32,\n"
+                "                  main1280_q64k32_exp2_split_contig_tail_col_broadcast,\n"
+                "                  main1280_q64k32_exp2_split_contig_tail_col_broadcast_out_acc_bf16,\n"
+                "                  main1280_q64k32_exp2_split_contig_alpha_one,\n"
+                "                  main1280_q64k32_exp2_split_contig_prob_linear,\n"
+                "                  main1280_q64k32_exp2_split_contig_prob_linear_noclamp,\n"
+                "                  main1280_q64k32_exp2_split_contig_prob_poly2,\n"
+                "                  main1280_q64k32_exp2_split_contig_prob_poly4,\n"
+                "                  main1280_q64k32_exp2_split_contig_prob_poly2_noclamp,\n"
+                "                  main1280_q64k32_exp2_split_contig_prob_poly3_noclamp,\n"
+                "                  main1280_q64k32_exp2_split_contig_prob_poly3_noclamp_alpha_poly3_clamp,\n"
+                "                  main1280_q64k32_exp2_split_contig_prob_poly3_noclamp_alpha_poly3_clamp_final_rcp,\n"
+                "                  main1280_q64k32_exp2_split_contig_prob_poly3_outclamp_alpha_outclamp,\n"
+                "                  main1280_q64k32_exp2_split_contig_prob_poly3_noclamp_alpha_linear_clamp,\n"
+                "                  main1280_q64k32_exp2_split_contig_prob_rational4_alpha_rational4,\n"
+                "                  main1280_q64k32_exp2_split_contig_prob_poly4_noclamp,\n"
+                "                  main1280_q64k32_exp2_split_contig_prob_poly4_noclamp_bias,\n"
+                "                  main1280_q64k32_exp2_split_contig_prob_poly4_noclamp_sum_bf16,\n"
+                "                  main1280_q64k32_exp2_split_contig_tail_prob_mask_only,\n"
+                "                  main1280_q64k32_exp2_split_contig_tail16_8,\n"
+                "                  main1280_q64k32_exp2_split_contig_tail_helper,\n"
+                "                  main1280_q64k32_exp2_split_contig_seg2,\n"
+                "                  main1280_q64k32_exp2_split_contig_seg2_no_keytail,\n"
                 "                  main1280_q64k32_exp2_split_contig_tail_first,\n"
+                "                  main1280_q64k32_exp2_split_contig_tail_first_padded_tail_load,\n"
                 "                  main1280_q64k32_exp2_split_contig_padded_tail_load,\n"
+                "                  main1280_q64k32_exp2_split_contig_tail_col_broadcast_padded_tail_load,\n"
                 "                  main1280_q64k32_exp2_split_contig_two_pass_state,\n"
+                "                  main1280_q64k32_exp2_split_contig_score_av_lb,\n"
+                "                  main1280_q64k32_exp2_split_contig_score_av_lb_no_keytail,\n"
+                "                  main1280_q64k32_exp2_split_contig_tile_local_softmax_lb,\n"
+                "                  main1280_q64k32_exp2_split_contig_tile_local_softmax_lb_no_keytail,\n"
+                "                  main1280_q64k32_exp2_split_contig_final_rcp,\n"
+                "                  main1280_q64k32_exp2_split_contig_final_rcp_no_keytail,\n"
+                "                  main1280_q64k32_exp2_split_contig_lat2,\n"
+                "                  main1280_q64k32_exp2_split_contig_lat2_no_keytail,\n"
+                "                  main1280_q64k32_exp2_split_contig_q_lat2,\n"
+                "                  main1280_q64k32_exp2_split_contig_q_lat2_no_keytail,\n"
+                "                  main1280_q64k32_exp2_split_contig_k_lat2,\n"
+                "                  main1280_q64k32_exp2_split_contig_k_lat2_no_keytail,\n"
+                "                  main1280_q64k32_exp2_split_contig_v_lat2,\n"
+                "                  main1280_q64k32_exp2_split_contig_v_lat2_no_keytail,\n"
+                "                  main1280_q64k32_exp2_split_contig_kv_lat2,\n"
+                "                  main1280_q64k32_exp2_split_contig_kv_lat2_no_keytail,\n"
+                "                  main1280_q64k32_exp2_split_contig_row_l_bf16,\n"
+                "                  main1280_q64k32_exp2_split_contig_row_l_bf16_no_keytail,\n"
+                "                  main1280_q64k32_exp2_split_contig_row_state_bf16,\n"
+                "                  main1280_q64k32_exp2_split_contig_row_state_bf16_no_keytail,\n"
+                "                  main1280_q64k32_exp2_split_contig_first_init,\n"
+                "                  main1280_q64k32_exp2_split_contig_first_init_tail_col_broadcast_padded_tail_load,\n"
+                "                  main1280_q64k32_exp2_split_contig_first_init_no_keytail,\n"
+                "                  main1280_q64k32_exp2_split_contig_out_acc_bf16,\n"
+                "                  main1280_q64k32_exp2_split_contig_out_acc_bf16_no_keytail,\n"
+                "                  main1280_q64k32_exp2_split_contig_gated_store,\n"
                 "                  main1280_q64k32_exp2_split_contig_input_no_keytail,\n"
                 "                  split_tail_q64k32_tail32k32_exp2\n"
-                "  --compare-baseline  compare focused output against q64/k32 exp2\n"
-                "  --validate  compare several BH0 rows against CPU reference\n");
+                "  --compare-baseline  compare focused output against q64/k32 exp2;\n"
+                "                      gated_store compares against attention+gate-merge\n"
+                "  --validate  compare several BH0 rows against CPU reference\n"
+                "  --describe  print CUDA runtime resource/occupancy diagnostics\n");
             std::exit(0);
         } else {
             throw std::runtime_error(std::string("unknown argument: ") + argv[i]);
@@ -119,6 +176,138 @@ static __tile__ auto softmax_exp(TileT x) {
     return ct::exp(x);
 }
 
+enum ProbMode : int {
+    kProbExp = 0,
+    kProbLinear = 1,
+    kProbPoly4 = 2,
+    kProbPoly2 = 3,
+    kProbPoly4NoClamp = 4,
+    kProbPoly2NoClamp = 5,
+    kProbLinearNoClamp = 6,
+    kProbPoly4NoClampBias = 7,
+    kProbPoly3NoClamp = 8,
+    kProbPoly3OutputClamp = 9,
+    kProbRational4 = 10,
+};
+
+enum AlphaMode : int {
+    kAlphaExact = 0,
+    kAlphaProbClamp = 1,
+    kAlphaLinearClamp = 2,
+};
+
+template <bool UseExp2, int Prob, typename TileT>
+static __tile__ auto softmax_prob(TileT x) {
+    if constexpr (Prob == kProbLinearNoClamp) {
+        return x * 0.25f + 1.0f;
+    } else if constexpr (Prob == kProbPoly3NoClamp) {
+        auto t = x * 0.333333343f + 1.0f;
+        auto t2 = t * t;
+        return t2 * t;
+    } else if constexpr (Prob == kProbPoly3OutputClamp) {
+        auto zero = x * 0.0f;
+        auto t = x * 0.333333343f + 1.0f;
+        auto p = t * t * t;
+        return ct::select(p > zero, p, zero);
+    } else if constexpr (Prob == kProbRational4) {
+        auto t = 1.0f / (1.0f - x * 0.25f);
+        auto t2 = t * t;
+        return t2 * t2;
+    } else if constexpr (Prob == kProbPoly2NoClamp) {
+        auto t = x * 0.5f + 1.0f;
+        return t * t;
+    } else if constexpr (Prob == kProbPoly4NoClamp) {
+        auto t = x * 0.25f + 1.0f;
+        auto t2 = t * t;
+        return t2 * t2;
+    } else if constexpr (Prob == kProbPoly2) {
+        auto zero = x * 0.0f;
+        auto t = x * 0.5f + 1.0f;
+        t = ct::select(t > zero, t, zero);
+        return t * t;
+    } else if constexpr (Prob == kProbPoly4) {
+        auto zero = x * 0.0f;
+        auto t = x * 0.25f + 1.0f;
+        t = ct::select(t > zero, t, zero);
+        auto t2 = t * t;
+        return t2 * t2;
+    } else if constexpr (Prob == kProbLinear) {
+        auto zero = x * 0.0f;
+        auto y = x * 0.25f + 1.0f;
+        return ct::select(y > zero, y, zero);
+    }
+    return softmax_exp<UseExp2>(x);
+}
+
+template <bool UseExp2, int Prob, typename TileT>
+static __tile__ auto softmax_alpha_approx(TileT x) {
+    auto zero = x * 0.0f;
+    if constexpr (Prob == kProbPoly3NoClamp) {
+        auto t = x * 0.333333343f + 1.0f;
+        t = ct::select(t > zero, t, zero);
+        auto t2 = t * t;
+        return t2 * t;
+    } else if constexpr (Prob == kProbRational4) {
+        auto t = 1.0f / (1.0f - x * 0.25f);
+        auto t2 = t * t;
+        return t2 * t2;
+    } else if constexpr (Prob == kProbPoly4NoClamp ||
+                         Prob == kProbPoly4NoClampBias) {
+        auto t = x * 0.25f + 1.0f;
+        t = ct::select(t > zero, t, zero);
+        auto t2 = t * t;
+        return t2 * t2;
+    } else if constexpr (Prob == kProbPoly2NoClamp) {
+        auto t = x * 0.5f + 1.0f;
+        t = ct::select(t > zero, t, zero);
+        return t * t;
+    } else if constexpr (Prob == kProbLinearNoClamp) {
+        auto y = x * 0.25f + 1.0f;
+        return ct::select(y > zero, y, zero);
+    }
+    return softmax_prob<UseExp2, Prob>(x);
+}
+
+template <bool UseExp2, int Prob, int Alpha, typename TileT>
+static __tile__ auto softmax_alpha(TileT x) {
+    if constexpr (Alpha == kAlphaProbClamp) {
+        return softmax_alpha_approx<UseExp2, Prob>(x);
+    } else if constexpr (Alpha == kAlphaLinearClamp) {
+        auto zero = x * 0.0f;
+        auto y = x + 1.0f;
+        return ct::select(y > zero, y, zero);
+    }
+    return softmax_exp<UseExp2>(x);
+}
+
+template <bool UseExp2,
+          int Prob,
+          typename ScoreTile,
+          typename RowTile>
+static __tile__ auto softmax_probs_from_scores(ScoreTile scores, RowTile new_m) {
+    if constexpr (Prob == kProbPoly4NoClampBias) {
+        auto t = scores * 0.25f + (1.0f - new_m * 0.25f);
+        auto t2 = t * t;
+        return t2 * t2;
+    }
+    return softmax_prob<UseExp2, Prob>(scores - new_m);
+}
+
+template <bool ProbSumBf16, typename ProbF32Tile, typename ProbBf16Tile>
+static __tile__ auto softmax_tile_sum(ProbF32Tile probs_f32,
+                                      ProbBf16Tile probs_bf16) {
+    if constexpr (ProbSumBf16) {
+        return ct::sum<1>(ct::element_cast<float>(probs_bf16));
+    }
+    return ct::sum<1>(probs_f32);
+}
+
+template <typename RowTile, typename OutTile>
+struct TailMergeState {
+    RowTile row_l;
+    OutTile out_acc;
+};
+
 float percentile(std::vector<float> values, float q) {
     std::sort(values.begin(), values.end());
     float pos = q * static_cast<float>(values.size() - 1);
@@ -136,6 +325,18 @@ __tile_global__ void fill_bf16_kernel(__nv_bfloat16* __restrict__ dst, long long
     auto in_bounds = idx < total;
     F32Tile values =
         0.125f + ct::element_cast<float>((idx * 17LL) & 1023LL) * 0.000244140625f;
+    ct::store_masked(dst + idx, ct::element_cast<__nv_bfloat16>(values), in_bounds);
+}
+
+__tile_global__ void fill_gate_bf16_kernel(__nv_bfloat16* __restrict__ dst,
+                                           long long total) {
+    using I64Tile = ct::tile<long long, ct::shape<kInitTile>>;
+    using F32Tile = ct::tile<float, ct::shape<kInitTile>>;
+    dst = ct::assume_aligned(dst, 16_ic);
+    I64Tile idx = (long long)ct::bid().x * kInitTile + ct::iota<I64Tile>();
+    auto in_bounds = idx < total;
+    F32Tile values =
+        0.25f + ct::element_cast<float>((idx * 13LL) & 255LL) * 0.001953125f;
     ct::store_masked(dst + idx, ct::element_cast<__nv_bfloat16>(values), in_bounds);
 }
 
@@ -233,6 +434,25 @@ __tile_global__ void pack_time_split_contig_kernel(
     ct::store_masked(v_split + dst, vv, valid);
 }
 
+__tile_global__ void pack_time_split_contig_k_transposed_kernel(
+    const __nv_bfloat16* __restrict__ k_split,
+    __nv_bfloat16* __restrict__ k_t,
+    long long total) {
+    using I64Tile = ct::tile<long long, ct::shape<256>>;
+    k_split = ct::assume_aligned(k_split, 16_ic);
+    k_t = ct::assume_aligned(k_t, 16_ic);
+
+    I64Tile idx = (long long)ct::bid().x * 256 + ct::iota<I64Tile>();
+    auto valid = idx < total;
+    auto d = idx % kD;
+    auto h = (idx / kD) % kHeads;
+    auto n = (idx / ((long long)kD * kHeads)) % kN;
+    auto b = idx / ((long long)kN * kHeads * kD);
+    auto dst = ((b * kHeads + h) * kD + d) * kN + n;
+    auto values = ct::load_masked(k_split + idx, valid);
+    ct::store_masked(k_t + dst, values, valid);
+}
+
 __tile_global__ void pack_time_split_contig_padded_kernel(
     const __nv_bfloat16* __restrict__ q,
     const __nv_bfloat16* __restrict__ k,
@@ -269,6 +489,34 @@ __tile_global__ void pack_time_split_contig_padded_kernel(
     ct::store_masked(q_split + dst, qv, valid);
     ct::store_masked(k_split + dst, kv, valid);
     ct::store_masked(v_split + dst, vv, valid);
+}
+
+__tile_global__ void gate_merge_time_main1280_token_d64_kernel(
+    const __nv_bfloat16* __restrict__ attn,
+    const __nv_bfloat16* __restrict__ gates,
+    __nv_bfloat16* __restrict__ merged) {
+    using I64Tile = ct::tile<long long, ct::shape<kHeads * kD>>;
+    using F32Tile = ct::tile<float, ct::shape<kHeads * kD>>;
+
+    attn = ct::assume_aligned(attn, 16_ic);
+    gates = ct::assume_aligned(gates, 16_ic);
+    merged = ct::assume_aligned(merged, 16_ic);
+
+    int token = static_cast<int>(ct::bid().x);
+    auto e = ct::iota<I64Tile>();
+    int n = token % kNMain;
+    int b = token / kNMain;
+    auto h = e / kD;
+    auto d = e % kD;
+
+    auto src_idx = ((static_cast<long long>(b) * kHeads + h) * kN + n) * kD + d;
+    auto gate_idx = (static_cast<long long>(b) * kN + n) * kHeads + h;
+    auto dst_idx = static_cast<long long>(token) * kHeads * kD + e;
+
+    F32Tile attn_values = ct::element_cast<float>(ct::load(attn + src_idx));
+    F32Tile gate_values = ct::element_cast<float>(ct::load(gates + gate_idx));
+    ct::store(merged + dst_idx,
+              ct::element_cast<__nv_bfloat16>(attn_values * gate_values));
 }
 
 template <int QRows>
@@ -1080,8 +1328,332 @@ template <int QRows,
           int KTile,
           bool UseExp2 = true,
           bool IncludeKeyTail = true,
-          bool TailIdx32 = false>
+          bool TailIdx32 = false,
+          bool UseFinalReciprocal = false,
+          bool TailColBroadcast = false,
+          bool RoundOutAcc = false,
+          bool SkipAlphaExp = false,
+          int Prob = kProbExp,
+          bool ProbSumBf16 = false,
+          int Alpha = kAlphaExact>
 __tile_global__ void time_attention1301_main1280_split_contig_input_kernel(
+    const __nv_bfloat16* __restrict__ q,
+    const __nv_bfloat16* __restrict__ k,
+    const __nv_bfloat16* __restrict__ v,
+    __nv_bfloat16* __restrict__ out,
+    float scale) {
+    constexpr int FullKTiles = kNMain / KTile;
+    using ScoreTile = ct::tile<float, ct::shape<QRows, KTile>>;
+    using OutTile = ct::tile<float, ct::shape<QRows, kD>>;
+    using I64ScoreTile = ct::tile<long long, ct::shape<QRows, KTile>>;
+    using I64ColTile = ct::tile<long long, ct::shape<1, KTile>>;
+    using RowTile = ct::tile<float, ct::shape<QRows, 1>>;
+    using NDShape = ct::shape<kN, kD>;
+    using DNShape = ct::shape<kD, kN>;
+    using NDStrides = ct::shape<kHeads * kD, 1>;
+    using DNStrides = ct::shape<1, kHeads * kD>;
+    using NDLayout = ct::layout_strided<NDStrides>;
+    using DNLayout = ct::layout_strided<DNStrides>;
+    using NDMapping = typename NDLayout::template mapping<NDShape>;
+    using DNMapping = typename DNLayout::template mapping<DNShape>;
+
+    q = ct::assume_aligned(q, 16_ic);
+    k = ct::assume_aligned(k, 16_ic);
+    v = ct::assume_aligned(v, 16_ic);
+    out = ct::assume_aligned(out, 16_ic);
+
+    auto [q_block, bh_raw, tile_z] = ct::bid();
+    (void)tile_z;
+    int bh = static_cast<int>(bh_raw);
+    int b = bh / kHeads;
+    int h = bh - b * kHeads;
+    const std::size_t base =
+        (static_cast<std::size_t>(b) * kN * kHeads + h) * kD;
+    const __nv_bfloat16* q_batch = q + base;
+    const __nv_bfloat16* k_batch = k + base;
+    const __nv_bfloat16* v_batch = v + base;
+    __nv_bfloat16* out_batch =
+        out + static_cast<std::size_t>(bh) * kN * kD;
+
+    auto q_view = ct::partition_view{
+        ct::tensor_span{q_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<QRows, kD>{}
+    };
+    auto k_t_view = ct::partition_view{
+        ct::tensor_span{k_batch, DNMapping{DNShape{}, DNStrides{}}},
+        ct::shape<kD, KTile>{}
+    };
+    auto v_view = ct::partition_view{
+        ct::tensor_span{v_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<KTile, kD>{}
+    };
+    auto out_view = ct::partition_view{
+        ct::tensor_span{out_batch, ct::shape<kN, kD>{}},
+        ct::shape<QRows, kD>{}
+    };
+
+    auto q_tile = q_view.load(q_block, 0);
+    RowTile row_m = ct::full<RowTile>(-3.402823466e38f);
+    RowTile row_l = ct::full<RowTile>(0.0f);
+    OutTile out_acc = ct::full<OutTile>(0.0f);
+
+    for (auto kt : ct::irange(std::size_t{0}, std::size_t{FullKTiles})) {
+        auto scores = ct::mma(q_tile,
+                              k_t_view.load(0, kt),
+                              ct::full<ScoreTile>(0.0f)) * scale;
+        auto tile_m = ct::reduce_max<1>(scores);
+        auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+        auto alpha = ct::full<RowTile>(1.0f);
+        if constexpr (!SkipAlphaExp) {
+            alpha = softmax_alpha<UseExp2, Prob, Alpha>(row_m - new_m);
+        }
+        auto probs_f32 =
+            softmax_probs_from_scores<UseExp2, Prob>(scores, new_m);
+        auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+        auto tile_l = softmax_tile_sum<ProbSumBf16>(probs_f32, probs_bf16);
+
+        out_acc = out_acc * alpha +
+                  ct::mma(probs_bf16,
+                          v_view.load(kt, 0),
+                          ct::full<OutTile>(0.0f));
+        if constexpr (RoundOutAcc) {
+            out_acc = ct::element_cast<float>(ct::element_cast<__nv_bfloat16>(out_acc));
+        }
+        row_l = row_l * alpha + tile_l;
+        row_m = new_m;
+    }
+
+    if constexpr (IncludeKeyTail) {
+        if constexpr (TailColBroadcast) {
+            I64ColTile col_local = ct::iota<I64ColTile>();
+            auto key_cols = static_cast<long long>(FullKTiles) * KTile + col_local;
+            auto valid = key_cols < kN;
+            auto scores = ct::mma(q_tile,
+                                  k_t_view.load_masked(0, FullKTiles),
+                                  ct::full<ScoreTile>(0.0f)) * scale;
+            auto neg_inf = scores * 0.0f - 3.402823466e38f;
+            scores = ct::select(valid, scores, neg_inf);
+            auto tile_m = ct::reduce_max<1>(scores);
+            auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+            auto alpha = ct::full<RowTile>(1.0f);
+            if constexpr (!SkipAlphaExp) {
+                alpha = softmax_alpha<UseExp2, Prob, Alpha>(row_m - new_m);
+            }
+            auto probs_f32 =
+                ct::select(valid,
+                           softmax_probs_from_scores<UseExp2, Prob>(scores, new_m),
+                           scores * 0.0f);
+            auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+            auto tile_l = softmax_tile_sum<ProbSumBf16>(probs_f32, probs_bf16);
+            out_acc = out_acc * alpha +
+                      ct::mma(probs_bf16,
+                              v_view.load_masked(FullKTiles, 0),
+                              ct::full<OutTile>(0.0f));
+            if constexpr (RoundOutAcc) {
+                out_acc = ct::element_cast<float>(ct::element_cast<__nv_bfloat16>(out_acc));
+            }
+            row_l = row_l * alpha + tile_l;
+        } else if constexpr (TailIdx32) {
+            using I32ScoreTile = ct::tile<int, ct::shape<QRows, KTile>>;
+            I32ScoreTile score_local = ct::iota<I32ScoreTile>();
+            auto key_cols = FullKTiles * KTile + score_local % KTile;
+            auto valid = key_cols < kN;
+            auto scores = ct::mma(q_tile,
+                                  k_t_view.load_masked(0, FullKTiles),
+                                  ct::full<ScoreTile>(0.0f)) * scale;
+            auto neg_inf = scores * 0.0f - 3.402823466e38f;
+            scores = ct::select(valid, scores, neg_inf);
+            auto tile_m = ct::reduce_max<1>(scores);
+            auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+            auto alpha = ct::full<RowTile>(1.0f);
+            if constexpr (!SkipAlphaExp) {
+                alpha = softmax_alpha<UseExp2, Prob, Alpha>(row_m - new_m);
+            }
+            auto probs_f32 =
+                ct::select(valid,
+                           softmax_probs_from_scores<UseExp2, Prob>(scores, new_m),
+                           scores * 0.0f);
+            auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+            auto tile_l = softmax_tile_sum<ProbSumBf16>(probs_f32, probs_bf16);
+            out_acc = out_acc * alpha +
+                      ct::mma(probs_bf16,
+                              v_view.load_masked(FullKTiles, 0),
+                              ct::full<OutTile>(0.0f));
+            if constexpr (RoundOutAcc) {
+                out_acc = ct::element_cast<float>(ct::element_cast<__nv_bfloat16>(out_acc));
+            }
+            row_l = row_l * alpha + tile_l;
+        } else {
+            I64ScoreTile score_local = ct::iota<I64ScoreTile>();
+            auto key_cols = static_cast<long long>(FullKTiles) * KTile + score_local % KTile;
+            auto valid = key_cols < kN;
+            auto scores = ct::mma(q_tile,
+                                  k_t_view.load_masked(0, FullKTiles),
+                                  ct::full<ScoreTile>(0.0f)) * scale;
+            auto neg_inf = scores * 0.0f - 3.402823466e38f;
+            scores = ct::select(valid, scores, neg_inf);
+            auto tile_m = ct::reduce_max<1>(scores);
+            auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+            auto alpha = ct::full<RowTile>(1.0f);
+            if constexpr (!SkipAlphaExp) {
+                alpha = softmax_alpha<UseExp2, Prob, Alpha>(row_m - new_m);
+            }
+            auto probs_f32 =
+                ct::select(valid,
+                           softmax_probs_from_scores<UseExp2, Prob>(scores, new_m),
+                           scores * 0.0f);
+            auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+            auto tile_l = softmax_tile_sum<ProbSumBf16>(probs_f32, probs_bf16);
+            out_acc = out_acc * alpha +
+                      ct::mma(probs_bf16,
+                              v_view.load_masked(FullKTiles, 0),
+                              ct::full<OutTile>(0.0f));
+            if constexpr (RoundOutAcc) {
+                out_acc = ct::element_cast<float>(ct::element_cast<__nv_bfloat16>(out_acc));
+            }
+            row_l = row_l * alpha + tile_l;
+        }
+    }
+
+    if constexpr (UseFinalReciprocal) {
+        auto inv_l = 1.0f / row_l;
+        out_view.store(ct::element_cast<__nv_bfloat16>(out_acc * inv_l), q_block, 0);
+    } else {
+        out_view.store(ct::element_cast<__nv_bfloat16>(out_acc / row_l), q_block, 0);
+    }
+}
+
+template <int QRows,
+          int KTile,
+          bool UseExp2,
+          typename QTile,
+          typename KTView,
+          typename VView,
+          typename RowTile,
+          typename OutTile>
+static __tile__ TailMergeState<RowTile, OutTile> merge_keytail_helper(
+    QTile q_tile,
+    KTView k_t_view,
+    VView v_view,
+    RowTile row_m,
+    RowTile row_l,
+    OutTile out_acc,
+    float scale) {
+    constexpr int FullKTiles = kNMain / KTile;
+    using ScoreTile = ct::tile<float, ct::shape<QRows, KTile>>;
+    using I64ScoreTile = ct::tile<long long, ct::shape<QRows, KTile>>;
+
+    I64ScoreTile score_local = ct::iota<I64ScoreTile>();
+    auto key_cols = static_cast<long long>(FullKTiles) * KTile + score_local % KTile;
+    auto valid = key_cols < kN;
+    auto scores = ct::mma(q_tile,
+                          k_t_view.load_masked(0, FullKTiles),
+                          ct::full<ScoreTile>(0.0f)) * scale;
+    auto neg_inf = scores * 0.0f - 3.402823466e38f;
+    scores = ct::select(valid, scores, neg_inf);
+    auto tile_m = ct::reduce_max<1>(scores);
+    auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+    auto alpha = softmax_exp<UseExp2>(row_m - new_m);
+    auto probs_f32 =
+        ct::select(valid, softmax_exp<UseExp2>(scores - new_m), scores * 0.0f);
+    auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+    auto tile_l = ct::sum<1>(probs_f32);
+    out_acc = out_acc * alpha +
+              ct::mma(probs_bf16,
+                      v_view.load_masked(FullKTiles, 0),
+                      ct::full<OutTile>(0.0f));
+    row_l = row_l * alpha + tile_l;
+    return TailMergeState<RowTile, OutTile>{row_l, out_acc};
+}
+
+template <int QRows, int KTile, bool UseExp2 = true>
+__tile_global__ void time_attention1301_main1280_split_contig_tail_helper_kernel(
+    const __nv_bfloat16* __restrict__ q,
+    const __nv_bfloat16* __restrict__ k,
+    const __nv_bfloat16* __restrict__ v,
+    __nv_bfloat16* __restrict__ out,
+    float scale) {
+    constexpr int FullKTiles = kNMain / KTile;
+    using ScoreTile = ct::tile<float, ct::shape<QRows, KTile>>;
+    using OutTile = ct::tile<float, ct::shape<QRows, kD>>;
+    using RowTile = ct::tile<float, ct::shape<QRows, 1>>;
+    using NDShape = ct::shape<kN, kD>;
+    using DNShape = ct::shape<kD, kN>;
+    using NDStrides = ct::shape<kHeads * kD, 1>;
+    using DNStrides = ct::shape<1, kHeads * kD>;
+    using NDLayout = ct::layout_strided<NDStrides>;
+    using DNLayout = ct::layout_strided<DNStrides>;
+    using NDMapping = typename NDLayout::template mapping<NDShape>;
+    using DNMapping = typename DNLayout::template mapping<DNShape>;
+
+    q = ct::assume_aligned(q, 16_ic);
+    k = ct::assume_aligned(k, 16_ic);
+    v = ct::assume_aligned(v, 16_ic);
+    out = ct::assume_aligned(out, 16_ic);
+
+    auto [q_block, bh_raw, tile_z] = ct::bid();
+    (void)tile_z;
+    int bh = static_cast<int>(bh_raw);
+    int b = bh / kHeads;
+    int h = bh - b * kHeads;
+    const std::size_t base =
+        (static_cast<std::size_t>(b) * kN * kHeads + h) * kD;
+    const __nv_bfloat16* q_batch = q + base;
+    const __nv_bfloat16* k_batch = k + base;
+    const __nv_bfloat16* v_batch = v + base;
+    __nv_bfloat16* out_batch =
+        out + static_cast<std::size_t>(bh) * kN * kD;
+
+    auto q_view = ct::partition_view{
+        ct::tensor_span{q_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<QRows, kD>{}
+    };
+    auto k_t_view = ct::partition_view{
+        ct::tensor_span{k_batch, DNMapping{DNShape{}, DNStrides{}}},
+        ct::shape<kD, KTile>{}
+    };
+    auto v_view = ct::partition_view{
+        ct::tensor_span{v_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<KTile, kD>{}
+    };
+    auto out_view = ct::partition_view{
+        ct::tensor_span{out_batch, ct::shape<kN, kD>{}},
+        ct::shape<QRows, kD>{}
+    };
+
+    auto q_tile = q_view.load(q_block, 0);
+    RowTile row_m = ct::full<RowTile>(-3.402823466e38f);
+    RowTile row_l = ct::full<RowTile>(0.0f);
+    OutTile out_acc = ct::full<OutTile>(0.0f);
+
+    for (auto kt : ct::irange(std::size_t{0}, std::size_t{FullKTiles})) {
+        auto scores = ct::mma(q_tile,
+                              k_t_view.load(0, kt),
+                              ct::full<ScoreTile>(0.0f)) * scale;
+        auto tile_m = ct::reduce_max<1>(scores);
+        auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+        auto alpha = softmax_exp<UseExp2>(row_m - new_m);
+        auto probs_f32 = softmax_exp<UseExp2>(scores - new_m);
+        auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+        auto tile_l = ct::sum<1>(probs_f32);
+
+        out_acc = out_acc * alpha +
+                  ct::mma(probs_bf16,
+                          v_view.load(kt, 0),
+                          ct::full<OutTile>(0.0f));
+        row_l = row_l * alpha + tile_l;
+        row_m = new_m;
+    }
+
+    auto state = merge_keytail_helper<QRows, KTile, UseExp2>(
+        q_tile, k_t_view, v_view, row_m, row_l, out_acc, scale);
+    out_view.store(ct::element_cast<__nv_bfloat16>(state.out_acc / state.row_l),
+                   q_block, 0);
+}
+
+template <int QRows, int KTile, bool UseExp2 = true>
+__tile_global__ void
+time_attention1301_main1280_split_contig_tail_prob_mask_only_kernel(
     const __nv_bfloat16* __restrict__ q,
     const __nv_bfloat16* __restrict__ k,
     const __nv_bfloat16* __restrict__ v,
@@ -1160,32 +1732,650 @@ __tile_global__ void time_attention1301_main1280_split_contig_input_kernel(
         row_m = new_m;
     }
 
+    I64ScoreTile score_local = ct::iota<I64ScoreTile>();
+    auto key_cols = static_cast<long long>(FullKTiles) * KTile + score_local % KTile;
+    auto valid = key_cols < kN;
+    auto scores = ct::mma(q_tile,
+                          k_t_view.load_masked(0, FullKTiles),
+                          ct::full<ScoreTile>(0.0f)) * scale;
+    auto tile_m = ct::reduce_max<1>(scores);
+    auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+    auto alpha = softmax_exp<UseExp2>(row_m - new_m);
+    auto probs_f32 =
+        ct::select(valid, softmax_exp<UseExp2>(scores - new_m), scores * 0.0f);
+    auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+    auto tile_l = ct::sum<1>(probs_f32);
+    out_acc = out_acc * alpha +
+              ct::mma(probs_bf16,
+                      v_view.load_masked(FullKTiles, 0),
+                      ct::full<OutTile>(0.0f));
+    row_l = row_l * alpha + tile_l;
+
+    out_view.store(ct::element_cast<__nv_bfloat16>(out_acc / row_l), q_block, 0);
+}
+
+template <int QRows, int KTile, bool UseExp2 = true>
+__tile_global__ void time_attention1301_main1280_split_contig_tail16_8_kernel(
+    const __nv_bfloat16* __restrict__ q,
+    const __nv_bfloat16* __restrict__ k,
+    const __nv_bfloat16* __restrict__ v,
+    __nv_bfloat16* __restrict__ out,
+    float scale) {
+    constexpr int FullKTiles = kNMain / KTile;
+    static_assert(KTile == 32);
+    using ScoreTile = ct::tile<float, ct::shape<QRows, KTile>>;
+    using ScoreTile16 = ct::tile<float, ct::shape<QRows, 16>>;
+    using ScoreTile8 = ct::tile<float, ct::shape<QRows, 8>>;
+    using I64ColTile8 = ct::tile<long long, ct::shape<1, 8>>;
+    using OutTile = ct::tile<float, ct::shape<QRows, kD>>;
+    using RowTile = ct::tile<float, ct::shape<QRows, 1>>;
+    using NDShape = ct::shape<kN, kD>;
+    using DNShape = ct::shape<kD, kN>;
+    using NDStrides = ct::shape<kHeads * kD, 1>;
+    using DNStrides = ct::shape<1, kHeads * kD>;
+    using NDLayout = ct::layout_strided<NDStrides>;
+    using DNLayout = ct::layout_strided<DNStrides>;
+    using NDMapping = typename NDLayout::template mapping<NDShape>;
+    using DNMapping = typename DNLayout::template mapping<DNShape>;
+
+    q = ct::assume_aligned(q, 16_ic);
+    k = ct::assume_aligned(k, 16_ic);
+    v = ct::assume_aligned(v, 16_ic);
+    out = ct::assume_aligned(out, 16_ic);
+
+    auto [q_block, bh_raw, tile_z] = ct::bid();
+    (void)tile_z;
+    int bh = static_cast<int>(bh_raw);
+    int b = bh / kHeads;
+    int h = bh - b * kHeads;
+    const std::size_t base =
+        (static_cast<std::size_t>(b) * kN * kHeads + h) * kD;
+    const __nv_bfloat16* q_batch = q + base;
+    const __nv_bfloat16* k_batch = k + base;
+    const __nv_bfloat16* v_batch = v + base;
+    __nv_bfloat16* out_batch =
+        out + static_cast<std::size_t>(bh) * kN * kD;
+
+    auto q_view = ct::partition_view{
+        ct::tensor_span{q_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<QRows, kD>{}
+    };
+    auto k_t_view = ct::partition_view{
+        ct::tensor_span{k_batch, DNMapping{DNShape{}, DNStrides{}}},
+        ct::shape<kD, KTile>{}
+    };
+    auto v_view = ct::partition_view{
+        ct::tensor_span{v_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<KTile, kD>{}
+    };
+    auto k_t_view16 = ct::partition_view{
+        ct::tensor_span{k_batch, DNMapping{DNShape{}, DNStrides{}}},
+        ct::shape<kD, 16>{}
+    };
+    auto v_view16 = ct::partition_view{
+        ct::tensor_span{v_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<16, kD>{}
+    };
+    auto k_t_view8 = ct::partition_view{
+        ct::tensor_span{k_batch, DNMapping{DNShape{}, DNStrides{}}},
+        ct::shape<kD, 8>{}
+    };
+    auto v_view8 = ct::partition_view{
+        ct::tensor_span{v_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<8, kD>{}
+    };
+    auto out_view = ct::partition_view{
+        ct::tensor_span{out_batch, ct::shape<kN, kD>{}},
+        ct::shape<QRows, kD>{}
+    };
+
+    auto q_tile = q_view.load(q_block, 0);
+    RowTile row_m = ct::full<RowTile>(-3.402823466e38f);
+    RowTile row_l = ct::full<RowTile>(0.0f);
+    OutTile out_acc = ct::full<OutTile>(0.0f);
+
+    for (auto kt : ct::irange(std::size_t{0}, std::size_t{FullKTiles})) {
+        auto scores = ct::mma(q_tile,
+                              k_t_view.load(0, kt),
+                              ct::full<ScoreTile>(0.0f)) * scale;
+        auto tile_m = ct::reduce_max<1>(scores);
+        auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+        auto alpha = softmax_exp<UseExp2>(row_m - new_m);
+        auto probs_f32 = softmax_exp<UseExp2>(scores - new_m);
+        auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+        auto tile_l = ct::sum<1>(probs_f32);
+
+        out_acc = out_acc * alpha +
+                  ct::mma(probs_bf16,
+                          v_view.load(kt, 0),
+                          ct::full<OutTile>(0.0f));
+        row_l = row_l * alpha + tile_l;
+        row_m = new_m;
+    }
+
+    {
+        auto scores = ct::mma(q_tile,
+                              k_t_view16.load(0, kNMain / 16),
+                              ct::full<ScoreTile16>(0.0f)) * scale;
+        auto tile_m = ct::reduce_max<1>(scores);
+        auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+        auto alpha = softmax_exp<UseExp2>(row_m - new_m);
+        auto probs_f32 = softmax_exp<UseExp2>(scores - new_m);
+        auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+        auto tile_l = ct::sum<1>(probs_f32);
+        out_acc = out_acc * alpha +
+                  ct::mma(probs_bf16,
+                          v_view16.load(kNMain / 16, 0),
+                          ct::full<OutTile>(0.0f));
+        row_l = row_l * alpha + tile_l;
+        row_m = new_m;
+    }
+
+    {
+        I64ColTile8 col_local = ct::iota<I64ColTile8>();
+        auto key_cols = static_cast<long long>(kNMain + 16) + col_local;
+        auto valid = key_cols < kN;
+        auto scores = ct::mma(q_tile,
+                              k_t_view8.load_masked(0, (kNMain + 16) / 8),
+                              ct::full<ScoreTile8>(0.0f)) * scale;
+        auto neg_inf = scores * 0.0f - 3.402823466e38f;
+        scores = ct::select(valid, scores, neg_inf);
+        auto tile_m = ct::reduce_max<1>(scores);
+        auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+        auto alpha = softmax_exp<UseExp2>(row_m - new_m);
+        auto probs_f32 =
+            ct::select(valid, softmax_exp<UseExp2>(scores - new_m), scores * 0.0f);
+        auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+        auto tile_l = ct::sum<1>(probs_f32);
+        out_acc = out_acc * alpha +
+                  ct::mma(probs_bf16,
+                          v_view8.load_masked((kNMain + 16) / 8, 0),
+                          ct::full<OutTile>(0.0f));
+        row_l = row_l * alpha + tile_l;
+    }
+
+    out_view.store(ct::element_cast<__nv_bfloat16>(out_acc / row_l), q_block, 0);
+}
+
+template <int QRows,
+          int KTile,
+          bool UseExp2 = true,
+          bool IncludeKeyTail = true>
+__tile_global__ void time_attention1301_main1280_split_contig_gated_store_kernel(
+    const __nv_bfloat16* __restrict__ q,
+    const __nv_bfloat16* __restrict__ k,
+    const __nv_bfloat16* __restrict__ v,
+    const __nv_bfloat16* __restrict__ gates,
+    __nv_bfloat16* __restrict__ merged,
+    float scale) {
+    constexpr int FullKTiles = kNMain / KTile;
+    using ScoreTile = ct::tile<float, ct::shape<QRows, KTile>>;
+    using OutTile = ct::tile<float, ct::shape<QRows, kD>>;
+    using GateTile = ct::tile<float, ct::shape<QRows, 1>>;
+    using I64ScoreTile = ct::tile<long long, ct::shape<QRows, KTile>>;
+    using I64OutTile = ct::tile<long long, ct::shape<QRows, kD>>;
+    using RowTile = ct::tile<float, ct::shape<QRows, 1>>;
+    using NDShape = ct::shape<kN, kD>;
+    using DNShape = ct::shape<kD, kN>;
+    using NDStrides = ct::shape<kHeads * kD, 1>;
+    using DNStrides = ct::shape<1, kHeads * kD>;
+    using NDLayout = ct::layout_strided<NDStrides>;
+    using DNLayout = ct::layout_strided<DNStrides>;
+    using NDMapping = typename NDLayout::template mapping<NDShape>;
+    using DNMapping = typename DNLayout::template mapping<DNShape>;
+
+    q = ct::assume_aligned(q, 16_ic);
+    k = ct::assume_aligned(k, 16_ic);
+    v = ct::assume_aligned(v, 16_ic);
+    gates = ct::assume_aligned(gates, 16_ic);
+    merged = ct::assume_aligned(merged, 16_ic);
+
+    auto [q_block, bh_raw, tile_z] = ct::bid();
+    (void)tile_z;
+    int bh = static_cast<int>(bh_raw);
+    int b = bh / kHeads;
+    int h = bh - b * kHeads;
+    const std::size_t base =
+        (static_cast<std::size_t>(b) * kN * kHeads + h) * kD;
+    const __nv_bfloat16* q_batch = q + base;
+    const __nv_bfloat16* k_batch = k + base;
+    const __nv_bfloat16* v_batch = v + base;
+    const __nv_bfloat16* gate_batch =
+        gates + static_cast<std::size_t>(b) * kN * kHeads + h;
+
+    auto q_view = ct::partition_view{
+        ct::tensor_span{q_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<QRows, kD>{}
+    };
+    auto k_t_view = ct::partition_view{
+        ct::tensor_span{k_batch, DNMapping{DNShape{}, DNStrides{}}},
+        ct::shape<kD, KTile>{}
+    };
+    auto v_view = ct::partition_view{
+        ct::tensor_span{v_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<KTile, kD>{}
+    };
+
+    auto q_tile = q_view.load(q_block, 0);
+    RowTile row_m = ct::full<RowTile>(-3.402823466e38f);
+    RowTile row_l = ct::full<RowTile>(0.0f);
+    OutTile out_acc = ct::full<OutTile>(0.0f);
+
+    for (auto kt : ct::irange(std::size_t{0}, std::size_t{FullKTiles})) {
+        auto scores = ct::mma(q_tile,
+                              k_t_view.load(0, kt),
+                              ct::full<ScoreTile>(0.0f)) * scale;
+        auto tile_m = ct::reduce_max<1>(scores);
+        auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+        auto alpha = softmax_exp<UseExp2>(row_m - new_m);
+        auto probs_f32 = softmax_exp<UseExp2>(scores - new_m);
+        auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+        auto tile_l = ct::sum<1>(probs_f32);
+
+        out_acc = out_acc * alpha +
+                  ct::mma(probs_bf16,
+                          v_view.load(kt, 0),
+                          ct::full<OutTile>(0.0f));
+        row_l = row_l * alpha + tile_l;
+        row_m = new_m;
+    }
+
     if constexpr (IncludeKeyTail) {
-        if constexpr (TailIdx32) {
-            using I32ScoreTile = ct::tile<int, ct::shape<QRows, KTile>>;
-            I32ScoreTile score_local = ct::iota<I32ScoreTile>();
-            auto key_cols = FullKTiles * KTile + score_local % KTile;
+        I64ScoreTile score_local = ct::iota<I64ScoreTile>();
+        auto key_cols = static_cast<long long>(FullKTiles) * KTile + score_local % KTile;
+        auto valid = key_cols < kN;
+        auto scores = ct::mma(q_tile,
+                              k_t_view.load_masked(0, FullKTiles),
+                              ct::full<ScoreTile>(0.0f)) * scale;
+        auto neg_inf = scores * 0.0f - 3.402823466e38f;
+        scores = ct::select(valid, scores, neg_inf);
+        auto tile_m = ct::reduce_max<1>(scores);
+        auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+        auto alpha = softmax_exp<UseExp2>(row_m - new_m);
+        auto probs_f32 =
+            ct::select(valid, softmax_exp<UseExp2>(scores - new_m), scores * 0.0f);
+        auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+        auto tile_l = ct::sum<1>(probs_f32);
+        out_acc = out_acc * alpha +
+                  ct::mma(probs_bf16,
+                          v_view.load_masked(FullKTiles, 0),
+                          ct::full<OutTile>(0.0f));
+        row_l = row_l * alpha + tile_l;
+    }
+
+    using GateIndexTile = ct::tile<long long, ct::shape<QRows, 1>>;
+    GateIndexTile gate_local = ct::iota<GateIndexTile>();
+    auto gate_rows = static_cast<long long>(q_block) * QRows + gate_local;
+    GateTile gate_values =
+        ct::element_cast<float>(ct::load(gate_batch + gate_rows * kHeads));
+    auto attn_values =
+        ct::element_cast<float>(ct::element_cast<__nv_bfloat16>(out_acc / row_l));
+    auto gated = attn_values * gate_values;
+    I64OutTile out_local = ct::iota<I64OutTile>();
+    auto out_rows = static_cast<long long>(q_block) * QRows + out_local / kD;
+    auto out_cols = out_local % kD;
+    auto out_idx = (static_cast<long long>(b) * kNMain + out_rows) * (kHeads * kD) +
+                   static_cast<long long>(h) * kD + out_cols;
+    ct::store(merged + out_idx, ct::element_cast<__nv_bfloat16>(gated));
+}
+
+template <int QRows, int KTile, bool UseExp2 = true, bool IncludeKeyTail = true>
+__tile_global__ void time_attention1301_main1280_split_contig_kt_input_kernel(
+    const __nv_bfloat16* __restrict__ q,
+    const __nv_bfloat16* __restrict__ k_t,
+    const __nv_bfloat16* __restrict__ v,
+    __nv_bfloat16* __restrict__ out,
+    float scale) {
+    constexpr int FullKTiles = kNMain / KTile;
+    using ScoreTile = ct::tile<float, ct::shape<QRows, KTile>>;
+    using OutTile = ct::tile<float, ct::shape<QRows, kD>>;
+    using I64ScoreTile = ct::tile<long long, ct::shape<QRows, KTile>>;
+    using RowTile = ct::tile<float, ct::shape<QRows, 1>>;
+    using NDShape = ct::shape<kN, kD>;
+    using NDStrides = ct::shape<kHeads * kD, 1>;
+    using NDLayout = ct::layout_strided<NDStrides>;
+    using NDMapping = typename NDLayout::template mapping<NDShape>;
+
+    q = ct::assume_aligned(q, 16_ic);
+    k_t = ct::assume_aligned(k_t, 16_ic);
+    v = ct::assume_aligned(v, 16_ic);
+    out = ct::assume_aligned(out, 16_ic);
+
+    auto [q_block, bh_raw, tile_z] = ct::bid();
+    (void)tile_z;
+    int bh = static_cast<int>(bh_raw);
+    int b = bh / kHeads;
+    int h = bh - b * kHeads;
+    const std::size_t split_base =
+        (static_cast<std::size_t>(b) * kN * kHeads + h) * kD;
+    const __nv_bfloat16* q_batch = q + split_base;
+    const __nv_bfloat16* v_batch = v + split_base;
+    const __nv_bfloat16* k_t_batch =
+        k_t + static_cast<std::size_t>(bh) * kD * kN;
+    __nv_bfloat16* out_batch =
+        out + static_cast<std::size_t>(bh) * kN * kD;
+
+    auto q_view = ct::partition_view{
+        ct::tensor_span{q_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<QRows, kD>{}
+    };
+    auto k_t_view = ct::partition_view{
+        ct::tensor_span{k_t_batch, ct::shape<kD, kN>{}},
+        ct::shape<kD, KTile>{}
+    };
+    auto v_view = ct::partition_view{
+        ct::tensor_span{v_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<KTile, kD>{}
+    };
+    auto out_view = ct::partition_view{
+        ct::tensor_span{out_batch, ct::shape<kN, kD>{}},
+        ct::shape<QRows, kD>{}
+    };
+
+    auto q_tile = q_view.load(q_block, 0);
+    RowTile row_m = ct::full<RowTile>(-3.402823466e38f);
+    RowTile row_l = ct::full<RowTile>(0.0f);
+    OutTile out_acc = ct::full<OutTile>(0.0f);
+
+    for (auto kt : ct::irange(std::size_t{0}, std::size_t{FullKTiles})) {
+        auto scores = ct::mma(q_tile,
+                              k_t_view.load(0, kt),
+                              ct::full<ScoreTile>(0.0f)) * scale;
+        auto tile_m = ct::reduce_max<1>(scores);
+        auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+        auto alpha = softmax_exp<UseExp2>(row_m - new_m);
+        auto probs_f32 = softmax_exp<UseExp2>(scores - new_m);
+        auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+        auto tile_l = ct::sum<1>(probs_f32);
+
+        out_acc = out_acc * alpha +
+                  ct::mma(probs_bf16,
+                          v_view.load(kt, 0),
+                          ct::full<OutTile>(0.0f));
+        row_l = row_l * alpha + tile_l;
+        row_m = new_m;
+    }
+
+    if constexpr (IncludeKeyTail) {
+        I64ScoreTile score_local = ct::iota<I64ScoreTile>();
+        auto key_cols =
+            static_cast<long long>(FullKTiles) * KTile + score_local % KTile;
+        auto valid = key_cols < kN;
+        auto scores = ct::mma(q_tile,
+                              k_t_view.load_masked(0, FullKTiles),
+                              ct::full<ScoreTile>(0.0f)) * scale;
+        auto neg_inf = scores * 0.0f - 3.402823466e38f;
+        scores = ct::select(valid, scores, neg_inf);
+        auto tile_m = ct::reduce_max<1>(scores);
+        auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+        auto alpha = softmax_exp<UseExp2>(row_m - new_m);
+        auto probs_f32 =
+            ct::select(valid, softmax_exp<UseExp2>(scores - new_m), scores * 0.0f);
+        auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+        auto tile_l = ct::sum<1>(probs_f32);
+        out_acc = out_acc * alpha +
+                  ct::mma(probs_bf16,
+                          v_view.load_masked(FullKTiles, 0),
+                          ct::full<OutTile>(0.0f));
+        row_l = row_l * alpha + tile_l;
+    }
+
+    out_view.store(ct::element_cast<__nv_bfloat16>(out_acc / row_l), q_block, 0);
+}
+
+template <int QRows, int KTile, bool UseExp2 = true, bool IncludeKeyTail = true>
+__tile_global__ void time_attention1301_main1280_split_contig_seg2_kernel(
+    const __nv_bfloat16* __restrict__ q,
+    const __nv_bfloat16* __restrict__ k,
+    const __nv_bfloat16* __restrict__ v,
+    __nv_bfloat16* __restrict__ out,
+    float scale) {
+    constexpr int FullKTiles = kNMain / KTile;
+    static_assert(FullKTiles % 2 == 0);
+    using ScoreTile = ct::tile<float, ct::shape<QRows, KTile>>;
+    using OutTile = ct::tile<float, ct::shape<QRows, kD>>;
+    using I64ScoreTile = ct::tile<long long, ct::shape<QRows, KTile>>;
+    using RowTile = ct::tile<float, ct::shape<QRows, 1>>;
+    using NDShape = ct::shape<kN, kD>;
+    using DNShape = ct::shape<kD, kN>;
+    using NDStrides = ct::shape<kHeads * kD, 1>;
+    using DNStrides = ct::shape<1, kHeads * kD>;
+    using NDLayout = ct::layout_strided<NDStrides>;
+    using DNLayout = ct::layout_strided<DNStrides>;
+    using NDMapping = typename NDLayout::template mapping<NDShape>;
+    using DNMapping = typename DNLayout::template mapping<DNShape>;
+
+    q = ct::assume_aligned(q, 16_ic);
+    k = ct::assume_aligned(k, 16_ic);
+    v = ct::assume_aligned(v, 16_ic);
+    out = ct::assume_aligned(out, 16_ic);
+
+    auto [q_block, bh_raw, tile_z] = ct::bid();
+    (void)tile_z;
+    int bh = static_cast<int>(bh_raw);
+    int b = bh / kHeads;
+    int h = bh - b * kHeads;
+    const std::size_t base =
+        (static_cast<std::size_t>(b) * kN * kHeads + h) * kD;
+    const __nv_bfloat16* q_batch = q + base;
+    const __nv_bfloat16* k_batch = k + base;
+    const __nv_bfloat16* v_batch = v + base;
+    __nv_bfloat16* out_batch =
+        out + static_cast<std::size_t>(bh) * kN * kD;
+
+    auto q_view = ct::partition_view{
+        ct::tensor_span{q_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<QRows, kD>{}
+    };
+    auto k_t_view = ct::partition_view{
+        ct::tensor_span{k_batch, DNMapping{DNShape{}, DNStrides{}}},
+        ct::shape<kD, KTile>{}
+    };
+    auto v_view = ct::partition_view{
+        ct::tensor_span{v_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<KTile, kD>{}
+    };
+    auto out_view = ct::partition_view{
+        ct::tensor_span{out_batch, ct::shape<kN, kD>{}},
+        ct::shape<QRows, kD>{}
+    };
+
+    auto q_tile = q_view.load(q_block, 0);
+    RowTile row_m = ct::full<RowTile>(-3.402823466e38f);
+    RowTile row_l = ct::full<RowTile>(0.0f);
+    OutTile out_acc = ct::full<OutTile>(0.0f);
+
+    for (auto seg : ct::irange(std::size_t{0}, std::size_t{FullKTiles / 2})) {
+        auto kt0 = seg * 2;
+        auto kt1 = kt0 + 1;
+
+        auto scores0 = ct::mma(q_tile,
+                               k_t_view.load(0, kt0),
+                               ct::full<ScoreTile>(0.0f)) * scale;
+        RowTile local_m = ct::reduce_max<1>(scores0);
+        auto probs0_f32 = softmax_exp<UseExp2>(scores0 - local_m);
+        auto probs0_bf16 = ct::element_cast<__nv_bfloat16>(probs0_f32);
+        RowTile local_l = ct::sum<1>(probs0_f32);
+        OutTile local_acc = ct::mma(probs0_bf16,
+                                    v_view.load(kt0, 0),
+                                    ct::full<OutTile>(0.0f));
+
+        auto scores1 = ct::mma(q_tile,
+                               k_t_view.load(0, kt1),
+                               ct::full<ScoreTile>(0.0f)) * scale;
+        auto tile_m = ct::reduce_max<1>(scores1);
+        auto new_local_m = ct::select(local_m > tile_m, local_m, tile_m);
+        auto local_alpha = softmax_exp<UseExp2>(local_m - new_local_m);
+        auto probs1_f32 = softmax_exp<UseExp2>(scores1 - new_local_m);
+        auto probs1_bf16 = ct::element_cast<__nv_bfloat16>(probs1_f32);
+        auto tile_l = ct::sum<1>(probs1_f32);
+
+        local_acc = local_acc * local_alpha +
+                    ct::mma(probs1_bf16,
+                            v_view.load(kt1, 0),
+                            ct::full<OutTile>(0.0f));
+        local_l = local_l * local_alpha + tile_l;
+        local_m = new_local_m;
+
+        auto new_m = ct::select(row_m > local_m, row_m, local_m);
+        auto global_alpha = softmax_exp<UseExp2>(row_m - new_m);
+        auto local_beta = softmax_exp<UseExp2>(local_m - new_m);
+        out_acc = out_acc * global_alpha + local_acc * local_beta;
+        row_l = row_l * global_alpha + local_l * local_beta;
+        row_m = new_m;
+    }
+
+    if constexpr (IncludeKeyTail) {
+        I64ScoreTile score_local = ct::iota<I64ScoreTile>();
+        auto key_cols =
+            static_cast<long long>(FullKTiles) * KTile + score_local % KTile;
+        auto valid = key_cols < kN;
+        auto scores = ct::mma(q_tile,
+                              k_t_view.load_masked(0, FullKTiles),
+                              ct::full<ScoreTile>(0.0f)) * scale;
+        auto neg_inf = scores * 0.0f - 3.402823466e38f;
+        scores = ct::select(valid, scores, neg_inf);
+        auto local_m = ct::reduce_max<1>(scores);
+        auto probs_f32 =
+            ct::select(valid, softmax_exp<UseExp2>(scores - local_m), scores * 0.0f);
+        auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+        auto local_l = ct::sum<1>(probs_f32);
+        auto local_acc = ct::mma(probs_bf16,
+                                 v_view.load_masked(FullKTiles, 0),
+                                 ct::full<OutTile>(0.0f));
+
+        auto new_m = ct::select(row_m > local_m, row_m, local_m);
+        auto global_alpha = softmax_exp<UseExp2>(row_m - new_m);
+        auto local_beta = softmax_exp<UseExp2>(local_m - new_m);
+        out_acc = out_acc * global_alpha + local_acc * local_beta;
+        row_l = row_l * global_alpha + local_l * local_beta;
+    }
+
+    out_view.store(ct::element_cast<__nv_bfloat16>(out_acc / row_l), q_block, 0);
+}
+
+template <int QRows,
+          int KTile,
+          bool IncludeKeyTail = true,
+          bool TailColBroadcastPaddedTailLoad = false>
+__tile_global__ void time_attention1301_main1280_split_contig_first_init_kernel(
+    const __nv_bfloat16* __restrict__ q,
+    const __nv_bfloat16* __restrict__ k,
+    const __nv_bfloat16* __restrict__ v,
+    __nv_bfloat16* __restrict__ out,
+    float scale) {
+    constexpr int FullKTiles = kNMain / KTile;
+    constexpr int NLayout =
+        TailColBroadcastPaddedTailLoad ? kNPad : kN;
+    using ScoreTile = ct::tile<float, ct::shape<QRows, KTile>>;
+    using OutTile = ct::tile<float, ct::shape<QRows, kD>>;
+    using I64ScoreTile = ct::tile<long long, ct::shape<QRows, KTile>>;
+    using I64ColTile = ct::tile<long long, ct::shape<1, KTile>>;
+    using RowTile = ct::tile<float, ct::shape<QRows, 1>>;
+    using NDShape = ct::shape<NLayout, kD>;
+    using DNShape = ct::shape<kD, NLayout>;
+    using NDStrides = ct::shape<kHeads * kD, 1>;
+    using DNStrides = ct::shape<1, kHeads * kD>;
+    using NDLayout = ct::layout_strided<NDStrides>;
+    using DNLayout = ct::layout_strided<DNStrides>;
+    using NDMapping = typename NDLayout::template mapping<NDShape>;
+    using DNMapping = typename DNLayout::template mapping<DNShape>;
+
+    q = ct::assume_aligned(q, 16_ic);
+    k = ct::assume_aligned(k, 16_ic);
+    v = ct::assume_aligned(v, 16_ic);
+    out = ct::assume_aligned(out, 16_ic);
+
+    auto [q_block, bh_raw, tile_z] = ct::bid();
+    (void)tile_z;
+    int bh = static_cast<int>(bh_raw);
+    int b = bh / kHeads;
+    int h = bh - b * kHeads;
+    const std::size_t base =
+        (static_cast<std::size_t>(b) * NLayout * kHeads + h) * kD;
+    const __nv_bfloat16* q_batch = q + base;
+    const __nv_bfloat16* k_batch = k + base;
+    const __nv_bfloat16* v_batch = v + base;
+    __nv_bfloat16* out_batch =
+        out + static_cast<std::size_t>(bh) * kN * kD;
+
+    auto q_view = ct::partition_view{
+        ct::tensor_span{q_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<QRows, kD>{}
+    };
+    auto k_t_view = ct::partition_view{
+        ct::tensor_span{k_batch, DNMapping{DNShape{}, DNStrides{}}},
+        ct::shape<kD, KTile>{}
+    };
+    auto v_view = ct::partition_view{
+        ct::tensor_span{v_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<KTile, kD>{}
+    };
+    auto out_view = ct::partition_view{
+        ct::tensor_span{out_batch, ct::shape<kN, kD>{}},
+        ct::shape<QRows, kD>{}
+    };
+
+    auto q_tile = q_view.load(q_block, 0);
+    auto scores0 = ct::mma(q_tile,
+                           k_t_view.load(0, 0),
+                           ct::full<ScoreTile>(0.0f)) * scale;
+    RowTile row_m = ct::reduce_max<1>(scores0);
+    auto probs0_f32 = softmax_exp<true>(scores0 - row_m);
+    auto probs0_bf16 = ct::element_cast<__nv_bfloat16>(probs0_f32);
+    RowTile row_l = ct::sum<1>(probs0_f32);
+    OutTile out_acc = ct::mma(probs0_bf16,
+                              v_view.load(0, 0),
+                              ct::full<OutTile>(0.0f));
+
+    for (auto kt : ct::irange(std::size_t{1}, std::size_t{FullKTiles})) {
+        auto scores = ct::mma(q_tile,
+                              k_t_view.load(0, kt),
+                              ct::full<ScoreTile>(0.0f)) * scale;
+        auto tile_m = ct::reduce_max<1>(scores);
+        auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+        auto alpha = softmax_exp<true>(row_m - new_m);
+        auto probs_f32 = softmax_exp<true>(scores - new_m);
+        auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+        auto tile_l = ct::sum<1>(probs_f32);
+
+        out_acc = out_acc * alpha +
+                  ct::mma(probs_bf16,
+                          v_view.load(kt, 0),
+                          ct::full<OutTile>(0.0f));
+        row_l = row_l * alpha + tile_l;
+        row_m = new_m;
+    }
+
+    if constexpr (IncludeKeyTail) {
+        if constexpr (TailColBroadcastPaddedTailLoad) {
+            I64ColTile col_local = ct::iota<I64ColTile>();
+            auto key_cols =
+                static_cast<long long>(FullKTiles) * KTile + col_local;
             auto valid = key_cols < kN;
             auto scores = ct::mma(q_tile,
-                                  k_t_view.load_masked(0, FullKTiles),
+                                  k_t_view.load(0, FullKTiles),
                                   ct::full<ScoreTile>(0.0f)) * scale;
             auto neg_inf = scores * 0.0f - 3.402823466e38f;
             scores = ct::select(valid, scores, neg_inf);
             auto tile_m = ct::reduce_max<1>(scores);
             auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
-            auto alpha = softmax_exp<UseExp2>(row_m - new_m);
+            auto alpha = softmax_exp<true>(row_m - new_m);
             auto probs_f32 =
-                ct::select(valid, softmax_exp<UseExp2>(scores - new_m), scores * 0.0f);
+                ct::select(valid, softmax_exp<true>(scores - new_m),
+                           scores * 0.0f);
             auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
             auto tile_l = ct::sum<1>(probs_f32);
             out_acc = out_acc * alpha +
                       ct::mma(probs_bf16,
-                              v_view.load_masked(FullKTiles, 0),
+                              v_view.load(FullKTiles, 0),
                               ct::full<OutTile>(0.0f));
             row_l = row_l * alpha + tile_l;
         } else {
             I64ScoreTile score_local = ct::iota<I64ScoreTile>();
-            auto key_cols = static_cast<long long>(FullKTiles) * KTile + score_local % KTile;
+            auto key_cols =
+                static_cast<long long>(FullKTiles) * KTile +
+                score_local % KTile;
             auto valid = key_cols < kN;
             auto scores = ct::mma(q_tile,
                                   k_t_view.load_masked(0, FullKTiles),
@@ -1194,9 +2384,10 @@ __tile_global__ void time_attention1301_main1280_split_contig_input_kernel(
             scores = ct::select(valid, scores, neg_inf);
             auto tile_m = ct::reduce_max<1>(scores);
             auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
-            auto alpha = softmax_exp<UseExp2>(row_m - new_m);
+            auto alpha = softmax_exp<true>(row_m - new_m);
             auto probs_f32 =
-                ct::select(valid, softmax_exp<UseExp2>(scores - new_m), scores * 0.0f);
+                ct::select(valid, softmax_exp<true>(scores - new_m),
+                           scores * 0.0f);
             auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
             auto tile_l = ct::sum<1>(probs_f32);
             out_acc = out_acc * alpha +
@@ -1208,6 +2399,454 @@ __tile_global__ void time_attention1301_main1280_split_contig_input_kernel(
     }
 
     out_view.store(ct::element_cast<__nv_bfloat16>(out_acc / row_l), q_block, 0);
+}
+
+template <int QRows,
+          int KTile,
+          bool IncludeKeyTail = true,
+          bool RoundRowM = false>
+__tile_global__ void time_attention1301_main1280_split_contig_row_state_bf16_kernel(
+    const __nv_bfloat16* __restrict__ q,
+    const __nv_bfloat16* __restrict__ k,
+    const __nv_bfloat16* __restrict__ v,
+    __nv_bfloat16* __restrict__ out,
+    float scale) {
+    constexpr int FullKTiles = kNMain / KTile;
+    using ScoreTile = ct::tile<float, ct::shape<QRows, KTile>>;
+    using OutTile = ct::tile<float, ct::shape<QRows, kD>>;
+    using I64ScoreTile = ct::tile<long long, ct::shape<QRows, KTile>>;
+    using RowTile = ct::tile<float, ct::shape<QRows, 1>>;
+    using NDShape = ct::shape<kN, kD>;
+    using DNShape = ct::shape<kD, kN>;
+    using NDStrides = ct::shape<kHeads * kD, 1>;
+    using DNStrides = ct::shape<1, kHeads * kD>;
+    using NDLayout = ct::layout_strided<NDStrides>;
+    using DNLayout = ct::layout_strided<DNStrides>;
+    using NDMapping = typename NDLayout::template mapping<NDShape>;
+    using DNMapping = typename DNLayout::template mapping<DNShape>;
+
+    q = ct::assume_aligned(q, 16_ic);
+    k = ct::assume_aligned(k, 16_ic);
+    v = ct::assume_aligned(v, 16_ic);
+    out = ct::assume_aligned(out, 16_ic);
+
+    auto [q_block, bh_raw, tile_z] = ct::bid();
+    (void)tile_z;
+    int bh = static_cast<int>(bh_raw);
+    int b = bh / kHeads;
+    int h = bh - b * kHeads;
+    const std::size_t base =
+        (static_cast<std::size_t>(b) * kN * kHeads + h) * kD;
+    const __nv_bfloat16* q_batch = q + base;
+    const __nv_bfloat16* k_batch = k + base;
+    const __nv_bfloat16* v_batch = v + base;
+    __nv_bfloat16* out_batch =
+        out + static_cast<std::size_t>(bh) * kN * kD;
+
+    auto q_view = ct::partition_view{
+        ct::tensor_span{q_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<QRows, kD>{}
+    };
+    auto k_t_view = ct::partition_view{
+        ct::tensor_span{k_batch, DNMapping{DNShape{}, DNStrides{}}},
+        ct::shape<kD, KTile>{}
+    };
+    auto v_view = ct::partition_view{
+        ct::tensor_span{v_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<KTile, kD>{}
+    };
+    auto out_view = ct::partition_view{
+        ct::tensor_span{out_batch, ct::shape<kN, kD>{}},
+        ct::shape<QRows, kD>{}
+    };
+
+    auto q_tile = q_view.load(q_block, 0);
+    RowTile row_m = ct::full<RowTile>(-3.402823466e38f);
+    RowTile row_l = ct::full<RowTile>(0.0f);
+    OutTile out_acc = ct::full<OutTile>(0.0f);
+
+    for (auto kt : ct::irange(std::size_t{0}, std::size_t{FullKTiles})) {
+        auto scores = ct::mma(q_tile,
+                              k_t_view.load(0, kt),
+                              ct::full<ScoreTile>(0.0f)) * scale;
+        auto tile_m = ct::reduce_max<1>(scores);
+        auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+        if constexpr (RoundRowM) {
+            new_m = ct::element_cast<float>(ct::element_cast<__nv_bfloat16>(new_m));
+        }
+        auto alpha = softmax_exp<true>(row_m - new_m);
+        alpha = ct::element_cast<float>(ct::element_cast<__nv_bfloat16>(alpha));
+        auto probs_f32 = softmax_exp<true>(scores - new_m);
+        auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+        auto tile_l = ct::sum<1>(ct::element_cast<float>(probs_bf16));
+
+        out_acc = out_acc * alpha +
+                  ct::mma(probs_bf16,
+                          v_view.load(kt, 0),
+                          ct::full<OutTile>(0.0f));
+        row_l = row_l * alpha + tile_l;
+        row_l = ct::element_cast<float>(ct::element_cast<__nv_bfloat16>(row_l));
+        row_m = new_m;
+    }
+
+    if constexpr (IncludeKeyTail) {
+        I64ScoreTile score_local = ct::iota<I64ScoreTile>();
+        auto key_cols =
+            static_cast<long long>(FullKTiles) * KTile + score_local % KTile;
+        auto valid = key_cols < kN;
+        auto scores = ct::mma(q_tile,
+                              k_t_view.load_masked(0, FullKTiles),
+                              ct::full<ScoreTile>(0.0f)) * scale;
+        auto neg_inf = scores * 0.0f - 3.402823466e38f;
+        scores = ct::select(valid, scores, neg_inf);
+        auto tile_m = ct::reduce_max<1>(scores);
+        auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+        if constexpr (RoundRowM) {
+            new_m = ct::element_cast<float>(ct::element_cast<__nv_bfloat16>(new_m));
+        }
+        auto alpha = softmax_exp<true>(row_m - new_m);
+        alpha = ct::element_cast<float>(ct::element_cast<__nv_bfloat16>(alpha));
+        auto probs_f32 =
+            ct::select(valid, softmax_exp<true>(scores - new_m), scores * 0.0f);
+        auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+        auto tile_l = ct::sum<1>(ct::element_cast<float>(probs_bf16));
+        out_acc = out_acc * alpha +
+                  ct::mma(probs_bf16,
+                          v_view.load_masked(FullKTiles, 0),
+                          ct::full<OutTile>(0.0f));
+        row_l = row_l * alpha + tile_l;
+        row_l = ct::element_cast<float>(ct::element_cast<__nv_bfloat16>(row_l));
+    }
+
+    out_view.store(ct::element_cast<__nv_bfloat16>(out_acc / row_l), q_block, 0);
+}
+
+template <int QRows,
+          int KTile,
+          bool IncludeKeyTail = true,
+          int QLoadLatency = 2,
+          int KLoadLatency = 2,
+          int VLoadLatency = 2>
+__tile_global__ void time_attention1301_main1280_split_contig_input_lat_kernel(
+    const __nv_bfloat16* __restrict__ q,
+    const __nv_bfloat16* __restrict__ k,
+    const __nv_bfloat16* __restrict__ v,
+    __nv_bfloat16* __restrict__ out,
+    float scale) {
+    constexpr int FullKTiles = kNMain / KTile;
+    using ScoreTile = ct::tile<float, ct::shape<QRows, KTile>>;
+    using OutTile = ct::tile<float, ct::shape<QRows, kD>>;
+    using I64ScoreTile = ct::tile<long long, ct::shape<QRows, KTile>>;
+    using RowTile = ct::tile<float, ct::shape<QRows, 1>>;
+    using NDShape = ct::shape<kN, kD>;
+    using DNShape = ct::shape<kD, kN>;
+    using NDStrides = ct::shape<kHeads * kD, 1>;
+    using DNStrides = ct::shape<1, kHeads * kD>;
+    using NDLayout = ct::layout_strided<NDStrides>;
+    using DNLayout = ct::layout_strided<DNStrides>;
+    using NDMapping = typename NDLayout::template mapping<NDShape>;
+    using DNMapping = typename DNLayout::template mapping<DNShape>;
+
+    q = ct::assume_aligned(q, 16_ic);
+    k = ct::assume_aligned(k, 16_ic);
+    v = ct::assume_aligned(v, 16_ic);
+    out = ct::assume_aligned(out, 16_ic);
+
+    auto [q_block, bh_raw, tile_z] = ct::bid();
+    (void)tile_z;
+    int bh = static_cast<int>(bh_raw);
+    int b = bh / kHeads;
+    int h = bh - b * kHeads;
+    const std::size_t base =
+        (static_cast<std::size_t>(b) * kN * kHeads + h) * kD;
+    const __nv_bfloat16* q_batch = q + base;
+    const __nv_bfloat16* k_batch = k + base;
+    const __nv_bfloat16* v_batch = v + base;
+    __nv_bfloat16* out_batch =
+        out + static_cast<std::size_t>(bh) * kN * kD;
+
+    auto q_view = ct::partition_view{
+        ct::tensor_span{q_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<QRows, kD>{}
+    };
+    auto k_t_view = ct::partition_view{
+        ct::tensor_span{k_batch, DNMapping{DNShape{}, DNStrides{}}},
+        ct::shape<kD, KTile>{}
+    };
+    auto v_view = ct::partition_view{
+        ct::tensor_span{v_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<KTile, kD>{}
+    };
+    auto out_view = ct::partition_view{
+        ct::tensor_span{out_batch, ct::shape<kN, kD>{}},
+        ct::shape<QRows, kD>{}
+    };
+
+    decltype(q_view.load(q_block, 0)) q_tile;
+    if constexpr (QLoadLatency > 0) {
+        [[cutile::hint(0, latency=QLoadLatency)]]
+        q_tile = q_view.load(q_block, 0);
+    } else {
+        q_tile = q_view.load(q_block, 0);
+    }
+    RowTile row_m = ct::full<RowTile>(-3.402823466e38f);
+    RowTile row_l = ct::full<RowTile>(0.0f);
+    OutTile out_acc = ct::full<OutTile>(0.0f);
+
+    for (auto kt : ct::irange(std::size_t{0}, std::size_t{FullKTiles})) {
+        decltype(k_t_view.load(0, kt)) k_tile;
+        decltype(v_view.load(kt, 0)) v_tile;
+        if constexpr (KLoadLatency > 0) {
+            [[cutile::hint(0, latency=KLoadLatency)]]
+            k_tile = k_t_view.load(0, kt);
+        } else {
+            k_tile = k_t_view.load(0, kt);
+        }
+        if constexpr (VLoadLatency > 0) {
+            [[cutile::hint(0, latency=VLoadLatency)]]
+            v_tile = v_view.load(kt, 0);
+        } else {
+            v_tile = v_view.load(kt, 0);
+        }
+        auto scores = ct::mma(q_tile,
+                              k_tile,
+                              ct::full<ScoreTile>(0.0f)) * scale;
+        auto tile_m = ct::reduce_max<1>(scores);
+        auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+        auto alpha = softmax_exp<true>(row_m - new_m);
+        auto probs_f32 = softmax_exp<true>(scores - new_m);
+        auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+        auto tile_l = ct::sum<1>(probs_f32);
+
+        out_acc = out_acc * alpha +
+                  ct::mma(probs_bf16,
+                          v_tile,
+                          ct::full<OutTile>(0.0f));
+        row_l = row_l * alpha + tile_l;
+        row_m = new_m;
+    }
+
+    if constexpr (IncludeKeyTail) {
+        I64ScoreTile score_local = ct::iota<I64ScoreTile>();
+        auto key_cols =
+            static_cast<long long>(FullKTiles) * KTile + score_local % KTile;
+        auto valid = key_cols < kN;
+        decltype(k_t_view.load_masked(0, FullKTiles)) k_tail;
+        decltype(v_view.load_masked(FullKTiles, 0)) v_tail;
+        if constexpr (KLoadLatency > 0) {
+            [[cutile::hint(0, latency=KLoadLatency)]]
+            k_tail = k_t_view.load_masked(0, FullKTiles);
+        } else {
+            k_tail = k_t_view.load_masked(0, FullKTiles);
+        }
+        if constexpr (VLoadLatency > 0) {
+            [[cutile::hint(0, latency=VLoadLatency)]]
+            v_tail = v_view.load_masked(FullKTiles, 0);
+        } else {
+            v_tail = v_view.load_masked(FullKTiles, 0);
+        }
+        auto scores = ct::mma(q_tile,
+                              k_tail,
+                              ct::full<ScoreTile>(0.0f)) * scale;
+        auto neg_inf = scores * 0.0f - 3.402823466e38f;
+        scores = ct::select(valid, scores, neg_inf);
+        auto tile_m = ct::reduce_max<1>(scores);
+        auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+        auto alpha = softmax_exp<true>(row_m - new_m);
+        auto probs_f32 =
+            ct::select(valid, softmax_exp<true>(scores - new_m), scores * 0.0f);
+        auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+        auto tile_l = ct::sum<1>(probs_f32);
+        out_acc = out_acc * alpha +
+                  ct::mma(probs_bf16,
+                          v_tail,
+                          ct::full<OutTile>(0.0f));
+        row_l = row_l * alpha + tile_l;
+    }
+
+    out_view.store(ct::element_cast<__nv_bfloat16>(out_acc / row_l), q_block, 0);
+}
+
+template <int QRows, int KTile, bool IncludeKeyTail = true>
+__tile_global__ void time_attention1301_main1280_split_contig_score_av_lb_kernel(
+    const __nv_bfloat16* __restrict__ q,
+    const __nv_bfloat16* __restrict__ k,
+    const __nv_bfloat16* __restrict__ v,
+    __nv_bfloat16* __restrict__ out,
+    float scale) {
+    constexpr int FullKTiles = kNMain / KTile;
+    using ScoreTile = ct::tile<float, ct::shape<QRows, KTile>>;
+    using OutTile = ct::tile<float, ct::shape<QRows, kD>>;
+    using I64ScoreTile = ct::tile<long long, ct::shape<QRows, KTile>>;
+    using NDShape = ct::shape<kN, kD>;
+    using DNShape = ct::shape<kD, kN>;
+    using NDStrides = ct::shape<kHeads * kD, 1>;
+    using DNStrides = ct::shape<1, kHeads * kD>;
+    using NDLayout = ct::layout_strided<NDStrides>;
+    using DNLayout = ct::layout_strided<DNStrides>;
+    using NDMapping = typename NDLayout::template mapping<NDShape>;
+    using DNMapping = typename DNLayout::template mapping<DNShape>;
+
+    q = ct::assume_aligned(q, 16_ic);
+    k = ct::assume_aligned(k, 16_ic);
+    v = ct::assume_aligned(v, 16_ic);
+    out = ct::assume_aligned(out, 16_ic);
+
+    auto [q_block, bh_raw, tile_z] = ct::bid();
+    (void)tile_z;
+    int bh = static_cast<int>(bh_raw);
+    int b = bh / kHeads;
+    int h = bh - b * kHeads;
+    const std::size_t base =
+        (static_cast<std::size_t>(b) * kN * kHeads + h) * kD;
+    const __nv_bfloat16* q_batch = q + base;
+    const __nv_bfloat16* k_batch = k + base;
+    const __nv_bfloat16* v_batch = v + base;
+    __nv_bfloat16* out_batch =
+        out + static_cast<std::size_t>(bh) * kN * kD;
+
+    auto q_view = ct::partition_view{
+        ct::tensor_span{q_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<QRows, kD>{}
+    };
+    auto k_t_view = ct::partition_view{
+        ct::tensor_span{k_batch, DNMapping{DNShape{}, DNStrides{}}},
+        ct::shape<kD, KTile>{}
+    };
+    auto v_view = ct::partition_view{
+        ct::tensor_span{v_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<KTile, kD>{}
+    };
+    auto out_view = ct::partition_view{
+        ct::tensor_span{out_batch, ct::shape<kN, kD>{}},
+        ct::shape<QRows, kD>{}
+    };
+
+    auto q_tile = q_view.load(q_block, 0);
+    OutTile out_acc = ct::full<OutTile>(0.0f);
+
+    for (auto kt : ct::irange(std::size_t{0}, std::size_t{FullKTiles})) {
+        auto scores = ct::mma(q_tile,
+                              k_t_view.load(0, kt),
+                              ct::full<ScoreTile>(0.0f)) * scale;
+        out_acc = out_acc +
+                  ct::mma(ct::element_cast<__nv_bfloat16>(scores),
+                          v_view.load(kt, 0),
+                          ct::full<OutTile>(0.0f));
+    }
+
+    if constexpr (IncludeKeyTail) {
+        I64ScoreTile score_local = ct::iota<I64ScoreTile>();
+        auto key_cols = static_cast<long long>(FullKTiles) * KTile + score_local % KTile;
+        auto valid = key_cols < kN;
+        auto scores = ct::mma(q_tile,
+                              k_t_view.load_masked(0, FullKTiles),
+                              ct::full<ScoreTile>(0.0f));
+        auto score_values = ct::select(valid, scores * scale, scores * 0.0f);
+        out_acc = out_acc +
+                  ct::mma(ct::element_cast<__nv_bfloat16>(score_values),
+                          v_view.load_masked(FullKTiles, 0),
+                          ct::full<OutTile>(0.0f));
+    }
+
+    out_view.store(ct::element_cast<__nv_bfloat16>(out_acc), q_block, 0);
+}
+
+template <int QRows, int KTile, bool IncludeKeyTail = true>
+__tile_global__ void time_attention1301_main1280_split_contig_tile_local_softmax_lb_kernel(
+    const __nv_bfloat16* __restrict__ q,
+    const __nv_bfloat16* __restrict__ k,
+    const __nv_bfloat16* __restrict__ v,
+    __nv_bfloat16* __restrict__ out,
+    float scale) {
+    constexpr int FullKTiles = kNMain / KTile;
+    using ScoreTile = ct::tile<float, ct::shape<QRows, KTile>>;
+    using OutTile = ct::tile<float, ct::shape<QRows, kD>>;
+    using I64ScoreTile = ct::tile<long long, ct::shape<QRows, KTile>>;
+    using RowTile = ct::tile<float, ct::shape<QRows, 1>>;
+    using NDShape = ct::shape<kN, kD>;
+    using DNShape = ct::shape<kD, kN>;
+    using NDStrides = ct::shape<kHeads * kD, 1>;
+    using DNStrides = ct::shape<1, kHeads * kD>;
+    using NDLayout = ct::layout_strided<NDStrides>;
+    using DNLayout = ct::layout_strided<DNStrides>;
+    using NDMapping = typename NDLayout::template mapping<NDShape>;
+    using DNMapping = typename DNLayout::template mapping<DNShape>;
+
+    q = ct::assume_aligned(q, 16_ic);
+    k = ct::assume_aligned(k, 16_ic);
+    v = ct::assume_aligned(v, 16_ic);
+    out = ct::assume_aligned(out, 16_ic);
+
+    auto [q_block, bh_raw, tile_z] = ct::bid();
+    (void)tile_z;
+    int bh = static_cast<int>(bh_raw);
+    int b = bh / kHeads;
+    int h = bh - b * kHeads;
+    const std::size_t base =
+        (static_cast<std::size_t>(b) * kN * kHeads + h) * kD;
+    const __nv_bfloat16* q_batch = q + base;
+    const __nv_bfloat16* k_batch = k + base;
+    const __nv_bfloat16* v_batch = v + base;
+    __nv_bfloat16* out_batch =
+        out + static_cast<std::size_t>(bh) * kN * kD;
+
+    auto q_view = ct::partition_view{
+        ct::tensor_span{q_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<QRows, kD>{}
+    };
+    auto k_t_view = ct::partition_view{
+        ct::tensor_span{k_batch, DNMapping{DNShape{}, DNStrides{}}},
+        ct::shape<kD, KTile>{}
+    };
+    auto v_view = ct::partition_view{
+        ct::tensor_span{v_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<KTile, kD>{}
+    };
+    auto out_view = ct::partition_view{
+        ct::tensor_span{out_batch, ct::shape<kN, kD>{}},
+        ct::shape<QRows, kD>{}
+    };
+
+    auto q_tile = q_view.load(q_block, 0);
+    OutTile out_acc = ct::full<OutTile>(0.0f);
+    RowTile denom_acc = ct::full<RowTile>(0.0f);
+
+    for (auto kt : ct::irange(std::size_t{0}, std::size_t{FullKTiles})) {
+        auto scores = ct::mma(q_tile,
+                              k_t_view.load(0, kt),
+                              ct::full<ScoreTile>(0.0f)) * scale;
+        auto tile_m = ct::reduce_max<1>(scores);
+        auto probs_f32 = softmax_exp<true>(scores - tile_m);
+        auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+        out_acc = out_acc +
+                  ct::mma(probs_bf16,
+                          v_view.load(kt, 0),
+                          ct::full<OutTile>(0.0f));
+        denom_acc = denom_acc + ct::sum<1>(probs_f32);
+    }
+
+    if constexpr (IncludeKeyTail) {
+        I64ScoreTile score_local = ct::iota<I64ScoreTile>();
+        auto key_cols = static_cast<long long>(FullKTiles) * KTile + score_local % KTile;
+        auto valid = key_cols < kN;
+        auto scores = ct::mma(q_tile,
+                              k_t_view.load_masked(0, FullKTiles),
+                              ct::full<ScoreTile>(0.0f)) * scale;
+        auto neg_inf = scores * 0.0f - 3.402823466e38f;
+        scores = ct::select(valid, scores, neg_inf);
+        auto tile_m = ct::reduce_max<1>(scores);
+        auto probs_f32 =
+            ct::select(valid, softmax_exp<true>(scores - tile_m), scores * 0.0f);
+        auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+        out_acc = out_acc +
+                  ct::mma(probs_bf16,
+                          v_view.load_masked(FullKTiles, 0),
+                          ct::full<OutTile>(0.0f));
+        denom_acc = denom_acc + ct::sum<1>(probs_f32);
+    }
+
+    out_view.store(ct::element_cast<__nv_bfloat16>(out_acc / denom_acc), q_block, 0);
 }
 
 template <int QRows, int KTile, bool UseExp2 = true>
@@ -1313,6 +2952,112 @@ __tile_global__ void time_attention1301_main1280_split_contig_tail_first_kernel(
 }
 
 template <int QRows, int KTile, bool UseExp2 = true>
+__tile_global__ void
+time_attention1301_main1280_split_contig_tail_first_padded_tail_load_kernel(
+    const __nv_bfloat16* __restrict__ q,
+    const __nv_bfloat16* __restrict__ k,
+    const __nv_bfloat16* __restrict__ v,
+    __nv_bfloat16* __restrict__ out,
+    float scale) {
+    constexpr int FullKTiles = kNMain / KTile;
+    using ScoreTile = ct::tile<float, ct::shape<QRows, KTile>>;
+    using OutTile = ct::tile<float, ct::shape<QRows, kD>>;
+    using I64ScoreTile = ct::tile<long long, ct::shape<QRows, KTile>>;
+    using RowTile = ct::tile<float, ct::shape<QRows, 1>>;
+    using NDShape = ct::shape<kNPad, kD>;
+    using DNShape = ct::shape<kD, kNPad>;
+    using NDStrides = ct::shape<kHeads * kD, 1>;
+    using DNStrides = ct::shape<1, kHeads * kD>;
+    using NDLayout = ct::layout_strided<NDStrides>;
+    using DNLayout = ct::layout_strided<DNStrides>;
+    using NDMapping = typename NDLayout::template mapping<NDShape>;
+    using DNMapping = typename DNLayout::template mapping<DNShape>;
+
+    q = ct::assume_aligned(q, 16_ic);
+    k = ct::assume_aligned(k, 16_ic);
+    v = ct::assume_aligned(v, 16_ic);
+    out = ct::assume_aligned(out, 16_ic);
+
+    auto [q_block, bh_raw, tile_z] = ct::bid();
+    (void)tile_z;
+    int bh = static_cast<int>(bh_raw);
+    int b = bh / kHeads;
+    int h = bh - b * kHeads;
+    const std::size_t base =
+        (static_cast<std::size_t>(b) * kNPad * kHeads + h) * kD;
+    const __nv_bfloat16* q_batch = q + base;
+    const __nv_bfloat16* k_batch = k + base;
+    const __nv_bfloat16* v_batch = v + base;
+    __nv_bfloat16* out_batch =
+        out + static_cast<std::size_t>(bh) * kN * kD;
+
+    auto q_view = ct::partition_view{
+        ct::tensor_span{q_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<QRows, kD>{}
+    };
+    auto k_t_view = ct::partition_view{
+        ct::tensor_span{k_batch, DNMapping{DNShape{}, DNStrides{}}},
+        ct::shape<kD, KTile>{}
+    };
+    auto v_view = ct::partition_view{
+        ct::tensor_span{v_batch, NDMapping{NDShape{}, NDStrides{}}},
+        ct::shape<KTile, kD>{}
+    };
+    auto out_view = ct::partition_view{
+        ct::tensor_span{out_batch, ct::shape<kN, kD>{}},
+        ct::shape<QRows, kD>{}
+    };
+
+    auto q_tile = q_view.load(q_block, 0);
+    RowTile row_m = ct::full<RowTile>(-3.402823466e38f);
+    RowTile row_l = ct::full<RowTile>(0.0f);
+    OutTile out_acc = ct::full<OutTile>(0.0f);
+
+    {
+        I64ScoreTile score_local = ct::iota<I64ScoreTile>();
+        auto key_cols = static_cast<long long>(FullKTiles) * KTile + score_local % KTile;
+        auto valid = key_cols < kN;
+        auto scores = ct::mma(q_tile,
+                              k_t_view.load(0, FullKTiles),
+                              ct::full<ScoreTile>(0.0f)) * scale;
+        auto neg_inf = scores * 0.0f - 3.402823466e38f;
+        scores = ct::select(valid, scores, neg_inf);
+        row_m = ct::reduce_max<1>(scores);
+        auto probs_f32 =
+            ct::select(valid, softmax_exp<UseExp2>(scores - row_m), scores * 0.0f);
+        auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+        row_l = ct::sum<1>(probs_f32);
+        out_acc = ct::mma(probs_bf16,
+                          v_view.load(FullKTiles, 0),
+                          ct::full<OutTile>(0.0f));
+    }
+
+    for (auto kt : ct::irange(std::size_t{0}, std::size_t{FullKTiles})) {
+        auto scores = ct::mma(q_tile,
+                              k_t_view.load(0, kt),
+                              ct::full<ScoreTile>(0.0f)) * scale;
+        auto tile_m = ct::reduce_max<1>(scores);
+        auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+        auto alpha = softmax_exp<UseExp2>(row_m - new_m);
+        auto probs_f32 = softmax_exp<UseExp2>(scores - new_m);
+        auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+        auto tile_l = ct::sum<1>(probs_f32);
+
+        out_acc = out_acc * alpha +
+                  ct::mma(probs_bf16,
+                          v_view.load(kt, 0),
+                          ct::full<OutTile>(0.0f));
+        row_l = row_l * alpha + tile_l;
+        row_m = new_m;
+    }
+
+    out_view.store(ct::element_cast<__nv_bfloat16>(out_acc / row_l), q_block, 0);
+}
+
+template <int QRows,
+          int KTile,
+          bool UseExp2 = true,
+          bool TailColBroadcast = false>
 __tile_global__ void time_attention1301_main1280_split_contig_padded_tail_load_kernel(
     const __nv_bfloat16* __restrict__ q,
     const __nv_bfloat16* __restrict__ k,
@@ -1323,6 +3068,7 @@ __tile_global__ void time_attention1301_main1280_split_contig_padded_tail_load_k
     using ScoreTile = ct::tile<float, ct::shape<QRows, KTile>>;
     using OutTile = ct::tile<float, ct::shape<QRows, kD>>;
     using I64ScoreTile = ct::tile<long long, ct::shape<QRows, KTile>>;
+    using I64ColTile = ct::tile<long long, ct::shape<1, KTile>>;
     using RowTile = ct::tile<float, ct::shape<QRows, 1>>;
     using NDShape = ct::shape<kNPad, kD>;
     using DNShape = ct::shape<kD, kNPad>;
@@ -1392,26 +3138,53 @@ __tile_global__ void time_attention1301_main1280_split_contig_padded_tail_load_k
         row_m = new_m;
     }
 
-    I64ScoreTile score_local = ct::iota<I64ScoreTile>();
-    auto key_cols = static_cast<long long>(FullKTiles) * KTile + score_local % KTile;
-    auto valid = key_cols < kN;
-    auto scores = ct::mma(q_tile,
-                          k_t_view.load(0, FullKTiles),
-                          ct::full<ScoreTile>(0.0f)) * scale;
-    auto neg_inf = scores * 0.0f - 3.402823466e38f;
-    scores = ct::select(valid, scores, neg_inf);
-    auto tile_m = ct::reduce_max<1>(scores);
-    auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
-    auto alpha = softmax_exp<UseExp2>(row_m - new_m);
-    auto probs_f32 =
-        ct::select(valid, softmax_exp<UseExp2>(scores - new_m), scores * 0.0f);
-    auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
-    auto tile_l = ct::sum<1>(probs_f32);
-    out_acc = out_acc * alpha +
-              ct::mma(probs_bf16,
-                      v_view.load(FullKTiles, 0),
-                      ct::full<OutTile>(0.0f));
-    row_l = row_l * alpha + tile_l;
+    if constexpr (TailColBroadcast) {
+        I64ColTile col_local = ct::iota<I64ColTile>();
+        auto key_cols =
+            static_cast<long long>(FullKTiles) * KTile + col_local;
+        auto valid = key_cols < kN;
+        auto scores = ct::mma(q_tile,
+                              k_t_view.load(0, FullKTiles),
+                              ct::full<ScoreTile>(0.0f)) * scale;
+        auto neg_inf = scores * 0.0f - 3.402823466e38f;
+        scores = ct::select(valid, scores, neg_inf);
+        auto tile_m = ct::reduce_max<1>(scores);
+        auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+        auto alpha = softmax_exp<UseExp2>(row_m - new_m);
+        auto probs_f32 =
+            ct::select(valid, softmax_exp<UseExp2>(scores - new_m),
+                       scores * 0.0f);
+        auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+        auto tile_l = ct::sum<1>(probs_f32);
+        out_acc = out_acc * alpha +
+                  ct::mma(probs_bf16,
+                          v_view.load(FullKTiles, 0),
+                          ct::full<OutTile>(0.0f));
+        row_l = row_l * alpha + tile_l;
+    } else {
+        I64ScoreTile score_local = ct::iota<I64ScoreTile>();
+        auto key_cols =
+            static_cast<long long>(FullKTiles) * KTile + score_local % KTile;
+        auto valid = key_cols < kN;
+        auto scores = ct::mma(q_tile,
+                              k_t_view.load(0, FullKTiles),
+                              ct::full<ScoreTile>(0.0f)) * scale;
+        auto neg_inf = scores * 0.0f - 3.402823466e38f;
+        scores = ct::select(valid, scores, neg_inf);
+        auto tile_m = ct::reduce_max<1>(scores);
+        auto new_m = ct::select(row_m > tile_m, row_m, tile_m);
+        auto alpha = softmax_exp<UseExp2>(row_m - new_m);
+        auto probs_f32 =
+            ct::select(valid, softmax_exp<UseExp2>(scores - new_m),
+                       scores * 0.0f);
+        auto probs_bf16 = ct::element_cast<__nv_bfloat16>(probs_f32);
+        auto tile_l = ct::sum<1>(probs_f32);
+        out_acc = out_acc * alpha +
+                  ct::mma(probs_bf16,
+                          v_view.load(FullKTiles, 0),
+                          ct::full<OutTile>(0.0f));
+        row_l = row_l * alpha + tile_l;
+    }
 
     out_view.store(ct::element_cast<__nv_bfloat16>(out_acc / row_l), q_block, 0);
 }
@@ -2472,7 +4245,14 @@ void run_main1280_variant(const Options& opts,
 template <int QRows,
           int KTile,
           bool IncludeKeyTail = true,
-          bool TailIdx32 = false>
+          bool TailIdx32 = false,
+          bool UseFinalReciprocal = false,
+          bool TailColBroadcast = false,
+          bool RoundOutAcc = false,
+          bool SkipAlphaExp = false,
+          int Prob = kProbExp,
+          bool ProbSumBf16 = false,
+          int Alpha = kAlphaExact>
 void run_main1280_split_contig_input_variant(const Options& opts,
                                              const __nv_bfloat16* d_q,
                                              const __nv_bfloat16* d_k,
@@ -2482,7 +4262,9 @@ void run_main1280_split_contig_input_variant(const Options& opts,
     dim3 grid(kNMain / QRows, kBH);
     for (int i = 0; i < opts.warmup; ++i) {
         time_attention1301_main1280_split_contig_input_kernel
-            <QRows, KTile, true, IncludeKeyTail, TailIdx32>
+            <QRows, KTile, true, IncludeKeyTail, TailIdx32, UseFinalReciprocal,
+             TailColBroadcast, RoundOutAcc, SkipAlphaExp, Prob, ProbSumBf16,
+             Alpha>
             <<<grid, 1>>>(d_q, d_k, d_v, d_out, scale);
     }
     CUDA_CHECK(cudaGetLastError());
@@ -2497,7 +4279,9 @@ void run_main1280_split_contig_input_variant(const Options& opts,
     for (int i = 0; i < opts.iters; ++i) {
         CUDA_CHECK(cudaEventRecord(start));
         time_attention1301_main1280_split_contig_input_kernel
-            <QRows, KTile, true, IncludeKeyTail, TailIdx32>
+            <QRows, KTile, true, IncludeKeyTail, TailIdx32, UseFinalReciprocal,
+             TailColBroadcast, RoundOutAcc, SkipAlphaExp, Prob, ProbSumBf16,
+             Alpha>
             <<<grid, 1>>>(d_q, d_k, d_v, d_out, scale);
         CUDA_CHECK(cudaEventRecord(stop));
         CUDA_CHECK(cudaEventSynchronize(stop));
@@ -2522,11 +4306,774 @@ void run_main1280_split_contig_input_variant(const Options& opts,
     double real_tflops = real_flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
     double logical_tflops =
         logical_padded_flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
-    const char* name = !IncludeKeyTail
-        ? "main1280_split_contig_input_exp2_no_keytail"
-        : (TailIdx32
-            ? "main1280_split_contig_input_exp2_tail_idx32"
-            : "main1280_split_contig_input_exp2");
+    const char* name = "main1280_split_contig_input_exp2";
+    if constexpr (UseFinalReciprocal && Alpha == kAlphaProbClamp &&
+                  Prob == kProbPoly3NoClamp) {
+        name = "main1280_split_contig_input_exp2_prob_poly3_noclamp_alpha_poly3_clamp_final_rcp";
+    } else if constexpr (Alpha == kAlphaProbClamp && Prob == kProbRational4) {
+        name = "main1280_split_contig_input_exp2_prob_rational4_alpha_rational4";
+    } else if constexpr (Alpha == kAlphaLinearClamp && Prob == kProbPoly3NoClamp) {
+        name = "main1280_split_contig_input_exp2_prob_poly3_noclamp_alpha_linear_clamp";
+    } else if constexpr (Alpha == kAlphaProbClamp && Prob == kProbPoly3NoClamp) {
+        name = "main1280_split_contig_input_exp2_prob_poly3_noclamp_alpha_poly3_clamp";
+    } else if constexpr (Alpha == kAlphaProbClamp && Prob == kProbPoly3OutputClamp) {
+        name = "main1280_split_contig_input_exp2_prob_poly3_outclamp_alpha_outclamp";
+    } else if constexpr (Prob == kProbPoly3NoClamp) {
+        name = "main1280_split_contig_input_exp2_prob_poly3_noclamp";
+    } else if constexpr (ProbSumBf16 && Prob == kProbPoly4NoClamp) {
+        name = "main1280_split_contig_input_exp2_prob_poly4_noclamp_sum_bf16";
+    } else if constexpr (Prob == kProbPoly4NoClampBias) {
+        name = "main1280_split_contig_input_exp2_prob_poly4_noclamp_bias";
+    } else if constexpr (Prob == kProbLinearNoClamp) {
+        name = "main1280_split_contig_input_exp2_prob_linear_noclamp";
+    } else if constexpr (Prob == kProbPoly2NoClamp) {
+        name = "main1280_split_contig_input_exp2_prob_poly2_noclamp";
+    } else if constexpr (Prob == kProbPoly4NoClamp) {
+        name = "main1280_split_contig_input_exp2_prob_poly4_noclamp";
+    } else if constexpr (Prob == kProbPoly2) {
+        name = "main1280_split_contig_input_exp2_prob_poly2";
+    } else if constexpr (Prob == kProbPoly4) {
+        name = "main1280_split_contig_input_exp2_prob_poly4";
+    } else if constexpr (Prob == kProbLinear) {
+        name = "main1280_split_contig_input_exp2_prob_linear";
+    } else if constexpr (SkipAlphaExp) {
+        name = "main1280_split_contig_input_exp2_alpha_one";
+    } else if constexpr (UseFinalReciprocal && !IncludeKeyTail) {
+        name = "main1280_split_contig_input_exp2_final_rcp_no_keytail";
+    } else if constexpr (UseFinalReciprocal) {
+        name = "main1280_split_contig_input_exp2_final_rcp";
+    } else if constexpr (TailColBroadcast && RoundOutAcc) {
+        name = "main1280_split_contig_input_exp2_tail_col_broadcast_out_acc_bf16";
+    } else if constexpr (RoundOutAcc && !IncludeKeyTail) {
+        name = "main1280_split_contig_input_exp2_out_acc_bf16_no_keytail";
+    } else if constexpr (RoundOutAcc) {
+        name = "main1280_split_contig_input_exp2_out_acc_bf16";
+    } else if constexpr (TailColBroadcast) {
+        name = "main1280_split_contig_input_exp2_tail_col_broadcast";
+    } else if constexpr (!IncludeKeyTail) {
+        name = "main1280_split_contig_input_exp2_no_keytail";
+    } else if constexpr (TailIdx32) {
+        name = "main1280_split_contig_input_exp2_tail_idx32";
+    }
+    std::printf("%s qrows=%d ktile=%d best=%.3f ms median=%.3f ms real_math=%.2f TF/s logical_tile_math=%.2f TF/s roof70=%.1f%% checksum=%.6f\n",
+                name, QRows, KTile, best_ms, median_ms, real_tflops, logical_tflops,
+                real_tflops / 70.0 * 100.0, __bfloat162float(checksum_bf16));
+}
+
+template <int QRows, int KTile>
+void run_main1280_split_contig_tail_prob_mask_only_variant(
+    const Options& opts,
+    const __nv_bfloat16* d_q,
+    const __nv_bfloat16* d_k,
+    const __nv_bfloat16* d_v,
+    __nv_bfloat16* d_out,
+    float scale) {
+    dim3 grid(kNMain / QRows, kBH);
+    for (int i = 0; i < opts.warmup; ++i) {
+        time_attention1301_main1280_split_contig_tail_prob_mask_only_kernel
+            <QRows, KTile, true>
+            <<<grid, 1>>>(d_q, d_k, d_v, d_out, scale);
+    }
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    cudaEvent_t start{};
+    cudaEvent_t stop{};
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    std::vector<float> times_ms;
+    times_ms.reserve(opts.iters);
+    for (int i = 0; i < opts.iters; ++i) {
+        CUDA_CHECK(cudaEventRecord(start));
+        time_attention1301_main1280_split_contig_tail_prob_mask_only_kernel
+            <QRows, KTile, true>
+            <<<grid, 1>>>(d_q, d_k, d_v, d_out, scale);
+        CUDA_CHECK(cudaEventRecord(stop));
+        CUDA_CHECK(cudaEventSynchronize(stop));
+        CUDA_CHECK(cudaGetLastError());
+        float ms = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+        times_ms.push_back(ms);
+    }
+
+    __nv_bfloat16 checksum_bf16{};
+    CUDA_CHECK(cudaMemcpy(&checksum_bf16, d_out, sizeof(checksum_bf16), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+
+    float best_ms = *std::min_element(times_ms.begin(), times_ms.end());
+    float median_ms = percentile(times_ms, 0.5f);
+    double real_flops = 4.0 * static_cast<double>(kBH) * kNMain * kN * kD;
+    double logical_padded_flops =
+        4.0 * static_cast<double>(kBH) * kNMain * kNPad * kD;
+    double real_tflops = real_flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
+    double logical_tflops =
+        logical_padded_flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
+    std::printf("main1280_split_contig_input_exp2_tail_prob_mask_only qrows=%d ktile=%d best=%.3f ms median=%.3f ms real_math=%.2f TF/s logical_tile_math=%.2f TF/s roof70=%.1f%% checksum=%.6f\n",
+                QRows, KTile, best_ms, median_ms, real_tflops, logical_tflops,
+                real_tflops / 70.0 * 100.0, __bfloat162float(checksum_bf16));
+}
+
+template <int QRows, int KTile>
+void run_main1280_split_contig_tail16_8_variant(const Options& opts,
+                                                const __nv_bfloat16* d_q,
+                                                const __nv_bfloat16* d_k,
+                                                const __nv_bfloat16* d_v,
+                                                __nv_bfloat16* d_out,
+                                                float scale) {
+    dim3 grid(kNMain / QRows, kBH);
+    for (int i = 0; i < opts.warmup; ++i) {
+        time_attention1301_main1280_split_contig_tail16_8_kernel<QRows, KTile, true>
+            <<<grid, 1>>>(d_q, d_k, d_v, d_out, scale);
+    }
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    cudaEvent_t start{};
+    cudaEvent_t stop{};
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    std::vector<float> times_ms;
+    times_ms.reserve(opts.iters);
+    for (int i = 0; i < opts.iters; ++i) {
+        CUDA_CHECK(cudaEventRecord(start));
+        time_attention1301_main1280_split_contig_tail16_8_kernel<QRows, KTile, true>
+            <<<grid, 1>>>(d_q, d_k, d_v, d_out, scale);
+        CUDA_CHECK(cudaEventRecord(stop));
+        CUDA_CHECK(cudaEventSynchronize(stop));
+        CUDA_CHECK(cudaGetLastError());
+        float ms = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+        times_ms.push_back(ms);
+    }
+
+    __nv_bfloat16 checksum_bf16{};
+    CUDA_CHECK(cudaMemcpy(&checksum_bf16, d_out, sizeof(checksum_bf16), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+
+    float best_ms = *std::min_element(times_ms.begin(), times_ms.end());
+    float median_ms = percentile(times_ms, 0.5f);
+    double real_flops = 4.0 * static_cast<double>(kBH) * kNMain * kN * kD;
+    double logical_padded_flops =
+        4.0 * static_cast<double>(kBH) * kNMain * (kNMain + 24) * kD;
+    double real_tflops = real_flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
+    double logical_tflops =
+        logical_padded_flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
+    std::printf("main1280_split_contig_input_exp2_tail16_8 qrows=%d ktile=%d best=%.3f ms median=%.3f ms real_math=%.2f TF/s logical_tile_math=%.2f TF/s roof70=%.1f%% checksum=%.6f\n",
+                QRows, KTile, best_ms, median_ms, real_tflops, logical_tflops,
+                real_tflops / 70.0 * 100.0, __bfloat162float(checksum_bf16));
+}
+
+template <int QRows, int KTile>
+void run_main1280_split_contig_tail_helper_variant(
+    const Options& opts,
+    const __nv_bfloat16* d_q,
+    const __nv_bfloat16* d_k,
+    const __nv_bfloat16* d_v,
+    __nv_bfloat16* d_out,
+    float scale) {
+    dim3 grid(kNMain / QRows, kBH);
+    for (int i = 0; i < opts.warmup; ++i) {
+        time_attention1301_main1280_split_contig_tail_helper_kernel<QRows, KTile, true>
+            <<<grid, 1>>>(d_q, d_k, d_v, d_out, scale);
+    }
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    cudaEvent_t start{};
+    cudaEvent_t stop{};
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    std::vector<float> times_ms;
+    times_ms.reserve(opts.iters);
+    for (int i = 0; i < opts.iters; ++i) {
+        CUDA_CHECK(cudaEventRecord(start));
+        time_attention1301_main1280_split_contig_tail_helper_kernel<QRows, KTile, true>
+            <<<grid, 1>>>(d_q, d_k, d_v, d_out, scale);
+        CUDA_CHECK(cudaEventRecord(stop));
+        CUDA_CHECK(cudaEventSynchronize(stop));
+        CUDA_CHECK(cudaGetLastError());
+        float ms = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+        times_ms.push_back(ms);
+    }
+
+    __nv_bfloat16 checksum_bf16{};
+    CUDA_CHECK(cudaMemcpy(&checksum_bf16, d_out, sizeof(checksum_bf16), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+
+    float best_ms = *std::min_element(times_ms.begin(), times_ms.end());
+    float median_ms = percentile(times_ms, 0.5f);
+    double real_flops = 4.0 * static_cast<double>(kBH) * kNMain * kN * kD;
+    double logical_padded_flops =
+        4.0 * static_cast<double>(kBH) * kNMain * kNPad * kD;
+    double real_tflops = real_flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
+    double logical_tflops =
+        logical_padded_flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
+    std::printf("main1280_split_contig_input_exp2_tail_helper qrows=%d ktile=%d best=%.3f ms median=%.3f ms real_math=%.2f TF/s logical_tile_math=%.2f TF/s roof70=%.1f%% checksum=%.6f\n",
+                QRows, KTile, best_ms, median_ms, real_tflops, logical_tflops,
+                real_tflops / 70.0 * 100.0, __bfloat162float(checksum_bf16));
+}
+
+template <int QRows, int KTile, bool IncludeKeyTail = true>
+void run_main1280_split_contig_gated_store_variant(const Options& opts,
+                                                   const __nv_bfloat16* d_q,
+                                                   const __nv_bfloat16* d_k,
+                                                   const __nv_bfloat16* d_v,
+                                                   const __nv_bfloat16* d_gates,
+                                                   __nv_bfloat16* d_attn_tmp,
+                                                   __nv_bfloat16* d_merged,
+                                                   __nv_bfloat16* d_ref_merged,
+                                                   float scale) {
+    dim3 attn_grid(kNMain / QRows, kBH);
+    dim3 merge_grid(kBatches * kNMain);
+    for (int i = 0; i < opts.warmup; ++i) {
+        time_attention1301_main1280_split_contig_input_kernel
+            <QRows, KTile, true, IncludeKeyTail, false, false, false, false>
+            <<<attn_grid, 1>>>(d_q, d_k, d_v, d_attn_tmp, scale);
+        gate_merge_time_main1280_token_d64_kernel
+            <<<merge_grid, 1>>>(d_attn_tmp, d_gates, d_merged);
+        time_attention1301_main1280_split_contig_gated_store_kernel
+            <QRows, KTile, true, IncludeKeyTail>
+            <<<attn_grid, 1>>>(d_q, d_k, d_v, d_gates, d_merged, scale);
+    }
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    cudaEvent_t start{};
+    cudaEvent_t stop{};
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    std::vector<float> baseline_times_ms;
+    std::vector<float> fused_times_ms;
+    baseline_times_ms.reserve(opts.iters);
+    fused_times_ms.reserve(opts.iters);
+
+    __nv_bfloat16* baseline_merged = d_ref_merged ? d_ref_merged : d_merged;
+    for (int i = 0; i < opts.iters; ++i) {
+        CUDA_CHECK(cudaEventRecord(start));
+        time_attention1301_main1280_split_contig_input_kernel
+            <QRows, KTile, true, IncludeKeyTail, false, false, false, false>
+            <<<attn_grid, 1>>>(d_q, d_k, d_v, d_attn_tmp, scale);
+        gate_merge_time_main1280_token_d64_kernel
+            <<<merge_grid, 1>>>(d_attn_tmp, d_gates, baseline_merged);
+        CUDA_CHECK(cudaEventRecord(stop));
+        CUDA_CHECK(cudaEventSynchronize(stop));
+        CUDA_CHECK(cudaGetLastError());
+        float ms = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+        baseline_times_ms.push_back(ms);
+    }
+
+    for (int i = 0; i < opts.iters; ++i) {
+        CUDA_CHECK(cudaEventRecord(start));
+        time_attention1301_main1280_split_contig_gated_store_kernel
+            <QRows, KTile, true, IncludeKeyTail>
+            <<<attn_grid, 1>>>(d_q, d_k, d_v, d_gates, d_merged, scale);
+        CUDA_CHECK(cudaEventRecord(stop));
+        CUDA_CHECK(cudaEventSynchronize(stop));
+        CUDA_CHECK(cudaGetLastError());
+        float ms = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+        fused_times_ms.push_back(ms);
+    }
+
+    if (d_ref_merged) {
+        time_attention1301_main1280_split_contig_input_kernel
+            <QRows, KTile, true, IncludeKeyTail, false, false, false, false>
+            <<<attn_grid, 1>>>(d_q, d_k, d_v, d_attn_tmp, scale);
+        gate_merge_time_main1280_token_d64_kernel
+            <<<merge_grid, 1>>>(d_attn_tmp, d_gates, d_ref_merged);
+        time_attention1301_main1280_split_contig_gated_store_kernel
+            <QRows, KTile, true, IncludeKeyTail>
+            <<<attn_grid, 1>>>(d_q, d_k, d_v, d_gates, d_merged, scale);
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaDeviceSynchronize());
+    }
+
+    __nv_bfloat16 checksum_bf16{};
+    CUDA_CHECK(cudaMemcpy(&checksum_bf16, d_merged, sizeof(checksum_bf16),
+                          cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+
+    float baseline_best_ms =
+        *std::min_element(baseline_times_ms.begin(), baseline_times_ms.end());
+    float baseline_median_ms = percentile(baseline_times_ms, 0.5f);
+    float fused_best_ms = *std::min_element(fused_times_ms.begin(), fused_times_ms.end());
+    float fused_median_ms = percentile(fused_times_ms, 0.5f);
+    constexpr int EffectiveK = IncludeKeyTail ? kN : kNMain;
+    double real_flops = 4.0 * static_cast<double>(kBH) * kNMain * EffectiveK * kD;
+    double fused_tflops = real_flops / (static_cast<double>(fused_best_ms) * 1.0e-3) / 1.0e12;
+    double baseline_tflops =
+        real_flops / (static_cast<double>(baseline_best_ms) * 1.0e-3) / 1.0e12;
+    double saved_gib = 2.0 * static_cast<double>(kBH) * kNMain * kD *
+                       sizeof(__nv_bfloat16) / (1024.0 * 1024.0 * 1024.0);
+    double speedup = baseline_best_ms / fused_best_ms;
+    std::printf("main1280_split_contig_gated_store qrows=%d ktile=%d baseline_pair=%.3f ms median=%.3f ms %.2f TF/s fused=%.3f ms median=%.3f ms %.2f TF/s roof70=%.1f%% speedup=%.3fx saved_attn_boundary=%.3f GiB checksum=%.6f\n",
+                QRows, KTile, baseline_best_ms, baseline_median_ms, baseline_tflops,
+                fused_best_ms, fused_median_ms, fused_tflops,
+                fused_tflops / 70.0 * 100.0, speedup, saved_gib,
+                __bfloat162float(checksum_bf16));
+}
+
+template <int QRows, int KTile, bool IncludeKeyTail = true>
+void run_main1280_split_contig_kt_input_variant(const Options& opts,
+                                                const __nv_bfloat16* d_q,
+                                                const __nv_bfloat16* d_k_t,
+                                                const __nv_bfloat16* d_v,
+                                                __nv_bfloat16* d_out,
+                                                float scale) {
+    dim3 grid(kNMain / QRows, kBH);
+    for (int i = 0; i < opts.warmup; ++i) {
+        time_attention1301_main1280_split_contig_kt_input_kernel
+            <QRows, KTile, true, IncludeKeyTail>
+            <<<grid, 1>>>(d_q, d_k_t, d_v, d_out, scale);
+    }
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    cudaEvent_t start{};
+    cudaEvent_t stop{};
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    std::vector<float> times_ms;
+    times_ms.reserve(opts.iters);
+    for (int i = 0; i < opts.iters; ++i) {
+        CUDA_CHECK(cudaEventRecord(start));
+        time_attention1301_main1280_split_contig_kt_input_kernel
+            <QRows, KTile, true, IncludeKeyTail>
+            <<<grid, 1>>>(d_q, d_k_t, d_v, d_out, scale);
+        CUDA_CHECK(cudaEventRecord(stop));
+        CUDA_CHECK(cudaEventSynchronize(stop));
+        CUDA_CHECK(cudaGetLastError());
+        float ms = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+        times_ms.push_back(ms);
+    }
+
+    __nv_bfloat16 checksum_bf16{};
+    CUDA_CHECK(cudaMemcpy(&checksum_bf16, d_out, sizeof(checksum_bf16), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+
+    float best_ms = *std::min_element(times_ms.begin(), times_ms.end());
+    float median_ms = percentile(times_ms, 0.5f);
+    constexpr int EffectiveK = IncludeKeyTail ? kN : kNMain;
+    double real_flops = 4.0 * static_cast<double>(kBH) * kNMain * EffectiveK * kD;
+    double logical_padded_flops =
+        4.0 * static_cast<double>(kBH) * kNMain *
+        (IncludeKeyTail ? kNPad : kNMain) * kD;
+    double real_tflops = real_flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
+    double logical_tflops =
+        logical_padded_flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
+    const char* name = "main1280_split_contig_kt_input_exp2";
+    if constexpr (!IncludeKeyTail) {
+        name = "main1280_split_contig_kt_input_exp2_no_keytail";
+    }
+    std::printf("%s qrows=%d ktile=%d best=%.3f ms median=%.3f ms real_math=%.2f TF/s logical_tile_math=%.2f TF/s roof70=%.1f%% checksum=%.6f\n",
+                name, QRows, KTile, best_ms, median_ms, real_tflops, logical_tflops,
+                real_tflops / 70.0 * 100.0, __bfloat162float(checksum_bf16));
+}
+
+template <int QRows, int KTile, bool IncludeKeyTail = true>
+void run_main1280_split_contig_seg2_variant(const Options& opts,
+                                            const __nv_bfloat16* d_q,
+                                            const __nv_bfloat16* d_k,
+                                            const __nv_bfloat16* d_v,
+                                            __nv_bfloat16* d_out,
+                                            float scale) {
+    dim3 grid(kNMain / QRows, kBH);
+    for (int i = 0; i < opts.warmup; ++i) {
+        time_attention1301_main1280_split_contig_seg2_kernel
+            <QRows, KTile, true, IncludeKeyTail>
+            <<<grid, 1>>>(d_q, d_k, d_v, d_out, scale);
+    }
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    cudaEvent_t start{};
+    cudaEvent_t stop{};
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    std::vector<float> times_ms;
+    times_ms.reserve(opts.iters);
+    for (int i = 0; i < opts.iters; ++i) {
+        CUDA_CHECK(cudaEventRecord(start));
+        time_attention1301_main1280_split_contig_seg2_kernel
+            <QRows, KTile, true, IncludeKeyTail>
+            <<<grid, 1>>>(d_q, d_k, d_v, d_out, scale);
+        CUDA_CHECK(cudaEventRecord(stop));
+        CUDA_CHECK(cudaEventSynchronize(stop));
+        CUDA_CHECK(cudaGetLastError());
+        float ms = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+        times_ms.push_back(ms);
+    }
+
+    __nv_bfloat16 checksum_bf16{};
+    CUDA_CHECK(cudaMemcpy(&checksum_bf16, d_out, sizeof(checksum_bf16), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+
+    float best_ms = *std::min_element(times_ms.begin(), times_ms.end());
+    float median_ms = percentile(times_ms, 0.5f);
+    constexpr int EffectiveK = IncludeKeyTail ? kN : kNMain;
+    double real_flops = 4.0 * static_cast<double>(kBH) * kNMain * EffectiveK * kD;
+    double logical_padded_flops =
+        4.0 * static_cast<double>(kBH) * kNMain *
+        (IncludeKeyTail ? kNPad : kNMain) * kD;
+    double real_tflops = real_flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
+    double logical_tflops =
+        logical_padded_flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
+    const char* name = "main1280_split_contig_seg2_exp2";
+    if constexpr (!IncludeKeyTail) {
+        name = "main1280_split_contig_seg2_exp2_no_keytail";
+    }
+    std::printf("%s qrows=%d ktile=%d best=%.3f ms median=%.3f ms real_math=%.2f TF/s logical_tile_math=%.2f TF/s roof70=%.1f%% checksum=%.6f\n",
+                name, QRows, KTile, best_ms, median_ms, real_tflops, logical_tflops,
+                real_tflops / 70.0 * 100.0, __bfloat162float(checksum_bf16));
+}
+
+template <int QRows,
+          int KTile,
+          bool IncludeKeyTail = true,
+          int QLoadLatency = 2,
+          int KLoadLatency = 2,
+          int VLoadLatency = 2>
+void run_main1280_split_contig_input_lat_variant(const Options& opts,
+                                                const __nv_bfloat16* d_q,
+                                                const __nv_bfloat16* d_k,
+                                                const __nv_bfloat16* d_v,
+                                                __nv_bfloat16* d_out,
+                                                float scale) {
+    dim3 grid(kNMain / QRows, kBH);
+    for (int i = 0; i < opts.warmup; ++i) {
+        time_attention1301_main1280_split_contig_input_lat_kernel
+            <QRows, KTile, IncludeKeyTail, QLoadLatency, KLoadLatency, VLoadLatency>
+            <<<grid, 1>>>(d_q, d_k, d_v, d_out, scale);
+    }
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    cudaEvent_t start{};
+    cudaEvent_t stop{};
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    std::vector<float> times_ms;
+    times_ms.reserve(opts.iters);
+    for (int i = 0; i < opts.iters; ++i) {
+        CUDA_CHECK(cudaEventRecord(start));
+        time_attention1301_main1280_split_contig_input_lat_kernel
+            <QRows, KTile, IncludeKeyTail, QLoadLatency, KLoadLatency, VLoadLatency>
+            <<<grid, 1>>>(d_q, d_k, d_v, d_out, scale);
+        CUDA_CHECK(cudaEventRecord(stop));
+        CUDA_CHECK(cudaEventSynchronize(stop));
+        CUDA_CHECK(cudaGetLastError());
+        float ms = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+        times_ms.push_back(ms);
+    }
+
+    __nv_bfloat16 checksum_bf16{};
+    CUDA_CHECK(cudaMemcpy(&checksum_bf16, d_out, sizeof(checksum_bf16), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+
+    float best_ms = *std::min_element(times_ms.begin(), times_ms.end());
+    float median_ms = percentile(times_ms, 0.5f);
+    constexpr int EffectiveK = IncludeKeyTail ? kN : kNMain;
+    double real_flops = 4.0 * static_cast<double>(kBH) * kNMain * EffectiveK * kD;
+    double logical_padded_flops =
+        4.0 * static_cast<double>(kBH) * kNMain *
+        (IncludeKeyTail ? kNPad : kNMain) * kD;
+    double real_tflops = real_flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
+    double logical_tflops =
+        logical_padded_flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
+    const char* name = "main1280_split_contig_input_exp2_lat2";
+    if constexpr (QLoadLatency == 2 && KLoadLatency == 0 && VLoadLatency == 0) {
+        name = "main1280_split_contig_input_exp2_q_lat2";
+    } else if constexpr (QLoadLatency == 0 && KLoadLatency == 2 && VLoadLatency == 0) {
+        name = "main1280_split_contig_input_exp2_k_lat2";
+    } else if constexpr (QLoadLatency == 0 && KLoadLatency == 0 && VLoadLatency == 2) {
+        name = "main1280_split_contig_input_exp2_v_lat2";
+    } else if constexpr (QLoadLatency == 0 && KLoadLatency == 2 && VLoadLatency == 2) {
+        name = "main1280_split_contig_input_exp2_kv_lat2";
+    }
+    if constexpr (!IncludeKeyTail &&
+                  QLoadLatency == 2 && KLoadLatency == 2 && VLoadLatency == 2) {
+        name = "main1280_split_contig_input_exp2_lat2_no_keytail";
+    } else if constexpr (!IncludeKeyTail &&
+                         QLoadLatency == 2 && KLoadLatency == 0 &&
+                         VLoadLatency == 0) {
+        name = "main1280_split_contig_input_exp2_q_lat2_no_keytail";
+    } else if constexpr (!IncludeKeyTail &&
+                         QLoadLatency == 0 && KLoadLatency == 2 &&
+                         VLoadLatency == 0) {
+        name = "main1280_split_contig_input_exp2_k_lat2_no_keytail";
+    } else if constexpr (!IncludeKeyTail &&
+                         QLoadLatency == 0 && KLoadLatency == 0 &&
+                         VLoadLatency == 2) {
+        name = "main1280_split_contig_input_exp2_v_lat2_no_keytail";
+    } else if constexpr (!IncludeKeyTail &&
+                         QLoadLatency == 0 && KLoadLatency == 2 &&
+                         VLoadLatency == 2) {
+        name = "main1280_split_contig_input_exp2_kv_lat2_no_keytail";
+    }
+    std::printf("%s qrows=%d ktile=%d best=%.3f ms median=%.3f ms real_math=%.2f TF/s logical_tile_math=%.2f TF/s roof70=%.1f%% checksum=%.6f\n",
+                name, QRows, KTile, best_ms, median_ms, real_tflops, logical_tflops,
+                real_tflops / 70.0 * 100.0, __bfloat162float(checksum_bf16));
+}
+
+template <int QRows,
+          int KTile,
+          bool IncludeKeyTail = true,
+          bool TailColBroadcastPaddedTailLoad = false>
+void run_main1280_split_contig_first_init_variant(const Options& opts,
+                                                 const __nv_bfloat16* d_q,
+                                                 const __nv_bfloat16* d_k,
+                                                 const __nv_bfloat16* d_v,
+                                                 __nv_bfloat16* d_out,
+                                                 float scale) {
+    dim3 grid(kNMain / QRows, kBH);
+    for (int i = 0; i < opts.warmup; ++i) {
+        time_attention1301_main1280_split_contig_first_init_kernel
+            <QRows, KTile, IncludeKeyTail, TailColBroadcastPaddedTailLoad>
+            <<<grid, 1>>>(d_q, d_k, d_v, d_out, scale);
+    }
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    cudaEvent_t start{};
+    cudaEvent_t stop{};
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    std::vector<float> times_ms;
+    times_ms.reserve(opts.iters);
+    for (int i = 0; i < opts.iters; ++i) {
+        CUDA_CHECK(cudaEventRecord(start));
+        time_attention1301_main1280_split_contig_first_init_kernel
+            <QRows, KTile, IncludeKeyTail, TailColBroadcastPaddedTailLoad>
+            <<<grid, 1>>>(d_q, d_k, d_v, d_out, scale);
+        CUDA_CHECK(cudaEventRecord(stop));
+        CUDA_CHECK(cudaEventSynchronize(stop));
+        CUDA_CHECK(cudaGetLastError());
+        float ms = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+        times_ms.push_back(ms);
+    }
+
+    __nv_bfloat16 checksum_bf16{};
+    CUDA_CHECK(cudaMemcpy(&checksum_bf16, d_out, sizeof(checksum_bf16), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+
+    float best_ms = *std::min_element(times_ms.begin(), times_ms.end());
+    float median_ms = percentile(times_ms, 0.5f);
+    constexpr int EffectiveK = IncludeKeyTail ? kN : kNMain;
+    double real_flops = 4.0 * static_cast<double>(kBH) * kNMain * EffectiveK * kD;
+    double logical_padded_flops =
+        4.0 * static_cast<double>(kBH) * kNMain *
+        (IncludeKeyTail ? kNPad : kNMain) * kD;
+    double real_tflops = real_flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
+    double logical_tflops =
+        logical_padded_flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
+    const char* name = "main1280_split_contig_input_exp2_first_init";
+    if constexpr (TailColBroadcastPaddedTailLoad) {
+        name =
+            "main1280_split_contig_input_exp2_first_init_tail_col_broadcast_padded_tail_load";
+    } else if constexpr (!IncludeKeyTail) {
+        name = "main1280_split_contig_input_exp2_first_init_no_keytail";
+    }
+    std::printf("%s qrows=%d ktile=%d best=%.3f ms median=%.3f ms real_math=%.2f TF/s logical_tile_math=%.2f TF/s roof70=%.1f%% checksum=%.6f\n",
+                name, QRows, KTile, best_ms, median_ms, real_tflops, logical_tflops,
+                real_tflops / 70.0 * 100.0, __bfloat162float(checksum_bf16));
+}
+
+template <int QRows,
+          int KTile,
+          bool IncludeKeyTail = true,
+          bool RoundRowM = false>
+void run_main1280_split_contig_row_state_bf16_variant(
+    const Options& opts,
+    const __nv_bfloat16* d_q,
+    const __nv_bfloat16* d_k,
+    const __nv_bfloat16* d_v,
+    __nv_bfloat16* d_out,
+    float scale) {
+    dim3 grid(kNMain / QRows, kBH);
+    for (int i = 0; i < opts.warmup; ++i) {
+        time_attention1301_main1280_split_contig_row_state_bf16_kernel
+            <QRows, KTile, IncludeKeyTail, RoundRowM>
+            <<<grid, 1>>>(d_q, d_k, d_v, d_out, scale);
+    }
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    cudaEvent_t start{};
+    cudaEvent_t stop{};
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    std::vector<float> times_ms;
+    times_ms.reserve(opts.iters);
+    for (int i = 0; i < opts.iters; ++i) {
+        CUDA_CHECK(cudaEventRecord(start));
+        time_attention1301_main1280_split_contig_row_state_bf16_kernel
+            <QRows, KTile, IncludeKeyTail, RoundRowM>
+            <<<grid, 1>>>(d_q, d_k, d_v, d_out, scale);
+        CUDA_CHECK(cudaEventRecord(stop));
+        CUDA_CHECK(cudaEventSynchronize(stop));
+        CUDA_CHECK(cudaGetLastError());
+        float ms = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+        times_ms.push_back(ms);
+    }
+
+    __nv_bfloat16 checksum_bf16{};
+    CUDA_CHECK(cudaMemcpy(&checksum_bf16, d_out, sizeof(checksum_bf16), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+
+    float best_ms = *std::min_element(times_ms.begin(), times_ms.end());
+    float median_ms = percentile(times_ms, 0.5f);
+    constexpr int EffectiveK = IncludeKeyTail ? kN : kNMain;
+    double real_flops = 4.0 * static_cast<double>(kBH) * kNMain * EffectiveK * kD;
+    double logical_padded_flops =
+        4.0 * static_cast<double>(kBH) * kNMain *
+        (IncludeKeyTail ? kNPad : kNMain) * kD;
+    double real_tflops = real_flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
+    double logical_tflops =
+        logical_padded_flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
+    const char* name = "main1280_split_contig_input_exp2_row_l_bf16";
+    if constexpr (RoundRowM && !IncludeKeyTail) {
+        name = "main1280_split_contig_input_exp2_row_state_bf16_no_keytail";
+    } else if constexpr (RoundRowM) {
+        name = "main1280_split_contig_input_exp2_row_state_bf16";
+    } else if constexpr (!IncludeKeyTail) {
+        name = "main1280_split_contig_input_exp2_row_l_bf16_no_keytail";
+    }
+    std::printf("%s qrows=%d ktile=%d best=%.3f ms median=%.3f ms real_math=%.2f TF/s logical_tile_math=%.2f TF/s roof70=%.1f%% checksum=%.6f\n",
+                name, QRows, KTile, best_ms, median_ms, real_tflops, logical_tflops,
+                real_tflops / 70.0 * 100.0, __bfloat162float(checksum_bf16));
+}
+
+template <int QRows, int KTile, bool IncludeKeyTail = true>
+void run_main1280_split_contig_score_av_lb_variant(const Options& opts,
+                                                   const __nv_bfloat16* d_q,
+                                                   const __nv_bfloat16* d_k,
+                                                   const __nv_bfloat16* d_v,
+                                                   __nv_bfloat16* d_out,
+                                                   float scale) {
+    dim3 grid(kNMain / QRows, kBH);
+    for (int i = 0; i < opts.warmup; ++i) {
+        time_attention1301_main1280_split_contig_score_av_lb_kernel
+            <QRows, KTile, IncludeKeyTail>
+            <<<grid, 1>>>(d_q, d_k, d_v, d_out, scale);
+    }
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    cudaEvent_t start{};
+    cudaEvent_t stop{};
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    std::vector<float> times_ms;
+    times_ms.reserve(opts.iters);
+    for (int i = 0; i < opts.iters; ++i) {
+        CUDA_CHECK(cudaEventRecord(start));
+        time_attention1301_main1280_split_contig_score_av_lb_kernel
+            <QRows, KTile, IncludeKeyTail>
+            <<<grid, 1>>>(d_q, d_k, d_v, d_out, scale);
+        CUDA_CHECK(cudaEventRecord(stop));
+        CUDA_CHECK(cudaEventSynchronize(stop));
+        CUDA_CHECK(cudaGetLastError());
+        float ms = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+        times_ms.push_back(ms);
+    }
+
+    __nv_bfloat16 checksum_bf16{};
+    CUDA_CHECK(cudaMemcpy(&checksum_bf16, d_out, sizeof(checksum_bf16), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+
+    float best_ms = *std::min_element(times_ms.begin(), times_ms.end());
+    float median_ms = percentile(times_ms, 0.5f);
+    constexpr int EffectiveK = IncludeKeyTail ? kN : kNMain;
+    constexpr int LogicalK = IncludeKeyTail
+        ? ((kN + KTile - 1) / KTile) * KTile
+        : kNMain;
+    double real_flops = 4.0 * static_cast<double>(kBH) * kNMain * EffectiveK * kD;
+    double logical_padded_flops =
+        4.0 * static_cast<double>(kBH) * kNMain * LogicalK * kD;
+    double real_tflops = real_flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
+    double logical_tflops =
+        logical_padded_flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
+    const char* name = IncludeKeyTail
+        ? "main1280_split_contig_score_av_lb"
+        : "main1280_split_contig_score_av_lb_no_keytail";
+    std::printf("%s qrows=%d ktile=%d best=%.3f ms median=%.3f ms real_math=%.2f TF/s logical_tile_math=%.2f TF/s roof70=%.1f%% checksum=%.6f\n",
+                name, QRows, KTile, best_ms, median_ms, real_tflops, logical_tflops,
+                real_tflops / 70.0 * 100.0, __bfloat162float(checksum_bf16));
+}
+
+template <int QRows, int KTile, bool IncludeKeyTail = true>
+void run_main1280_split_contig_tile_local_softmax_lb_variant(const Options& opts,
+                                                            const __nv_bfloat16* d_q,
+                                                            const __nv_bfloat16* d_k,
+                                                            const __nv_bfloat16* d_v,
+                                                            __nv_bfloat16* d_out,
+                                                            float scale) {
+    dim3 grid(kNMain / QRows, kBH);
+    for (int i = 0; i < opts.warmup; ++i) {
+        time_attention1301_main1280_split_contig_tile_local_softmax_lb_kernel
+            <QRows, KTile, IncludeKeyTail>
+            <<<grid, 1>>>(d_q, d_k, d_v, d_out, scale);
+    }
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    cudaEvent_t start{};
+    cudaEvent_t stop{};
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    std::vector<float> times_ms;
+    times_ms.reserve(opts.iters);
+    for (int i = 0; i < opts.iters; ++i) {
+        CUDA_CHECK(cudaEventRecord(start));
+        time_attention1301_main1280_split_contig_tile_local_softmax_lb_kernel
+            <QRows, KTile, IncludeKeyTail>
+            <<<grid, 1>>>(d_q, d_k, d_v, d_out, scale);
+        CUDA_CHECK(cudaEventRecord(stop));
+        CUDA_CHECK(cudaEventSynchronize(stop));
+        CUDA_CHECK(cudaGetLastError());
+        float ms = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+        times_ms.push_back(ms);
+    }
+
+    __nv_bfloat16 checksum_bf16{};
+    CUDA_CHECK(cudaMemcpy(&checksum_bf16, d_out, sizeof(checksum_bf16), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+
+    float best_ms = *std::min_element(times_ms.begin(), times_ms.end());
+    float median_ms = percentile(times_ms, 0.5f);
+    constexpr int EffectiveK = IncludeKeyTail ? kN : kNMain;
+    constexpr int LogicalK = IncludeKeyTail
+        ? ((kN + KTile - 1) / KTile) * KTile
+        : kNMain;
+    double real_flops = 4.0 * static_cast<double>(kBH) * kNMain * EffectiveK * kD;
+    double logical_padded_flops =
+        4.0 * static_cast<double>(kBH) * kNMain * LogicalK * kD;
+    double real_tflops = real_flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
+    double logical_tflops =
+        logical_padded_flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
+    const char* name = IncludeKeyTail
+        ? "main1280_split_contig_tile_local_softmax_lb"
+        : "main1280_split_contig_tile_local_softmax_lb_no_keytail";
     std::printf("%s qrows=%d ktile=%d best=%.3f ms median=%.3f ms real_math=%.2f TF/s logical_tile_math=%.2f TF/s roof70=%.1f%% checksum=%.6f\n",
                 name, QRows, KTile, best_ms, median_ms, real_tflops, logical_tflops,
                 real_tflops / 70.0 * 100.0, __bfloat162float(checksum_bf16));
@@ -2586,15 +5133,16 @@ void run_main1280_split_contig_tail_first_variant(const Options& opts,
 }
 
 template <int QRows, int KTile>
-void run_main1280_split_contig_padded_tail_load_variant(const Options& opts,
-                                                        const __nv_bfloat16* d_q,
-                                                        const __nv_bfloat16* d_k,
-                                                        const __nv_bfloat16* d_v,
-                                                        __nv_bfloat16* d_out,
-                                                        float scale) {
+void run_main1280_split_contig_tail_first_padded_tail_load_variant(
+    const Options& opts,
+    const __nv_bfloat16* d_q,
+    const __nv_bfloat16* d_k,
+    const __nv_bfloat16* d_v,
+    __nv_bfloat16* d_out,
+    float scale) {
     dim3 grid(kNMain / QRows, kBH);
     for (int i = 0; i < opts.warmup; ++i) {
-        time_attention1301_main1280_split_contig_padded_tail_load_kernel
+        time_attention1301_main1280_split_contig_tail_first_padded_tail_load_kernel
             <QRows, KTile, true>
             <<<grid, 1>>>(d_q, d_k, d_v, d_out, scale);
     }
@@ -2609,8 +5157,64 @@ void run_main1280_split_contig_padded_tail_load_variant(const Options& opts,
     times_ms.reserve(opts.iters);
     for (int i = 0; i < opts.iters; ++i) {
         CUDA_CHECK(cudaEventRecord(start));
-        time_attention1301_main1280_split_contig_padded_tail_load_kernel
+        time_attention1301_main1280_split_contig_tail_first_padded_tail_load_kernel
             <QRows, KTile, true>
+            <<<grid, 1>>>(d_q, d_k, d_v, d_out, scale);
+        CUDA_CHECK(cudaEventRecord(stop));
+        CUDA_CHECK(cudaEventSynchronize(stop));
+        CUDA_CHECK(cudaGetLastError());
+        float ms = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+        times_ms.push_back(ms);
+    }
+
+    __nv_bfloat16 checksum_bf16{};
+    CUDA_CHECK(cudaMemcpy(&checksum_bf16, d_out, sizeof(checksum_bf16),
+                          cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+
+    float best_ms = *std::min_element(times_ms.begin(), times_ms.end());
+    float median_ms = percentile(times_ms, 0.5f);
+    double real_flops = 4.0 * static_cast<double>(kBH) * kNMain * kN * kD;
+    double logical_padded_flops =
+        4.0 * static_cast<double>(kBH) * kNMain * kNPad * kD;
+    double real_tflops =
+        real_flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
+    double logical_tflops =
+        logical_padded_flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
+    std::printf("main1280_split_contig_tail_first_padded_tail_load_exp2 qrows=%d ktile=%d best=%.3f ms median=%.3f ms real_math=%.2f TF/s logical_tile_math=%.2f TF/s roof70=%.1f%% checksum=%.6f\n",
+                QRows, KTile, best_ms, median_ms, real_tflops,
+                logical_tflops, real_tflops / 70.0 * 100.0,
+                __bfloat162float(checksum_bf16));
+}
+
+template <int QRows, int KTile, bool TailColBroadcast = false>
+void run_main1280_split_contig_padded_tail_load_variant(const Options& opts,
+                                                        const __nv_bfloat16* d_q,
+                                                        const __nv_bfloat16* d_k,
+                                                        const __nv_bfloat16* d_v,
+                                                        __nv_bfloat16* d_out,
+                                                        float scale) {
+    dim3 grid(kNMain / QRows, kBH);
+    for (int i = 0; i < opts.warmup; ++i) {
+        time_attention1301_main1280_split_contig_padded_tail_load_kernel
+            <QRows, KTile, true, TailColBroadcast>
+            <<<grid, 1>>>(d_q, d_k, d_v, d_out, scale);
+    }
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    cudaEvent_t start{};
+    cudaEvent_t stop{};
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    std::vector<float> times_ms;
+    times_ms.reserve(opts.iters);
+    for (int i = 0; i < opts.iters; ++i) {
+        CUDA_CHECK(cudaEventRecord(start));
+        time_attention1301_main1280_split_contig_padded_tail_load_kernel
+            <QRows, KTile, true, TailColBroadcast>
             <<<grid, 1>>>(d_q, d_k, d_v, d_out, scale);
         CUDA_CHECK(cudaEventRecord(stop));
         CUDA_CHECK(cudaEventSynchronize(stop));
@@ -2633,9 +5237,13 @@ void run_main1280_split_contig_padded_tail_load_variant(const Options& opts,
     double real_tflops = real_flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
     double logical_tflops =
         logical_padded_flops / (static_cast<double>(best_ms) * 1.0e-3) / 1.0e12;
-    std::printf("main1280_split_contig_padded_tail_load_exp2 qrows=%d ktile=%d best=%.3f ms median=%.3f ms real_math=%.2f TF/s logical_tile_math=%.2f TF/s roof70=%.1f%% checksum=%.6f\n",
-                QRows, KTile, best_ms, median_ms, real_tflops, logical_tflops,
-                real_tflops / 70.0 * 100.0, __bfloat162float(checksum_bf16));
+    const char* name = TailColBroadcast
+        ? "main1280_split_contig_tail_col_broadcast_padded_tail_load_exp2"
+        : "main1280_split_contig_padded_tail_load_exp2";
+    std::printf("%s qrows=%d ktile=%d best=%.3f ms median=%.3f ms real_math=%.2f TF/s logical_tile_math=%.2f TF/s roof70=%.1f%% checksum=%.6f\n",
+                name, QRows, KTile, best_ms, median_ms, real_tflops,
+                logical_tflops, real_tflops / 70.0 * 100.0,
+                __bfloat162float(checksum_bf16));
 }
 
 template <int QRows, int KTile>
@@ -3458,6 +6066,347 @@ void compare_outputs_to_baseline(const __nv_bfloat16* d_ref,
                 elems, max_abs, rms, ref_rms, rel_rms);
 }
 
+bool should_describe(const Options& opts, const char* name) {
+    return opts.variant == "all" || opts.variant == name;
+}
+
+template <typename Kernel>
+void describe_kernel_entry(const Options& opts,
+                           const char* filter_name,
+                           const char* print_name,
+                           Kernel kernel,
+                           dim3 grid) {
+    if (!should_describe(opts, filter_name)) return;
+
+    cudaFuncAttributes attr{};
+    CUDA_CHECK(cudaFuncGetAttributes(&attr, kernel));
+    int active_blocks = 0;
+    CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active_blocks,
+                                                             kernel,
+                                                             1,
+                                                             0));
+
+    cudaDeviceProp prop{};
+    int device = 0;
+    CUDA_CHECK(cudaGetDevice(&device));
+    CUDA_CHECK(cudaGetDeviceProperties(&prop, device));
+    int shared_limit = attr.sharedSizeBytes > 0
+        ? static_cast<int>(prop.sharedMemPerMultiprocessor / attr.sharedSizeBytes)
+        : prop.maxBlocksPerMultiProcessor;
+    double sm_waves = static_cast<double>(grid.x) *
+                      static_cast<double>(grid.y) *
+                      static_cast<double>(std::max(1u, grid.z)) /
+                      static_cast<double>(prop.multiProcessorCount);
+
+    std::printf(
+        "%-58s grid=(%u,%u,%u) waves/SM=%.1f attr_regs=%d "
+        "static_shared=%zuB shared_limit=%d occupancy_active_cta_per_sm=%d "
+        "max_threads_per_block=%d local=%zuB const=%zuB ptx=%d binary=%d\n",
+        print_name,
+        grid.x,
+        grid.y,
+        grid.z,
+        sm_waves,
+        attr.numRegs,
+        attr.sharedSizeBytes,
+        shared_limit,
+        active_blocks,
+        attr.maxThreadsPerBlock,
+        attr.localSizeBytes,
+        attr.constSizeBytes,
+        attr.ptxVersion,
+        attr.binaryVersion);
+}
+
+template <typename Kernel>
+void describe_kernel(const Options& opts, const char* name, Kernel kernel, dim3 grid) {
+    describe_kernel_entry(opts, name, name, kernel, grid);
+}
+
+void describe_all(const Options& opts, const cudaDeviceProp& prop) {
+    std::printf("Device resources: shared_per_sm=%zuB regs_per_sm=%d max_blocks_per_sm=%d\n",
+                prop.sharedMemPerMultiprocessor,
+                prop.regsPerMultiprocessor,
+                prop.maxBlocksPerMultiProcessor);
+
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2",
+                    time_attention1301_main1280_kernel<64, 32, true, true>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q32k32_exp2",
+                    time_attention1301_main1280_kernel<32, 32, true, true>,
+                    dim3(kNMain / 32, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k16_exp2",
+                    time_attention1301_main1280_kernel<64, 16, true, true>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k64_exp2",
+                    time_attention1301_main1280_kernel<64, 64, true, true>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q128k32_exp2",
+                    time_attention1301_main1280_kernel<128, 32, true, true>,
+                    dim3(kNMain / 128, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_input",
+                    time_attention1301_main1280_split_contig_input_kernel
+                        <64, 32, true, true, false, false, false, false>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_input_no_keytail",
+                    time_attention1301_main1280_split_contig_input_kernel
+                        <64, 32, true, false, false, false, false, false>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_tail_idx32",
+                    time_attention1301_main1280_split_contig_input_kernel
+                        <64, 32, true, true, true, false, false, false>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_tail_col_broadcast",
+                    time_attention1301_main1280_split_contig_input_kernel
+                        <64, 32, true, true, false, false, true, false>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_tail_col_broadcast_out_acc_bf16",
+                    time_attention1301_main1280_split_contig_input_kernel
+                        <64, 32, true, true, false, false, true, true, false>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_alpha_one",
+                    time_attention1301_main1280_split_contig_input_kernel
+                        <64, 32, true, true, false, false, false, false, true,
+                         false>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_prob_linear",
+                    time_attention1301_main1280_split_contig_input_kernel
+                        <64, 32, true, true, false, false, false, false, false,
+                         kProbLinear>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_prob_linear_noclamp",
+                    time_attention1301_main1280_split_contig_input_kernel
+                        <64, 32, true, true, false, false, false, false, false,
+                         kProbLinearNoClamp>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_prob_poly2",
+                    time_attention1301_main1280_split_contig_input_kernel
+                        <64, 32, true, true, false, false, false, false, false,
+                         kProbPoly2>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_prob_poly4",
+                    time_attention1301_main1280_split_contig_input_kernel
+                        <64, 32, true, true, false, false, false, false, false,
+                         kProbPoly4>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_prob_poly2_noclamp",
+                    time_attention1301_main1280_split_contig_input_kernel
+                        <64, 32, true, true, false, false, false, false, false,
+                         kProbPoly2NoClamp>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_prob_poly3_noclamp",
+                    time_attention1301_main1280_split_contig_input_kernel
+                        <64, 32, true, true, false, false, false, false, false,
+                         kProbPoly3NoClamp>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_prob_poly3_noclamp_alpha_poly3_clamp",
+                    time_attention1301_main1280_split_contig_input_kernel
+                        <64, 32, true, true, false, false, false, false, false,
+                         kProbPoly3NoClamp, false, kAlphaProbClamp>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_prob_poly3_noclamp_alpha_poly3_clamp_final_rcp",
+                    time_attention1301_main1280_split_contig_input_kernel
+                        <64, 32, true, true, false, true, false, false, false,
+                         kProbPoly3NoClamp, false, kAlphaProbClamp>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_prob_poly3_outclamp_alpha_outclamp",
+                    time_attention1301_main1280_split_contig_input_kernel
+                        <64, 32, true, true, false, false, false, false, false,
+                         kProbPoly3OutputClamp, false, kAlphaProbClamp>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_prob_poly3_noclamp_alpha_linear_clamp",
+                    time_attention1301_main1280_split_contig_input_kernel
+                        <64, 32, true, true, false, false, false, false, false,
+                         kProbPoly3NoClamp, false, kAlphaLinearClamp>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_prob_rational4_alpha_rational4",
+                    time_attention1301_main1280_split_contig_input_kernel
+                        <64, 32, true, true, false, false, false, false, false,
+                         kProbRational4, false, kAlphaProbClamp>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_prob_poly4_noclamp",
+                    time_attention1301_main1280_split_contig_input_kernel
+                        <64, 32, true, true, false, false, false, false, false,
+                         kProbPoly4NoClamp>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_prob_poly4_noclamp_sum_bf16",
+                    time_attention1301_main1280_split_contig_input_kernel
+                        <64, 32, true, true, false, false, false, false, false,
+                         kProbPoly4NoClamp, true>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_prob_poly4_noclamp_bias",
+                    time_attention1301_main1280_split_contig_input_kernel
+                        <64, 32, true, true, false, false, false, false, false,
+                         kProbPoly4NoClampBias>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_tail_prob_mask_only",
+                    time_attention1301_main1280_split_contig_tail_prob_mask_only_kernel
+                        <64, 32, true>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_tail16_8",
+                    time_attention1301_main1280_split_contig_tail16_8_kernel
+                        <64, 32, true>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_tail_helper",
+                    time_attention1301_main1280_split_contig_tail_helper_kernel
+                        <64, 32, true>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_seg2",
+                    time_attention1301_main1280_split_contig_seg2_kernel
+                        <64, 32, true, true>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_seg2_no_keytail",
+                    time_attention1301_main1280_split_contig_seg2_kernel
+                        <64, 32, true, false>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_tail_first",
+                    time_attention1301_main1280_split_contig_tail_first_kernel
+                        <64, 32, true>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_tail_first_padded_tail_load",
+                    time_attention1301_main1280_split_contig_tail_first_padded_tail_load_kernel
+                        <64, 32, true>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_padded_tail_load",
+                    time_attention1301_main1280_split_contig_padded_tail_load_kernel
+                        <64, 32, true, false>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_tail_col_broadcast_padded_tail_load",
+                    time_attention1301_main1280_split_contig_padded_tail_load_kernel
+                        <64, 32, true, true>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_out_acc_bf16",
+                    time_attention1301_main1280_split_contig_input_kernel
+                        <64, 32, true, true, false, false, false, true>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_out_acc_bf16_no_keytail",
+                    time_attention1301_main1280_split_contig_input_kernel
+                        <64, 32, true, false, false, false, false, true>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_final_rcp",
+                    time_attention1301_main1280_split_contig_input_kernel
+                        <64, 32, true, true, false, true, false, false>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_final_rcp_no_keytail",
+                    time_attention1301_main1280_split_contig_input_kernel
+                        <64, 32, true, false, false, true, false, false>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_first_init",
+                    time_attention1301_main1280_split_contig_first_init_kernel
+                        <64, 32, true, false>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_first_init_tail_col_broadcast_padded_tail_load",
+                    time_attention1301_main1280_split_contig_first_init_kernel
+                        <64, 32, true, true>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_first_init_no_keytail",
+                    time_attention1301_main1280_split_contig_first_init_kernel
+                        <64, 32, false, false>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_row_l_bf16",
+                    time_attention1301_main1280_split_contig_row_state_bf16_kernel
+                        <64, 32, true, false>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_row_l_bf16_no_keytail",
+                    time_attention1301_main1280_split_contig_row_state_bf16_kernel
+                        <64, 32, false, false>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_row_state_bf16",
+                    time_attention1301_main1280_split_contig_row_state_bf16_kernel
+                        <64, 32, true, true>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_row_state_bf16_no_keytail",
+                    time_attention1301_main1280_split_contig_row_state_bf16_kernel
+                        <64, 32, false, true>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_score_av_lb",
+                    time_attention1301_main1280_split_contig_score_av_lb_kernel
+                        <64, 32, true>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_score_av_lb_no_keytail",
+                    time_attention1301_main1280_split_contig_score_av_lb_kernel
+                        <64, 32, false>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_tile_local_softmax_lb",
+                    time_attention1301_main1280_split_contig_tile_local_softmax_lb_kernel
+                        <64, 32, true>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_tile_local_softmax_lb_no_keytail",
+                    time_attention1301_main1280_split_contig_tile_local_softmax_lb_kernel
+                        <64, 32, false>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel_entry(opts,
+                          "main1280_q64k32_exp2_split_contig_two_pass_state",
+                          "main1280_q64k32_exp2_split_contig_two_pass_state1280",
+                          time_attention1301_main1280_split_contig_state1280_kernel
+                              <64, 32, true>,
+                          dim3(kNMain / 64, kBH));
+    describe_kernel_entry(opts,
+                          "main1280_q64k32_exp2_split_contig_two_pass_state",
+                          "main1280_q64k32_exp2_split_contig_two_pass_tail_finalize",
+                          time_attention1301_main1280_split_contig_tail_finalize_kernel
+                              <64, 32, true>,
+                          dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "main1280_q64k32_exp2_split_contig_gated_store",
+                    time_attention1301_main1280_split_contig_gated_store_kernel
+                        <64, 32, true, true>,
+                    dim3(kNMain / 64, kBH));
+    describe_kernel(opts,
+                    "gate_merge_time_main1280_token_d64",
+                    gate_merge_time_main1280_token_d64_kernel,
+                    dim3(kBatches * kNMain));
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -3475,6 +6424,10 @@ int main(int argc, char** argv) {
                     prop.name, prop.major, prop.minor, prop.multiProcessorCount);
         std::printf("Shape: BH=%d N=%d NPad=%d D=%d, CUDA Tile streaming QK-softmax-AV\n",
                     kBH, kN, kNPad, kD);
+        if (opts.describe) {
+            describe_all(opts, prop);
+            return 0;
+        }
 
         size_t padded_elems = static_cast<size_t>(kBH) * kNPad * kD;
         size_t unpadded_elems = static_cast<size_t>(kBH) * kN * kD;
@@ -3483,6 +6436,9 @@ int main(int argc, char** argv) {
             static_cast<size_t>(kBatches) * kNPad * kHeads * kD;
         size_t rotary_elems = static_cast<size_t>(kN) * (kD / 2);
         size_t out_elems = static_cast<size_t>(kBH) * kN * kD;
+        size_t gate_elems = static_cast<size_t>(kBatches) * kN * kHeads;
+        size_t merged_main_elems =
+            static_cast<size_t>(kBatches) * kNMain * kHeads * kD;
         size_t state_acc_elems = static_cast<size_t>(kBH) * kNMain * kD;
         size_t state_row_elems = static_cast<size_t>(kBH) * kNMain;
         constexpr int split_qrows = 64;
@@ -3500,10 +6456,14 @@ int main(int argc, char** argv) {
         __nv_bfloat16* d_qkv_masked = nullptr;
         __nv_bfloat16* d_q_split_contig = nullptr;
         __nv_bfloat16* d_k_split_contig = nullptr;
+        __nv_bfloat16* d_k_t_split_contig = nullptr;
         __nv_bfloat16* d_v_split_contig = nullptr;
         __nv_bfloat16* d_q_split_padded = nullptr;
         __nv_bfloat16* d_k_split_padded = nullptr;
         __nv_bfloat16* d_v_split_padded = nullptr;
+        __nv_bfloat16* d_gates = nullptr;
+        __nv_bfloat16* d_merged_main = nullptr;
+        __nv_bfloat16* d_ref_merged_main = nullptr;
         float* d_cos = nullptr;
         float* d_sin = nullptr;
         float* d_state_acc = nullptr;
@@ -3522,10 +6482,17 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaMalloc(&d_qkv_masked, qkv_elems * sizeof(__nv_bfloat16)));
         CUDA_CHECK(cudaMalloc(&d_q_split_contig, unpadded_elems * sizeof(__nv_bfloat16)));
         CUDA_CHECK(cudaMalloc(&d_k_split_contig, unpadded_elems * sizeof(__nv_bfloat16)));
+        CUDA_CHECK(cudaMalloc(&d_k_t_split_contig, unpadded_elems * sizeof(__nv_bfloat16)));
         CUDA_CHECK(cudaMalloc(&d_v_split_contig, unpadded_elems * sizeof(__nv_bfloat16)));
         CUDA_CHECK(cudaMalloc(&d_q_split_padded, split_padded_elems * sizeof(__nv_bfloat16)));
         CUDA_CHECK(cudaMalloc(&d_k_split_padded, split_padded_elems * sizeof(__nv_bfloat16)));
         CUDA_CHECK(cudaMalloc(&d_v_split_padded, split_padded_elems * sizeof(__nv_bfloat16)));
+        CUDA_CHECK(cudaMalloc(&d_gates, gate_elems * sizeof(__nv_bfloat16)));
+        CUDA_CHECK(cudaMalloc(&d_merged_main, merged_main_elems * sizeof(__nv_bfloat16)));
+        if (opts.compare_baseline) {
+            CUDA_CHECK(cudaMalloc(&d_ref_merged_main,
+                                  merged_main_elems * sizeof(__nv_bfloat16)));
+        }
         CUDA_CHECK(cudaMalloc(&d_cos, rotary_elems * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&d_sin, rotary_elems * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&d_state_acc, state_acc_elems * sizeof(float)));
@@ -3549,6 +6516,10 @@ int main(int argc, char** argv) {
             d_k_masked, static_cast<long long>(unpadded_elems));
         fill_bf16_kernel<<<fill_masked_blocks, 1>>>(
             d_v_masked, static_cast<long long>(unpadded_elems));
+        int fill_gate_blocks =
+            static_cast<int>((gate_elems + kInitTile - 1) / kInitTile);
+        fill_gate_bf16_kernel<<<fill_gate_blocks, 1>>>(
+            d_gates, static_cast<long long>(gate_elems));
         transpose_k_nd_to_dn_kernel<<<fill_masked_blocks, 1>>>(
             d_k_masked, d_k_t_masked, static_cast<long long>(unpadded_elems));
         pack_time_qkv_kernel<<<fill_masked_blocks, 1>>>(
@@ -3557,6 +6528,9 @@ int main(int argc, char** argv) {
         pack_time_split_contig_kernel<<<fill_masked_blocks, 1>>>(
             d_q_masked, d_k_masked, d_v_masked,
             d_q_split_contig, d_k_split_contig, d_v_split_contig,
+            static_cast<long long>(unpadded_elems));
+        pack_time_split_contig_k_transposed_kernel<<<fill_masked_blocks, 1>>>(
+            d_k_split_contig, d_k_t_split_contig,
             static_cast<long long>(unpadded_elems));
         int fill_split_padded_blocks =
             static_cast<int>((split_padded_elems + 255) / 256);
@@ -3573,7 +6547,9 @@ int main(int argc, char** argv) {
 
         float scale = 1.0f / std::sqrt(static_cast<float>(kD));
         if (opts.variant != "all") {
-            if (opts.compare_baseline) {
+            bool gated_store_variant =
+                opts.variant == "main1280_q64k32_exp2_split_contig_gated_store";
+            if (opts.compare_baseline && !gated_store_variant) {
                 launch_main1280_q64k32_exp2_once(
                     d_q_masked, d_k_masked, d_v_masked, d_ref, scale);
             }
@@ -3585,8 +6561,164 @@ int main(int argc, char** argv) {
                     opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
                     d_out, scale);
             } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_kt_input") {
+                run_main1280_split_contig_kt_input_variant<64, 32>(
+                    opts, d_q_split_contig, d_k_t_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_kt_input_no_keytail") {
+                run_main1280_split_contig_kt_input_variant<64, 32, false>(
+                    opts, d_q_split_contig, d_k_t_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
                        "main1280_q64k32_exp2_split_contig_tail_idx32") {
                 run_main1280_split_contig_input_variant<64, 32, true, true>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_tail_col_broadcast") {
+                run_main1280_split_contig_input_variant<64, 32, true, false,
+                                                        false, true>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_tail_col_broadcast_out_acc_bf16") {
+                run_main1280_split_contig_input_variant<64, 32, true, false,
+                                                        false, true, true>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_alpha_one") {
+                run_main1280_split_contig_input_variant<64, 32, true, false,
+                                                        false, false, false, true>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_prob_linear") {
+                run_main1280_split_contig_input_variant<64, 32, true, false,
+                                                        false, false, false, false,
+                                                        kProbLinear>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_prob_linear_noclamp") {
+                run_main1280_split_contig_input_variant<64, 32, true, false,
+                                                        false, false, false, false,
+                                                        kProbLinearNoClamp>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_prob_poly2") {
+                run_main1280_split_contig_input_variant<64, 32, true, false,
+                                                        false, false, false, false,
+                                                        kProbPoly2>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_prob_poly4") {
+                run_main1280_split_contig_input_variant<64, 32, true, false,
+                                                        false, false, false, false,
+                                                        kProbPoly4>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_prob_poly2_noclamp") {
+                run_main1280_split_contig_input_variant<64, 32, true, false,
+                                                        false, false, false, false,
+                                                        kProbPoly2NoClamp>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_prob_poly3_noclamp") {
+                run_main1280_split_contig_input_variant<64, 32, true, false,
+                                                        false, false, false, false,
+                                                        kProbPoly3NoClamp>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_prob_poly3_noclamp_alpha_poly3_clamp") {
+                run_main1280_split_contig_input_variant<64, 32, true, false,
+                                                        false, false, false, false,
+                                                        kProbPoly3NoClamp, false,
+                                                        kAlphaProbClamp>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_prob_poly3_noclamp_alpha_poly3_clamp_final_rcp") {
+                run_main1280_split_contig_input_variant<64, 32, true, false,
+                                                        true, false, false, false,
+                                                        kProbPoly3NoClamp, false,
+                                                        kAlphaProbClamp>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_prob_poly3_outclamp_alpha_outclamp") {
+                run_main1280_split_contig_input_variant<64, 32, true, false,
+                                                        false, false, false, false,
+                                                        kProbPoly3OutputClamp, false,
+                                                        kAlphaProbClamp>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_prob_poly3_noclamp_alpha_linear_clamp") {
+                run_main1280_split_contig_input_variant<64, 32, true, false,
+                                                        false, false, false, false,
+                                                        kProbPoly3NoClamp, false,
+                                                        kAlphaLinearClamp>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_prob_rational4_alpha_rational4") {
+                run_main1280_split_contig_input_variant<64, 32, true, false,
+                                                        false, false, false, false,
+                                                        kProbRational4, false,
+                                                        kAlphaProbClamp>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_prob_poly4_noclamp") {
+                run_main1280_split_contig_input_variant<64, 32, true, false,
+                                                        false, false, false, false,
+                                                        kProbPoly4NoClamp>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_prob_poly4_noclamp_sum_bf16") {
+                run_main1280_split_contig_input_variant<64, 32, true, false,
+                                                        false, false, false, false,
+                                                        kProbPoly4NoClamp, true>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_prob_poly4_noclamp_bias") {
+                run_main1280_split_contig_input_variant<64, 32, true, false,
+                                                        false, false, false, false,
+                                                        kProbPoly4NoClampBias>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_tail_prob_mask_only") {
+                run_main1280_split_contig_tail_prob_mask_only_variant<64, 32>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_tail16_8") {
+                run_main1280_split_contig_tail16_8_variant<64, 32>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_tail_helper") {
+                run_main1280_split_contig_tail_helper_variant<64, 32>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_seg2") {
+                run_main1280_split_contig_seg2_variant<64, 32>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_seg2_no_keytail") {
+                run_main1280_split_contig_seg2_variant<64, 32, false>(
                     opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
                     d_out, scale);
             } else if (opts.variant ==
@@ -3595,8 +6727,18 @@ int main(int argc, char** argv) {
                     opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
                     d_out, scale);
             } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_tail_first_padded_tail_load") {
+                run_main1280_split_contig_tail_first_padded_tail_load_variant<64, 32>(
+                    opts, d_q_split_padded, d_k_split_padded, d_v_split_padded,
+                    d_out, scale);
+            } else if (opts.variant ==
                        "main1280_q64k32_exp2_split_contig_padded_tail_load") {
                 run_main1280_split_contig_padded_tail_load_variant<64, 32>(
+                    opts, d_q_split_padded, d_k_split_padded, d_v_split_padded,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_tail_col_broadcast_padded_tail_load") {
+                run_main1280_split_contig_padded_tail_load_variant<64, 32, true>(
                     opts, d_q_split_padded, d_k_split_padded, d_v_split_padded,
                     d_out, scale);
             } else if (opts.variant ==
@@ -3605,6 +6747,138 @@ int main(int argc, char** argv) {
                     opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
                     d_state_acc, d_state_m, d_state_l, d_out, scale);
             } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_score_av_lb") {
+                run_main1280_split_contig_score_av_lb_variant<64, 32>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_score_av_lb_no_keytail") {
+                run_main1280_split_contig_score_av_lb_variant<64, 32, false>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_tile_local_softmax_lb") {
+                run_main1280_split_contig_tile_local_softmax_lb_variant<64, 32>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_tile_local_softmax_lb_no_keytail") {
+                run_main1280_split_contig_tile_local_softmax_lb_variant<64, 32, false>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_final_rcp") {
+                run_main1280_split_contig_input_variant<64, 32, true, false, true>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_final_rcp_no_keytail") {
+                run_main1280_split_contig_input_variant<64, 32, false, false, true>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_lat2") {
+                run_main1280_split_contig_input_lat_variant<64, 32>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_lat2_no_keytail") {
+                run_main1280_split_contig_input_lat_variant<64, 32, false>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_q_lat2") {
+                run_main1280_split_contig_input_lat_variant<64, 32, true, 2, 0, 0>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_q_lat2_no_keytail") {
+                run_main1280_split_contig_input_lat_variant<64, 32, false, 2, 0, 0>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_k_lat2") {
+                run_main1280_split_contig_input_lat_variant<64, 32, true, 0, 2, 0>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_k_lat2_no_keytail") {
+                run_main1280_split_contig_input_lat_variant<64, 32, false, 0, 2, 0>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_v_lat2") {
+                run_main1280_split_contig_input_lat_variant<64, 32, true, 0, 0, 2>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_v_lat2_no_keytail") {
+                run_main1280_split_contig_input_lat_variant<64, 32, false, 0, 0, 2>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_kv_lat2") {
+                run_main1280_split_contig_input_lat_variant<64, 32, true, 0, 2, 2>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_kv_lat2_no_keytail") {
+                run_main1280_split_contig_input_lat_variant<64, 32, false, 0, 2, 2>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_row_l_bf16") {
+                run_main1280_split_contig_row_state_bf16_variant<64, 32>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_row_l_bf16_no_keytail") {
+                run_main1280_split_contig_row_state_bf16_variant<64, 32, false>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_row_state_bf16") {
+                run_main1280_split_contig_row_state_bf16_variant<64, 32, true, true>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_row_state_bf16_no_keytail") {
+                run_main1280_split_contig_row_state_bf16_variant<64, 32, false, true>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_first_init") {
+                run_main1280_split_contig_first_init_variant<64, 32>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_first_init_tail_col_broadcast_padded_tail_load") {
+                run_main1280_split_contig_first_init_variant<64, 32, true, true>(
+                    opts, d_q_split_padded, d_k_split_padded, d_v_split_padded,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_first_init_no_keytail") {
+                run_main1280_split_contig_first_init_variant<64, 32, false>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_out_acc_bf16") {
+                run_main1280_split_contig_input_variant<64, 32, true, false, false,
+                                                        false, true>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_out_acc_bf16_no_keytail") {
+                run_main1280_split_contig_input_variant<64, 32, false, false, false,
+                                                        false, true>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_out, scale);
+            } else if (opts.variant ==
+                       "main1280_q64k32_exp2_split_contig_gated_store") {
+                run_main1280_split_contig_gated_store_variant<64, 32>(
+                    opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
+                    d_gates, d_out, d_merged_main, d_ref_merged_main, scale);
+            } else if (opts.variant ==
                        "main1280_q64k32_exp2_split_contig_input_no_keytail") {
                 run_main1280_split_contig_input_variant<64, 32, false>(
                     opts, d_q_split_contig, d_k_split_contig, d_v_split_contig,
@@ -3612,8 +6886,11 @@ int main(int argc, char** argv) {
             } else {
                 run_focused_variant(opts, d_q_masked, d_k_masked, d_v_masked, d_out, scale);
             }
-            if (opts.compare_baseline) {
+            if (opts.compare_baseline && !gated_store_variant) {
                 compare_outputs_to_baseline(d_ref, d_out, out_elems);
+            } else if (opts.compare_baseline && gated_store_variant) {
+                compare_outputs_to_baseline(d_ref_merged_main, d_merged_main,
+                                            merged_main_elems);
             }
         } else {
         run_padded_variant<8>(opts, d_q, d_k, d_v, d_out, scale, false);
@@ -3705,10 +6982,16 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaFree(d_qkv_masked));
         CUDA_CHECK(cudaFree(d_q_split_contig));
         CUDA_CHECK(cudaFree(d_k_split_contig));
+        CUDA_CHECK(cudaFree(d_k_t_split_contig));
         CUDA_CHECK(cudaFree(d_v_split_contig));
         CUDA_CHECK(cudaFree(d_q_split_padded));
         CUDA_CHECK(cudaFree(d_k_split_padded));
         CUDA_CHECK(cudaFree(d_v_split_padded));
+        CUDA_CHECK(cudaFree(d_gates));
+        CUDA_CHECK(cudaFree(d_merged_main));
+        if (d_ref_merged_main) {
+            CUDA_CHECK(cudaFree(d_ref_merged_main));
+        }
         CUDA_CHECK(cudaFree(d_cos));
         CUDA_CHECK(cudaFree(d_sin));
         CUDA_CHECK(cudaFree(d_state_acc));
