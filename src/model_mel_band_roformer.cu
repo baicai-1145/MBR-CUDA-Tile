@@ -8,7 +8,6 @@
 #include "stft_cuda_tile.h"
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
 #include <iostream>
 #include <stdexcept>
 #include <utility>
@@ -36,187 +35,6 @@ Tensor maybe_bf16_norm_gamma(const Tensor& value) {
     return (mbr_tile::norm_gamma_bf16_enabled() && value.dtype() == DType::Float32)
         ? value.to_bf16()
         : value;
-}
-
-bool local_env_flag_enabled(const char* name) {
-    const char* raw = std::getenv(name);
-    if (!raw || raw[0] == '\0') return false;
-    std::string value(raw);
-    return value != "0" && value != "false" && value != "FALSE" &&
-           value != "off" && value != "OFF";
-}
-
-bool debug_compare_time_qkv_fused_rotary_enabled() {
-    static bool enabled = local_env_flag_enabled(
-        "CUDASEP_DEBUG_COMPARE_TIME_QKV_FUSED_ROTARY");
-    return enabled;
-}
-
-int debug_compare_time_qkv_fused_rotary_limit() {
-    static int limit = []() {
-        const char* raw = std::getenv("CUDASEP_DEBUG_COMPARE_TIME_QKV_FUSED_ROTARY_LIMIT");
-        if (!raw || raw[0] == '\0') return 1;
-        int parsed = std::atoi(raw);
-        return parsed > 0 ? parsed : 0;
-    }();
-    return limit;
-}
-
-struct TensorDiffStats {
-    double max_abs = 0.0;
-    double rms = 0.0;
-    double rel_rms = 0.0;
-    int64_t max_idx = -1;
-    float ref_at_max = 0.0f;
-    float test_at_max = 0.0f;
-};
-
-TensorDiffStats tensor_diff_stats(const Tensor& ref, const Tensor& test) {
-    if (ref.shape() != test.shape()) {
-        throw std::runtime_error("tensor diff: shape mismatch");
-    }
-    std::vector<float> ref_cpu = ref.to_cpu_f32();
-    std::vector<float> test_cpu = test.to_cpu_f32();
-    TensorDiffStats stats;
-    double sum_sq = 0.0;
-    double ref_sum_sq = 0.0;
-    for (int64_t i = 0; i < ref.numel(); ++i) {
-        double diff = (double)test_cpu[i] - (double)ref_cpu[i];
-        double abs_diff = std::fabs(diff);
-        sum_sq += diff * diff;
-        ref_sum_sq += (double)ref_cpu[i] * (double)ref_cpu[i];
-        if (abs_diff > stats.max_abs) {
-            stats.max_abs = abs_diff;
-            stats.max_idx = i;
-            stats.ref_at_max = ref_cpu[i];
-            stats.test_at_max = test_cpu[i];
-        }
-    }
-    if (ref.numel() > 0) {
-        stats.rms = std::sqrt(sum_sq / (double)ref.numel());
-        stats.rel_rms = std::sqrt(sum_sq / std::max(ref_sum_sq, 1e-30));
-    }
-    return stats;
-}
-
-void print_time_qkv_fused_rotary_diff(int call_idx,
-                                      const char* name,
-                                      const Tensor& ref,
-                                      const Tensor& test) {
-    TensorDiffStats stats = tensor_diff_stats(ref, test);
-    std::cerr << "[debug time-qkv fused-rotary] call=" << call_idx
-              << " " << name
-              << " max_abs=" << stats.max_abs
-              << " rms=" << stats.rms
-              << " rel_rms=" << stats.rel_rms
-              << " max_idx=" << stats.max_idx;
-    if (stats.max_idx >= 0 && ref.ndim() == 4) {
-        int64_t d = ref.size(3);
-        int64_t h = ref.size(2);
-        int64_t n = ref.size(1);
-        int64_t idx = stats.max_idx;
-        int64_t dim = idx % d;
-        idx /= d;
-        int64_t head = idx % h;
-        idx /= h;
-        int64_t token = idx % n;
-        int64_t batch = idx / n;
-        std::cerr << " at=[b" << batch << ",n" << token
-                  << ",h" << head << ",d" << dim << "]";
-    }
-    std::cerr << " ref=" << stats.ref_at_max
-              << " test=" << stats.test_at_max << std::endl;
-}
-
-struct TimeQkvProfileStats {
-    double split_producer_ms = 0.0;
-    double split_rotary_ms = 0.0;
-    double bkn_fused_ms = 0.0;
-    double pair_fused_ms = 0.0;
-    int split_producer_calls = 0;
-    int split_rotary_calls = 0;
-    int bkn_fused_calls = 0;
-    int pair_fused_calls = 0;
-};
-
-TimeQkvProfileStats& time_qkv_profile_stats() {
-    static TimeQkvProfileStats stats;
-    return stats;
-}
-
-void print_time_qkv_profile_stats() {
-    const auto& s = time_qkv_profile_stats();
-    auto print = [](const char* name, double total_ms, int calls) {
-        if (calls <= 0) return;
-        std::cerr << "[profile time-qkv] " << name
-                  << " calls=" << calls
-                  << " total_ms=" << total_ms
-                  << " avg_ms=" << (total_ms / (double)calls)
-                  << std::endl;
-    };
-    print("split_producer", s.split_producer_ms, s.split_producer_calls);
-    print("split_rotary", s.split_rotary_ms, s.split_rotary_calls);
-    print("bkn_fused_producer", s.bkn_fused_ms, s.bkn_fused_calls);
-    print("pair_fused_producer", s.pair_fused_ms, s.pair_fused_calls);
-}
-
-bool profile_time_qkv_enabled() {
-    static bool enabled = []() {
-        bool on = local_env_flag_enabled("CUDASEP_PROFILE_TIME_QKV_PRODUCER");
-        if (on) std::atexit(print_time_qkv_profile_stats);
-        return on;
-    }();
-    return enabled;
-}
-
-enum class TimeQkvProfileSegment {
-    SplitProducer,
-    SplitRotary,
-    BknFused,
-    PairFused,
-};
-
-void add_time_qkv_profile(TimeQkvProfileSegment segment, float ms) {
-    auto& s = time_qkv_profile_stats();
-    switch (segment) {
-        case TimeQkvProfileSegment::SplitProducer:
-            s.split_producer_ms += ms;
-            ++s.split_producer_calls;
-            break;
-        case TimeQkvProfileSegment::SplitRotary:
-            s.split_rotary_ms += ms;
-            ++s.split_rotary_calls;
-            break;
-        case TimeQkvProfileSegment::BknFused:
-            s.bkn_fused_ms += ms;
-            ++s.bkn_fused_calls;
-            break;
-        case TimeQkvProfileSegment::PairFused:
-            s.pair_fused_ms += ms;
-            ++s.pair_fused_calls;
-            break;
-    }
-}
-
-template <typename Fn>
-void run_time_qkv_profiled(TimeQkvProfileSegment segment, Fn&& fn) {
-    if (!profile_time_qkv_enabled()) {
-        std::forward<Fn>(fn)();
-        return;
-    }
-    cudaEvent_t start = nullptr;
-    cudaEvent_t stop = nullptr;
-    CUDA_CHECK(cudaEventCreate(&start));
-    CUDA_CHECK(cudaEventCreate(&stop));
-    CUDA_CHECK(cudaEventRecord(start));
-    std::forward<Fn>(fn)();
-    CUDA_CHECK(cudaEventRecord(stop));
-    CUDA_CHECK(cudaEventSynchronize(stop));
-    float elapsed_ms = 0.0f;
-    CUDA_CHECK(cudaEventElapsedTime(&elapsed_ms, start, stop));
-    CUDA_CHECK(cudaEventDestroy(stop));
-    CUDA_CHECK(cudaEventDestroy(start));
-    add_time_qkv_profile(segment, elapsed_ms);
 }
 
 }  // namespace
@@ -298,6 +116,32 @@ void MelBandRoformer::load(const ModelWeights& weights) {
     int64_t n_idx = freq_indices_gpu_.numel();
     freq_indices_.resize(n_idx);
     freq_indices_gpu_.copy_to_cpu(freq_indices_.data(), n_idx * sizeof(int64_t));
+
+    std::vector<std::vector<int64_t>> bands_by_freq(total_freq);
+    for (int64_t band_f = 0; band_f < n_idx; ++band_f) {
+        int64_t freq = freq_indices_[band_f];
+        if (freq < 0 || freq >= total_freq) {
+            throw std::runtime_error("MelBandRoformer: precomputed freq_indices out of range");
+        }
+        bands_by_freq[(size_t)freq].push_back(band_f);
+    }
+    std::vector<int64_t> freq_band_offsets(total_freq + 1, 0);
+    std::vector<int64_t> freq_band_indices;
+    freq_band_indices.reserve((size_t)n_idx);
+    max_bands_per_freq_ = 0;
+    for (int f = 0; f < total_freq; ++f) {
+        freq_band_offsets[f] = (int64_t)freq_band_indices.size();
+        max_bands_per_freq_ =
+            std::max<int64_t>(max_bands_per_freq_, (int64_t)bands_by_freq[(size_t)f].size());
+        for (int64_t band_f : bands_by_freq[(size_t)f]) {
+            freq_band_indices.push_back(band_f);
+        }
+    }
+    freq_band_offsets[total_freq] = (int64_t)freq_band_indices.size();
+    freq_band_offsets_gpu_ =
+        Tensor::from_cpu_i64(freq_band_offsets.data(), {(int64_t)freq_band_offsets.size()});
+    freq_band_indices_gpu_ =
+        Tensor::from_cpu_i64(freq_band_indices.data(), {(int64_t)freq_band_indices.size()});
 
     std::vector<float> nbpf_float(num_bands_per_freq_.begin(), num_bands_per_freq_.end());
     num_bands_per_freq_gpu_ = Tensor::from_cpu_f32(nbpf_float.data(), {(int64_t)total_freq});
@@ -494,76 +338,29 @@ Tensor MelBandRoformer::apply_attention_normed(const Tensor& normed, const Atten
         Tensor q_sc;
         Tensor k_sc;
         Tensor v_sc;
-        static int debug_time_qkv_fused_rotary_reports = 0;
-        bool debug_compare_fused =
-            debug_compare_time_qkv_fused_rotary_enabled() &&
-            debug_time_qkv_fused_rotary_reports <
-                debug_compare_time_qkv_fused_rotary_limit();
         bool use_pair_rotary = mbr_tile::time_qkv_pair_rotary_producer_enabled();
         bool use_fused_rotary = mbr_tile::time_qkv_fused_rotary_producer_enabled();
         bool use_qrot_attention =
             mbr_tile::time_q_rotary_in_attention_enabled() &&
-            !use_pair_rotary && !use_fused_rotary && !debug_compare_fused;
-        if (debug_compare_fused) {
-            int debug_call = debug_time_qkv_fused_rotary_reports;
-            Tensor q_ref;
-            Tensor k_ref;
-            Tensor v_ref;
-            Tensor q_test;
-            Tensor k_test;
-            Tensor v_test;
-            mbr_tile::linear_qkv_bkn_split_contig_time(
-                normed, w.to_qkv_w, w.to_qkv_w_bkn, q_ref, k_ref, v_ref);
-            mbr_tile::apply_rotary_time_split_contig_inplace(
-                q_ref, k_ref, cos_freqs, sin_freqs);
-            if (use_pair_rotary) {
-                mbr_tile::linear_qkv_pair_rotary_split_contig_time(
-                    normed, w.to_qkv_w, cos_freqs, sin_freqs,
-                    q_test, k_test, v_test);
-            } else {
-                mbr_tile::linear_qkv_bkn_rotary_split_contig_time(
-                    normed, w.to_qkv_w, w.to_qkv_w_bkn, cos_freqs, sin_freqs,
-                    q_test, k_test, v_test);
-            }
-            print_time_qkv_fused_rotary_diff(debug_call, "q", q_ref, q_test);
-            print_time_qkv_fused_rotary_diff(debug_call, "k", k_ref, k_test);
-            print_time_qkv_fused_rotary_diff(debug_call, "v", v_ref, v_test);
-            ++debug_time_qkv_fused_rotary_reports;
-            if (use_pair_rotary || use_fused_rotary) {
-                q_sc = q_test;
-                k_sc = k_test;
-                v_sc = v_test;
-            } else {
-                q_sc = q_ref;
-                k_sc = k_ref;
-                v_sc = v_ref;
-            }
-        } else if (use_pair_rotary) {
-            run_time_qkv_profiled(TimeQkvProfileSegment::PairFused, [&]() {
-                mbr_tile::linear_qkv_pair_rotary_split_contig_time(
-                    normed, w.to_qkv_w, cos_freqs, sin_freqs,
-                    q_sc, k_sc, v_sc);
-            });
+            !use_pair_rotary && !use_fused_rotary;
+        if (use_pair_rotary) {
+            mbr_tile::linear_qkv_pair_rotary_split_contig_time(
+                normed, w.to_qkv_w, cos_freqs, sin_freqs,
+                q_sc, k_sc, v_sc);
         } else if (use_fused_rotary) {
-            run_time_qkv_profiled(TimeQkvProfileSegment::BknFused, [&]() {
-                mbr_tile::linear_qkv_bkn_rotary_split_contig_time(
-                    normed, w.to_qkv_w, w.to_qkv_w_bkn, cos_freqs, sin_freqs,
-                    q_sc, k_sc, v_sc);
-            });
+            mbr_tile::linear_qkv_bkn_rotary_split_contig_time(
+                normed, w.to_qkv_w, w.to_qkv_w_bkn, cos_freqs, sin_freqs,
+                q_sc, k_sc, v_sc);
         } else {
-            run_time_qkv_profiled(TimeQkvProfileSegment::SplitProducer, [&]() {
-                mbr_tile::linear_qkv_bkn_split_contig_time(
-                    normed, w.to_qkv_w, w.to_qkv_w_bkn, q_sc, k_sc, v_sc);
-            });
-            run_time_qkv_profiled(TimeQkvProfileSegment::SplitRotary, [&]() {
-                if (use_qrot_attention) {
-                    mbr_tile::apply_rotary_time_split_contig_k_only_inplace(
-                        k_sc, cos_freqs, sin_freqs);
-                } else {
-                    mbr_tile::apply_rotary_time_split_contig_inplace(
-                        q_sc, k_sc, cos_freqs, sin_freqs);
-                }
-            });
+            mbr_tile::linear_qkv_bkn_split_contig_time(
+                normed, w.to_qkv_w, w.to_qkv_w_bkn, q_sc, k_sc, v_sc);
+            if (use_qrot_attention) {
+                mbr_tile::apply_rotary_time_split_contig_k_only_inplace(
+                    k_sc, cos_freqs, sin_freqs);
+            } else {
+                mbr_tile::apply_rotary_time_split_contig_inplace(
+                    q_sc, k_sc, cos_freqs, sin_freqs);
+            }
         }
         if (use_qrot_attention) {
             out = mbr_tile::scaled_dot_product_attention_time_split_contig_q_rotary(
@@ -684,22 +481,59 @@ Tensor MelBandRoformer::apply_transformer(const Tensor& x,
         // FeedForward + residual
         Tensor ff_residual_out;
         bool used_fused_ff_residual = false;
+        bool completed_ff_residual = false;
+        Tensor precomputed_ff_out;
+        bool has_precomputed_ff_out = false;
         if (w.ff_layers[i].linear1_w_bkn.is_empty() &&
             w.ff_layers[i].linear2_w_bkn.is_empty()) {
             Tensor ff_normed = mbr_tile::rms_norm(out, w.ff_layers[i].norm_gamma, scale);
-            used_fused_ff_residual = mbr_tile::try_feedforward_fused_residual(
-                ff_normed,
-                w.ff_layers[i].linear1_w,
-                w.ff_layers[i].linear1_b,
-                w.ff_layers[i].linear2_w,
-                w.ff_layers[i].linear2_b,
-                out,
-                ff_residual_out);
+            if (mbr_tile::residual_rms_norm_fused_path_enabled() &&
+                mbr_tile::try_feedforward_fused(
+                    ff_normed,
+                    w.ff_layers[i].linear1_w,
+                    w.ff_layers[i].linear1_b,
+                    w.ff_layers[i].linear2_w,
+                    w.ff_layers[i].linear2_b,
+                    precomputed_ff_out)) {
+                has_precomputed_ff_out = true;
+                Tensor residual_sum;
+                Tensor next_normed;
+                const Tensor& next_gamma =
+                    (i + 1 < depth) ? w.attn_layers[i + 1].norm_gamma : w.final_norm_gamma;
+                if (mbr_tile::try_residual_add_rms_norm(
+                        out, precomputed_ff_out, next_gamma, scale,
+                        residual_sum, next_normed)) {
+                    out = maybe_residual_bf16(residual_sum);
+                    if (i + 1 < depth) {
+                        pending_attn_normed = next_normed;
+                        has_pending_attn_normed = true;
+                    } else {
+                        pending_final_normed = next_normed;
+                        has_pending_final_normed = true;
+                    }
+                    completed_ff_residual = true;
+                }
+            }
+            if (!completed_ff_residual && !has_precomputed_ff_out) {
+                used_fused_ff_residual = mbr_tile::try_feedforward_fused_residual(
+                    ff_normed,
+                    w.ff_layers[i].linear1_w,
+                    w.ff_layers[i].linear1_b,
+                    w.ff_layers[i].linear2_w,
+                    w.ff_layers[i].linear2_b,
+                    out,
+                    ff_residual_out);
+            }
+        }
+        if (completed_ff_residual) {
+            continue;
         }
         if (used_fused_ff_residual) {
             out = maybe_residual_bf16(ff_residual_out);
         } else {
-            Tensor ff_out = apply_feedforward(out, w.ff_layers[i]);
+            Tensor ff_out = has_precomputed_ff_out
+                ? precomputed_ff_out
+                : apply_feedforward(out, w.ff_layers[i]);
             ff_out = match_dtype_for_add(ff_out, out.dtype());
             Tensor residual_sum;
             Tensor next_normed;
@@ -808,6 +642,16 @@ Tensor MelBandRoformer::apply_mask_estimator(const Tensor& x,
                     h = fused_glu.reshape(fused_shape);
                     used_fused_glu = true;
                     break;
+                }
+            }
+            if (i < num_linears - 1) {
+                Tensor fused_tanh;
+                if (mbr_tile::try_linear_tanh_bf16_output(
+                        h, mlp.linear_w[i], mlp.linear_b[i], fused_tanh)) {
+                    std::vector<int64_t> fused_shape = h.shape();
+                    fused_shape.back() = mlp.linear_w[i].size(0);
+                    h = fused_tanh.reshape(fused_shape);
+                    continue;
                 }
             }
             h = mbr_tile::linear(h, mlp.linear_w[i], mlp.linear_b[i]);
@@ -970,8 +814,9 @@ Tensor MelBandRoformer::forward(const Tensor& audio) {
 
     // ---- 10. Apply masks and scatter overlapping bands ----
     Tensor stft_result = mbr_tile::apply_mask_and_scatter(
-        stft_repr, stem_masks, freq_indices_gpu_, num_bands_per_freq_gpu_,
-        batch, num_stems, total_freq, total_band_freqs, T, audio_channels);
+        stft_repr, stem_masks, freq_indices_gpu_, freq_band_offsets_gpu_,
+        freq_band_indices_gpu_, num_bands_per_freq_gpu_, batch, num_stems,
+        total_freq, total_band_freqs, T, audio_channels, max_bands_per_freq_);
     // stft_result: [(B * num_stems * audio_channels), F, T, 2]
 
     // Zero DC component if requested

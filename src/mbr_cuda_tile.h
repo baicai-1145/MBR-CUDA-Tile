@@ -30,6 +30,8 @@ Tensor apply_gates_and_merge_heads(const Tensor& attn, const Tensor& gates,
 
 Tensor rms_norm(const Tensor& x, const Tensor& gamma, float scale);
 
+bool residual_rms_norm_fused_path_enabled();
+
 bool try_residual_add_rms_norm(const Tensor& residual,
                                const Tensor& update,
                                const Tensor& gamma,
@@ -91,10 +93,7 @@ void set_time_attention_context_chunk(int chunk_index);
 
 void set_time_attention_context_depth(int depth_index);
 
-bool time_attention_stats_enabled_for_current_context();
-
-void launch_ffn12_fused256_cutile(int gelu_mode,
-                                  bool full_bf16,
+void launch_ffn12_fused256_cutile(bool full_bf16,
                                   bool split2_output,
                                   bool split2_pairh32,
                                   bool split2_pairh32_tk64,
@@ -104,19 +103,6 @@ void launch_ffn12_fused256_cutile(int gelu_mode,
                                   const Tensor& linear2_w,
                                   const Tensor& linear2_b,
                                   Tensor& out);
-
-void launch_ffn12_fused256_residual_cutile(int gelu_mode,
-                                           bool full_bf16,
-                                           bool split2_output,
-                                           bool split2_pairh32,
-                                           bool split2_pairh32_tk64,
-                                           const Tensor& x,
-                                           const Tensor& linear1_w,
-                                           const Tensor& linear1_b,
-                                           const Tensor& linear2_w,
-                                           const Tensor& linear2_b,
-                                           const Tensor& residual,
-                                           Tensor& out);
 
 void launch_time_attention1301_split_tail_cutile(const Tensor& q,
                                                  const Tensor& k,
@@ -134,8 +120,7 @@ void launch_time_attention1301_split_contig_main_cutile(const Tensor& q,
                                                         Tensor& out,
                                                         float scale,
                                                         bool use_exp2,
-                                                        bool skip_keytail,
-                                                        bool approx_softmax);
+                                                        bool skip_keytail);
 
 void launch_time_attention1301_split_contig_qrot_main_cutile(const Tensor& q,
                                                              const Tensor& k,
@@ -242,17 +227,25 @@ Tensor linear_sigmoid(const Tensor& x, const Tensor& weight, const Tensor& bias)
 Tensor apply_mask_and_scatter(const Tensor& stft_repr,
                               const std::vector<Tensor>& stem_masks,
                               const Tensor& freq_indices,
+                              const Tensor& freq_band_offsets,
+                              const Tensor& freq_band_indices,
                               const Tensor& bands_per_freq,
                               int64_t batch,
                               int64_t num_stems,
                               int64_t total_freq,
                               int64_t total_band_freqs,
                               int64_t frames,
-                              int64_t audio_channels);
+                              int64_t audio_channels,
+                              int64_t max_bands_per_freq = 0);
 
 Tensor tanh_act(const Tensor& x);
 
 Tensor glu_last_dim(const Tensor& x);
+
+bool try_linear_tanh_bf16_output(const Tensor& x,
+                                 const Tensor& weight,
+                                 const Tensor& bias,
+                                 Tensor& out);
 
 bool try_linear_glu_last_dim_bf16_output(const Tensor& x,
                                          const Tensor& weight,

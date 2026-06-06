@@ -32,10 +32,16 @@ OP_PREFIXES = (
 A10G_DENSE_BF16_TFLOPS = 70.0
 A10G_SHARED_PER_SM = 102400
 A10G_MAX_BLOCKS_PER_SM = 16
+BYTES_PER_GIB = 1024.0 ** 3
 FFN12_M = 78048
 FFN12_IN = 256
 FFN12_HIDDEN = 1024
 FFN12_OUT = 256
+MBR_ROWS = 60 * 1301
+MBR_D = 256
+MBR_HEADS = 8
+MBR_DIM_HEAD = 64
+MBR_MERGED = MBR_HEADS * MBR_DIM_HEAD
 TIME_ATTN_BH = 480
 TIME_ATTN_N = 1301
 TIME_ATTN_MAIN_N = 1280
@@ -220,6 +226,92 @@ def diagnose(res: Resource | None, sass: SassCounts | None) -> str:
     return "; ".join(reasons)
 
 
+def action_hint(kernel: str, res: Resource | None, sass: SassCounts | None) -> str:
+    norm = normalize_function_name(kernel)
+    parsed = split_template_args(norm)
+    base = parsed[0] if parsed is not None else norm
+
+    def has_suffix(suffix: str) -> bool:
+        return base == suffix or base.endswith("::" + suffix)
+
+    if has_suffix("ffn12_fused256_split2_pairh32_cutile_kernel"):
+        return (
+            "tc-shared-residency: redesign W1/GELU/W2 staging to cut shared or "
+            "reg pressure while preserving HMMA=256"
+        )
+
+    if has_suffix("time_attention1301_main1280_split_contig_input_kernel"):
+        return (
+            "attention-softmax: reduce MUFU/scalar softmax work or fuse adjacent "
+            "producer/consumer without hurting the strong HMMA body"
+        )
+
+    if has_suffix("time_attention1301_split_contig_tail_kernel"):
+        return (
+            "attention-tail: reduce tail-specific softmax/control overhead; promote "
+            "only if main-path timing is unchanged"
+        )
+
+    if has_suffix("freq_attention60_cutile_padded_out60_kernel"):
+        return (
+            "tiny-attention-density: N=60 limits HMMA density; improve only with a "
+            "different fixed-shape mapping or deeper producer fusion"
+        )
+
+    if has_suffix("split_qkv_heads_rotary_qkv_bf16_freq60_pad64_kernel"):
+        return (
+            "memory-bound-delete-boundary: prefer writing the consumer layout or "
+            "fusing into freq attention over retuning the copy-like producer"
+        )
+
+    d256_copy_kernels = (
+        "strided_copy_bf16_btf_to_bft_d256_cutile_kernel",
+        "strided_copy_bf16_bft_to_btf_d256_cutile_kernel",
+        "strided_copy_bf16_btf_to_fbt_d256_cutile_kernel",
+    )
+    if any(has_suffix(name) for name in d256_copy_kernels):
+        return (
+            "layout-propagation: delete the BTF/BFT materialization by changing "
+            "adjacent producer/consumer layouts, not by another copy kernel"
+        )
+
+    if has_suffix("rotary_time_split_contig_inplace_kernel"):
+        return (
+            "memory-bound-fuse: move rotary into QKV producer or attention consumer "
+            "only if extra address work does not lower HMMA throughput"
+        )
+
+    if has_suffix("rms_norm_d256_to_bf16_kernel"):
+        return (
+            "norm-fusion: consume RMS output directly in the following fixed-shape "
+            "linear when that removes a global read/write"
+        )
+
+    if has_suffix("residual_add_rms_norm_d256_to_bf16_kernel"):
+        return (
+            "boundary-already-fused: further win needs fusing this consumer into the "
+            "next producer; standalone norm tuning is unlikely to be large"
+        )
+
+    if has_suffix("apply_gates_and_merge_heads_bf16_token_d64_cutile_kernel"):
+        return (
+            "memory-bound-fuse: only revisit as part of output projection fusion; "
+            "standalone packing is bandwidth/control bound"
+        )
+
+    if sass is None:
+        return "static-unknown: inspect SASS/resource match before choosing a kernel experiment"
+    if sass.hmma == 0:
+        return "non-tensorcore: optimize as memory/control path or delete with fusion"
+    if res is not None and res.shared >= 96 * 1024:
+        return "tc-shared-residency: reduce shared footprint without losing HMMA density"
+    if sass.hmma <= 32:
+        return "low-hmma-density: change fixed-shape tiling before micro-optimizing scalar code"
+    if sass.mufu >= 64:
+        return "mufu-bound: approximate or restructure transcendental-heavy work"
+    return "measure-next: no dominant static limiter; use focused Nsight/shape sweep"
+
+
 def smem_cta_limit(res: Resource | None) -> int | None:
     if res is None or res.shared <= 0:
         return None
@@ -273,6 +365,23 @@ def split_template_args(name: str) -> tuple[str, list[str]] | None:
     return name[:start], args
 
 
+def has_base_suffix(base: str, suffix: str) -> bool:
+    return base == suffix or base.endswith("::" + suffix)
+
+
+def canonical_template_args(base: str, args: list[str]) -> list[str]:
+    if has_base_suffix(base, "ffn12_fused256_split2_pairh32_cutile_kernel") and len(args) == 10:
+        # Historical traces before 2026-06-06 include the now-deleted AddResidual
+        # template argument after InputTileK. Current SASS has the same hot
+        # non-residual instance with that slot removed.
+        return args[:3] + args[4:]
+    if has_base_suffix(base, "ffn12_tail_ffn2_cutile_kernel") and len(args) == 2:
+        # Historical traces include the removed tail residual flag after
+        # FullBF16. Current SASS only keeps FullBF16.
+        return args[:1]
+    return args
+
+
 def find_static_entry(mapping, kernel: str):
     norm = normalize_function_name(kernel)
     exact = mapping.get(norm)
@@ -283,6 +392,7 @@ def find_static_entry(mapping, kernel: str):
     if parsed is None:
         return None
     base, args = parsed
+    args = canonical_template_args(base, args)
 
     matches = []
     for name, value in mapping.items():
@@ -290,6 +400,7 @@ def find_static_entry(mapping, kernel: str):
         if candidate is None:
             continue
         cand_base, cand_args = candidate
+        cand_args = canonical_template_args(cand_base, cand_args)
         same_base = (
             cand_base == base or
             cand_base.endswith("::" + base) or
@@ -367,6 +478,43 @@ def estimate_useful_flops(kernel: str) -> float | None:
     return None
 
 
+def estimate_logical_bytes(kernel: str) -> float | None:
+    norm = normalize_function_name(kernel)
+    parsed = split_template_args(norm)
+    base = parsed[0] if parsed is not None else norm
+
+    def has_suffix(suffix: str) -> bool:
+        return base == suffix or base.endswith("::" + suffix)
+
+    bf16 = 2.0
+    if has_suffix("apply_gates_and_merge_heads_bf16_token_d64_cutile_kernel"):
+        return MBR_ROWS * (MBR_MERGED + MBR_HEADS + MBR_MERGED) * bf16
+
+    d256_copy_kernels = (
+        "strided_copy_bf16_btf_to_bft_d256_cutile_kernel",
+        "strided_copy_bf16_bft_to_btf_d256_cutile_kernel",
+        "strided_copy_bf16_btf_to_fbt_d256_cutile_kernel",
+    )
+    if any(has_suffix(name) for name in d256_copy_kernels):
+        return MBR_ROWS * MBR_D * bf16 * 2.0
+
+    if has_suffix("rms_norm_d256_to_bf16_kernel"):
+        return MBR_ROWS * MBR_D * bf16 * 3.0
+
+    if has_suffix("residual_add_rms_norm_d256_to_bf16_kernel"):
+        return MBR_ROWS * MBR_D * bf16 * 5.0
+
+    if has_suffix("rotary_time_split_contig_inplace_kernel"):
+        q_or_k_elems = TIME_ATTN_BH * TIME_ATTN_N * TIME_ATTN_D
+        return q_or_k_elems * bf16 * 4.0
+
+    if has_suffix("split_qkv_heads_rotary_qkv_bf16_freq60_pad64_kernel"):
+        qkv_elems = MBR_ROWS * MBR_MERGED * 3.0
+        return qkv_elems * bf16 * 2.0
+
+    return None
+
+
 def format_metric(value: float | None, width: int, precision: int = 1) -> str:
     if value is None:
         return f"{'-':>{width}}"
@@ -396,12 +544,15 @@ def main() -> int:
     print()
     print(
         f"{'rank':>4} {'calls':>5} {'total_ms':>9} {'avg_us':>8} "
-        f"{'TF/s':>7} {'roof%':>6} "
+        f"{'TF/s':>7} {'roof%':>6} {'GiB/s':>7} "
         f"{'REG':>4} {'STACK':>5} {'SMEM':>7} {'smCTA':>5} "
         f"{'HMMA':>5} {'MUFU':>5} "
         f"{'scalar':>6} {'BAR':>4} {'STG':>3}  kernel"
     )
     printed = 0
+    printed_total_ms = 0.0
+    printed_known_flops = 0.0
+    printed_known_logical_gib = 0.0
     for rank, (kernel, calls, total_ms, avg_us) in enumerate(rows, start=1):
         norm = normalize_function_name(kernel)
         if filt and not (filt.search(kernel) or filt.search(norm)):
@@ -417,18 +568,44 @@ def main() -> int:
         if useful_flops is not None and total_ms > 0.0:
             useful_tflops = (useful_flops * calls) / (total_ms * 1.0e-3) / 1.0e12
             roof_pct = useful_tflops * 100.0 / A10G_DENSE_BF16_TFLOPS
+        logical_bytes = estimate_logical_bytes(norm)
+        logical_gibs = None
+        if logical_bytes is not None and total_ms > 0.0:
+            logical_gibs = (logical_bytes * calls / BYTES_PER_GIB) / (total_ms * 1.0e-3)
+        printed_total_ms += total_ms
+        if useful_flops is not None:
+            printed_known_flops += useful_flops * calls
+        if logical_bytes is not None:
+            printed_known_logical_gib += logical_bytes * calls / BYTES_PER_GIB
         print(
             f"{rank:4d} {calls:5d} {total_ms:9.3f} {avg_us:8.3f} "
             f"{format_metric(useful_tflops, 7)} {format_metric(roof_pct, 6)} "
+            f"{format_metric(logical_gibs, 7)} "
             f"{res.reg if res else 0:4d} {res.stack if res else 0:5d} "
             f"{res.shared if res else 0:7d} {format_smem_cta_limit(res)} "
             f"{sass.hmma:5d} {sass.mufu:5d} "
             f"{scalar:6d} {sass.bar:4d} {sass.stg:3d}  {short_name(kernel)}"
         )
-        print(f"     cause: {diagnose(res, find_static_entry(sass_counts, norm))}")
+        matched_sass = find_static_entry(sass_counts, norm)
+        print(f"     cause: {diagnose(res, matched_sass)}")
+        print(f"     action: {action_hint(norm, res, matched_sass)}")
         printed += 1
         if printed >= args.limit:
             break
+    if printed:
+        print()
+        print("[a10g-cutile] printed-row subtotal")
+        print(f"rows={printed} total_ms={printed_total_ms:.3f}")
+        if printed_known_flops > 0.0 and printed_total_ms > 0.0:
+            subtotal_tflops = printed_known_flops / (printed_total_ms * 1.0e-3) / 1.0e12
+            print(
+                f"known_math={subtotal_tflops:.2f} TF/s "
+                f"roof70={subtotal_tflops * 100.0 / A10G_DENSE_BF16_TFLOPS:.1f}%")
+        if printed_known_logical_gib > 0.0 and printed_total_ms > 0.0:
+            subtotal_gibs = printed_known_logical_gib / (printed_total_ms * 1.0e-3)
+            print(
+                f"known_logical_bytes={printed_known_logical_gib:.3f} GiB "
+                f"aggregate={subtotal_gibs:.1f} GiB/s")
     return 0
 
 

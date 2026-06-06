@@ -40188,3 +40188,3909 @@ Decision:
 - The next useful FFN12 direction must preserve `HMMA=256` and reduce stack/reg
   or shared without adding barriers. That likely requires a different way to
   stage W2/output accumulation, not a serial output split.
+
+### 2026-06-06 - Current dtype-boundary timeline audit
+
+Goal:
+
+- Recheck whether the `f32_to_bf16_kernel` count in the latest source profile is
+  still startup/setup work or a repeated inference-loop conversion boundary.
+- Make the audit repeatable for future profiles instead of relying on one-off
+  sqlite snippets.
+
+Added helper:
+
+```bash
+./bench/nsys_dtype_timeline.sh trace.sqlite [cutoff_ms] [limit]
+```
+
+The script reports dtype/conversion kernel total time plus first/last
+appearance in the GPU timeline, then repeats the table after a cutoff. The
+default cutoff is `100 ms`.
+
+Command:
+
+```bash
+./bench/nsys_dtype_timeline.sh \
+  bench/nsys_freq_v32_source_baseline_clean.sqlite 100 20
+```
+
+Current profile result:
+
+```text
+f32_to_bf16_kernel:
+  calls=1169 total=3.743 ms avg=3.202 us first=0.000 ms last=73.378 ms
+
+after 100 ms:
+  no f32_to_bf16_kernel rows
+
+rms_norm_d256_to_bf16_kernel<bf16,bf16,false>:
+  calls=288 total=35.451 ms first=54.111 ms last=909.960 ms
+  after 100 ms: 275 calls, 33.852 ms
+
+apply_gates_and_merge_heads_bf16_token_d64_cutile_kernel:
+  calls=96 total=23.569 ms first=64.150 ms last=907.002 ms
+  after 100 ms: 92 calls, 22.587 ms
+
+tanh_bf16_to_bf16_kernel:
+  calls=960 total=6.293 ms first=250.475 ms last=932.419 ms
+
+glu_last_dim_bf16_to_bf16_kernel:
+  calls=480 total=1.406 ms first=250.627 ms last=932.534 ms
+
+gather_freqs_fold_complex_to_bf16_kernel:
+  calls=4 total=0.467 ms first=42.774 ms last=720.539 ms
+  after 100 ms: 3 calls, 0.350 ms
+```
+
+Interpretation:
+
+- Pure standalone FP32 to BF16 conversion kernels are still startup/setup only
+  in the latest `freq_v32` baseline. They finish by `73.378 ms` from the first
+  GPU kernel, while the repeated inference timeline continues past `900 ms`.
+- The hot runtime dtype-boundary work is not standalone conversion. It is
+  compute kernels with BF16 inputs/outputs that still perform reductions,
+  sigmoid/tanh/GLU, or STFT-band folding around FP32 math/state.
+- This means reducing `f32_to_bf16_kernel` launch count will not materially
+  improve chunk throughput unless profile capture is narrowed to exclude setup
+  and a new runtime recurrence appears.
+
+Decision:
+
+- Close `f32_to_bf16_kernel` count as a current runtime optimization target.
+- Keep `bench/nsys_dtype_timeline.sh` as the recurring audit gate for future
+  profiles.
+- Next runtime work should target CUDA Tile dataflow and fusion:
+  layout materialization copies, RMS/gate fusion opportunities, and Tensor Core
+  kernel codegen gaps in FFN/QKV/linear paths.
+
+### 2026-06-06 - BF16 D256 layout-copy rows-per-block sweep
+
+Goal:
+
+- Attack a real runtime BF16 dataflow cost after closing standalone
+  `f32_to_bf16_kernel` as startup-only.
+- The time/freq transformer path repeatedly materializes BF16 D=256 layout
+  changes through the specialized `strided_copy_bf16_*_d256_cutile_kernel`.
+  Current profile showed:
+
+```text
+strided_copy_bf16_btf_to_bft_d256_cutile_kernel:
+  96 calls, about 13.1 ms
+
+strided_copy_bf16_btf_to_fbt_d256_cutile_kernel:
+  8 calls, about 1.16 ms
+```
+
+Implementation:
+
+- Templated the three fixed BF16 D=256 layout-copy kernels on
+  `RowsPerBlock`.
+- Added:
+
+```text
+CUDASEP_STRIDED_COPY_D256_ROWS_PER_BLOCK=4|8|16
+```
+
+- Default was changed from `8` to `4` after the profile sweep.
+- This remains CUDA Tile-only and uses compile-time `ct::shape` values, matching
+  CUDA Tile's requirement that tile shapes are compile-time powers of two.
+
+SASS/resource:
+
+```bash
+./bench/cuobjdump_kernel_summary.sh build-min/cudasep_infer \
+  'strided_copy_bf16_btf_to_bft_d256|strided_copy_bf16_bft_to_btf_d256|strided_copy_bf16_btf_to_fbt_d256' \
+  120
+```
+
+```text
+RowsPerBlock=4:
+  REG=36 SHARED=0
+  instr=344 IMAD=135-137 IADD3=42-43 MUFU=5
+
+RowsPerBlock=8:
+  REG=46 SHARED=0
+  instr=568-576 IMAD=231-233 IADD3=66-68 MUFU=9
+
+RowsPerBlock=16:
+  REG=72 SHARED=0
+  instr=1240-1280 IMAD=495-513 IADD3=112-121 MUFU=25
+```
+
+Nsight Systems commands:
+
+```bash
+nsys profile --trace=cuda --sample=none --cpuctxsw=none --stats=false \
+  --force-overwrite=true -o bench/nsys_strided_rows8_clean \
+  ./build-min/cudasep_infer --model mel-band-roformer-deux/becruily_deux.csm \
+  --input test_clean.wav --output outputs/nsys_strided_rows8_clean \
+  --bf16 --chunk-batch-size 1 --stem -1
+
+CUDASEP_STRIDED_COPY_D256_ROWS_PER_BLOCK=4 \
+nsys profile --trace=cuda --sample=none --cpuctxsw=none --stats=false \
+  --force-overwrite=true -o bench/nsys_strided_rows4_clean \
+  ./build-min/cudasep_infer --model mel-band-roformer-deux/becruily_deux.csm \
+  --input test_clean.wav --output outputs/nsys_strided_rows4_clean \
+  --bf16 --chunk-batch-size 1 --stem -1
+
+CUDASEP_STRIDED_COPY_D256_ROWS_PER_BLOCK=16 \
+nsys profile --trace=cuda --sample=none --cpuctxsw=none --stats=false \
+  --force-overwrite=true -o bench/nsys_strided_rows16_clean \
+  ./build-min/cudasep_infer --model mel-band-roformer-deux/becruily_deux.csm \
+  --input test_clean.wav --output outputs/nsys_strided_rows16_clean \
+  --bf16 --chunk-batch-size 1 --stem -1
+```
+
+Profile timing:
+
+```text
+rows=8:
+  profiled infer=910.2 ms
+  total GPU kernel time=869.380 ms
+  btf_to_bft: 96 calls, 13.086 ms, 136.309 us/call
+  btf_to_fbt:  8 calls,  1.161 ms, 145.160 us/call
+  copy subtotal=14.247 ms
+
+rows=4:
+  profiled infer=910.6 ms
+  total GPU kernel time=867.749 ms
+  btf_to_bft: 96 calls, 12.026 ms, 125.268 us/call
+  btf_to_fbt:  8 calls,  1.002 ms, 125.232 us/call
+  copy subtotal=13.028 ms
+
+rows=16:
+  profiled infer=908.0 ms
+  total GPU kernel time=866.666 ms
+  btf_to_bft: 96 calls, 13.913 ms, 144.930 us/call
+  btf_to_fbt:  8 calls,  1.272 ms, 158.952 us/call
+  copy subtotal=15.185 ms
+```
+
+Default-path validation after promotion:
+
+```text
+./build-min/cudasep_infer ... --input test_clean.wav --bf16 ...
+  infer time: 893.6 ms
+```
+
+Interpretation:
+
+- `rows=4` is the best direct layout-copy kernel shape: copy subtotal improves
+  from `14.247 ms` to `13.028 ms`, about `-8.6%`.
+- `rows=16` has fewer CTAs, but CUDA Tile codegen gets much heavier
+  (`REG=72`, about `2.2x` static instructions versus rows=8 and about `3.7x`
+  versus rows=4), so the copy kernels slow down.
+- The end-to-end profiler time is noisy at this scale, so the promotion is
+  based on the direct kernel subtotal plus unchanged semantics. This is a small
+  dataflow win, not a Tensor Core throughput change.
+- Bottom cause: this layout copy is dominated by global-memory permutation and
+  integer address arithmetic, not BF16 arithmetic. Smaller compile-time tile
+  shape lowers register pressure and instruction count enough to beat the extra
+  CTA scheduling work on A10G.
+
+Decision:
+
+- Promote `RowsPerBlock=4` as the default BF16 D256 layout-copy shape.
+- Keep `CUDASEP_STRIDED_COPY_D256_ROWS_PER_BLOCK=8` as rollback and
+  `=16` as a closed negative probe.
+- Next layout-level work should avoid the copy entirely by carrying one layout
+  deeper through adjacent transformer stages, rather than continuing to tune
+  this pure permutation kernel.
+
+### 2026-06-06 - FFN residual consumer RMS fusion re-enabled
+
+Goal:
+
+- Recover the useful residual-add + next-RMSNorm consumer fusion after the
+  source path moved FFN12 residual handling to the faster two-kernel strategy.
+- Current source profile before this change:
+
+```text
+rms_norm_d256_to_bf16_kernel:
+  288 calls, 35.467 ms
+
+residual_add_bf16_main_kernel:
+  96 calls, 17.647 ms
+
+residual_add_bf16_tail_kernel:
+  96 calls, 0.759 ms
+```
+
+The old FFN residual sequence was effectively:
+
+```text
+ff_out = ffn12(...)
+out = residual_add_bf16(out, ff_out)
+next_normed = rms_norm(out, next_or_final_gamma)
+```
+
+Implementation:
+
+- Reordered `apply_transformer()` so the FFN block first tries:
+
+```text
+ff_out = try_feedforward_fused(ff_normed, ...)
+try_residual_add_rms_norm(out, ff_out, next_or_final_gamma)
+  -> residual_out
+  -> next_normed
+```
+
+- If this consumer fusion does not complete, the path falls back to the existing
+  fused-residual FFN12 or generic feed-forward residual handling.
+- Added a small public gate:
+
+```text
+mbr_tile::residual_rms_norm_fused_path_enabled()
+```
+
+  so `CUDASEP_DISABLE_RESIDUAL_RMS_NORM_FUSED=1` still disables the new
+  scheduling path cleanly.
+
+Profile command:
+
+```bash
+nsys profile --trace=cuda --sample=none --cpuctxsw=none --stats=false \
+  --force-overwrite=true -o bench/nsys_ffn_consumer_rms_clean \
+  ./build-min/cudasep_infer --model mel-band-roformer-deux/becruily_deux.csm \
+  --input test_clean.wav --output outputs/nsys_ffn_consumer_rms_clean \
+  --bf16 --chunk-batch-size 1 --stem -1
+```
+
+Nsight result versus the rows=4 layout-copy baseline:
+
+```text
+baseline rows=4:
+  profiled infer=910.6 ms
+  kernel launches=6602
+  total GPU kernel time=867.749 ms
+  ffn12_fused256:             96 calls, 175.601 ms
+  rms_norm_d256_to_bf16:     288 calls,  35.467 ms
+  residual_add_bf16_main:     96 calls,  17.647 ms
+  residual_add_bf16_tail:     96 calls,   0.759 ms
+
+consumer RMS fusion:
+  profiled infer=897.7 ms
+  kernel launches=6410
+  total GPU kernel time=859.402 ms
+  ffn12_fused256:                       96 calls, 175.046 ms
+  rms_norm_d256_to_bf16:               192 calls,  23.587 ms
+  residual_add_rms_norm_d256_to_bf16:   96 calls,  23.751 ms
+  residual_add_bf16_main/tail:           0 calls
+```
+
+Direct kernel-segment comparison:
+
+```text
+old residual segment:
+  residual_add_bf16_main + tail + eliminated RMSNorm
+  17.647 + 0.759 + (35.467 - 23.587) = 30.286 ms
+
+new residual+RMS segment:
+  residual_add_rms_norm_d256_to_bf16 = 23.751 ms
+
+net direct saving:
+  6.535 ms
+```
+
+Resource/SASS:
+
+```bash
+./bench/cuobjdump_kernel_summary.sh build-min/cudasep_infer \
+  'residual_add_rms_norm_d256_to_bf16|residual_add_bf16' 30
+```
+
+```text
+residual_add_rms_norm_d256_to_bf16<bf16,false>:
+  REG=19 SHARED=16 instr=96 LDG=3 STG=2 FADD=11 FMUL=8 MUFU=1
+
+residual_add_bf16_main:
+  REG=70 SHARED=0 instr=344 LDG=16 STG=1 IMAD=99
+
+residual_add_bf16_tail:
+  REG=64 SHARED=0 instr=1376 STG=1 IMAD=66 IADD3=384 PRMT=226
+```
+
+Validation:
+
+```text
+test_clean.wav:
+  profiled infer=897.7 ms
+  output diff vs rows=4 baseline:
+    Vocals rel_rms=5.39979673e-08, SNR=145.352 dB
+    Instrumental rel_rms=5.44655483e-08, SNR=145.278 dB
+
+test.wav:
+  plain infer=5203.3 ms
+  output diff vs rows=4 baseline:
+    Vocals rel_rms=5.46354899e-08, SNR=145.251 dB
+    Instrumental rel_rms=5.45474874e-08, SNR=145.265 dB
+```
+
+Interpretation:
+
+- This is a real dataflow fusion win: kernel launches drop by `192`, RMSNorm
+  D256 calls drop by `96`, and the standalone BF16 residual-add kernels are
+  removed from the runtime profile.
+- The FFN12 Tensor Core kernel itself is essentially unchanged, so the gain is
+  not from better GEMM throughput. It comes from deleting one global-memory
+  residual write/read and one separate RMSNorm launch per FFN residual site.
+- Output is numerically equivalent at the final WAV level (`~5e-8 rel_rms`).
+
+Decision:
+
+- Keep the consumer residual+RMS scheduling enabled by default through the
+  existing `CUDASEP_DISABLE_RESIDUAL_RMS_NORM_FUSED=1` rollback.
+- Next comparable fusion target is attention gate merge or layout propagation;
+  the highest-return non-GEMM residual path is now closed.
+
+### 2026-06-06 - A10G bottleneck report adds non-MMA bandwidth scale
+
+Goal:
+
+- Keep CUDA Tile A10G triage aligned with the project goal: Tensor Core kernels
+  should be judged by useful TF/s versus the existing `70 TF/s` A10G reference,
+  while non-HMMA layout/elementwise kernels should be judged by logical memory
+  bandwidth and by whether the global-memory boundary can be removed.
+- Avoid remeasuring dense roofline.
+
+Change:
+
+- Extended `bench/a10g_cutile_bottleneck_report.py` with a `GiB/s` column for
+  fixed-shape non-MMA MBR hotspots:
+  - gate merge `[tokens,8,64] -> [tokens,512]`
+  - BF16 D256 layout copies
+  - D256 RMSNorm and residual+RMSNorm
+  - time rotary in-place
+  - freq QKV split/rotary/pad64
+
+Validation commands:
+
+```bash
+python3 -m py_compile bench/a10g_cutile_bottleneck_report.py
+git diff --check -- bench/a10g_cutile_bottleneck_report.py
+./bench/audit_cuda_tile_first.sh build-min/cudasep_infer
+python3 bench/a10g_cutile_bottleneck_report.py \
+  bench/nsys_ffn_consumer_rms_clean.sqlite \
+  build-min/cudasep_infer \
+  --limit 20
+```
+
+Current report excerpt:
+
+```text
+ffn12_fused256_split2_pairh32:
+  175.046 ms, 44.9 TF/s, roof70=64.1%
+  cause: 98KB shared residency wall; high reg/stack pressure; large scalar side work
+
+time_attention1301_main1280:
+  161.731 ms, 60.7 TF/s, roof70=86.8%
+  cause: softmax MUFU; large scalar side work; multiple global-store/layout writes
+
+qkv_bkn_split_contig_static_full:
+  60.191 ms, 48.9 TF/s, roof70=69.9%
+  cause: 98KB shared residency wall; multiple global-store/layout writes
+
+split_qkv_heads_rotary_qkv_bf16_freq60_pad64:
+  36.831 ms, 582.1 GiB/s
+  cause: non-HMMA scalar/memory path; multiple global-store/layout writes
+
+residual_add_rms_norm_d256_to_bf16:
+  23.751 ms, 752.2 GiB/s
+  cause: non-HMMA scalar/memory path
+
+rotary_time_split_contig_inplace:
+  23.669 ms, 603.9 GiB/s
+  cause: non-HMMA scalar/memory path; multiple global-store/layout writes
+
+rms_norm_d256_to_bf16:
+  23.587 ms, 909.0 GiB/s
+  cause: non-HMMA scalar/memory path
+
+apply_gates_and_merge_heads_bf16_token_d64:
+  23.568 ms, 611.2 GiB/s
+  cause: non-HMMA scalar/memory path
+
+strided_copy_bf16_btf_to_bft_d256<4>:
+  12.037 ms, 593.7 GiB/s
+  cause: non-HMMA scalar/memory path
+```
+
+Interpretation:
+
+- The largest remaining Tensor Core target is still FFN12, but its static limit
+  is not missing CUDA Tile MMA. It is the fused kernel's `98KB` shared-memory
+  residency wall plus high register/stack and barrier pressure.
+- Time attention is already the strongest A10G Tensor Core path in the current
+  model profile at about `86.8%` of the accepted dense BF16 reference. Further
+  gains must reduce softmax/scalar/layout overhead without perturbing the
+  `HMMA=160` body.
+- Gate merge, D256 layout copy, RMSNorm, rotary, and freq QKV split/rotary are
+  not TFLOP/s problems. They are `~580-910 GiB/s` logical memory/control
+  kernels. The next useful work is to delete or carry these boundaries across
+  adjacent CUDA Tile kernels, not to expect them to approach `70 TF/s`.
+
+Decision:
+
+- Keep `bench/a10g_cutile_bottleneck_report.py` as the first triage command for
+  every new source profile.
+- Next source work should target either:
+  - an FFN12 staging redesign that preserves `HMMA=256` while reducing
+    shared/register/barrier pressure, or
+  - a layout propagation experiment that removes a D256 copy or rotary/split
+    boundary without slowing the adjacent Tensor Core consumer.
+
+### 2026-06-06 - FFN12 bias-broadcast plus odd5 probe
+
+Goal:
+
+- Test one combined FFN12 CUDA Tile spelling that had not been closed directly:
+  keep the lower-address-cost `bias_broadcast` shape, but replace the poly9 GELU
+  side work with the existing aggressive odd5 approximation.
+- Keep the probe bench-only. Source inference and the default poly9 path are
+  unchanged.
+- Success criteria: preserve `HMMA=256`, avoid stack/local spill, reduce static
+  scalar work, and show a runtime win large enough to justify a source opt-in.
+
+Official CUDA Tile context:
+
+- The kernel remains a `__tile_global__` CUDA Tile kernel using
+  `ct::partition_view`, tile loads/stores, and `ct::mma`.
+- Reference checked before the edit:
+  https://docs.nvidia.com/cuda/cuda-tile-cpp-api-reference/index.html
+
+Change:
+
+- Added `fused_pairh32_bias_broadcast_odd5_lat2` to
+  `bench/bf16_ffn12_two_stage_cutile.cu`.
+- It reuses the existing `bias_broadcast` FFN12 kernel template and switches
+  only the hidden GELU approximation through a compile-time `Odd5` flag.
+
+Commands:
+
+```bash
+ninja -C build-min bench_bf16_ffn12_two_stage_cutile -j8
+
+./build-min/bench_bf16_ffn12_two_stage_cutile --describe --variant all |
+  rg 'GPU:|fused_pairh32_(lat2|bias_broadcast_lat2|bias_broadcast_odd5_lat2)'
+
+./bench/cuobjdump_kernel_summary.sh \
+  build-min/bench_bf16_ffn12_two_stage_cutile \
+  'ffn12_fused_pairh32_(lat2|bias_broadcast_lat2)_kernel' \
+  180
+
+./build-min/bench_bf16_ffn12_two_stage_cutile \
+  --variant fused_pairh32_lat2 --warmup 30 --iters 1000
+
+./build-min/bench_bf16_ffn12_two_stage_cutile \
+  --variant fused_pairh32_bias_broadcast_odd5_lat2 --warmup 30 --iters 1000
+
+./bench/audit_cuda_tile_first.sh build-min/bench_bf16_ffn12_two_stage_cutile
+```
+
+Resource:
+
+```text
+fused_pairh32_lat2:
+  REG=255 STACK=8 SHARED=98304B smCTA=1
+
+fused_pairh32_bias_broadcast_lat2:
+  REG=255 STACK=0 SHARED=94208B smCTA=1
+
+fused_pairh32_bias_broadcast_odd5_lat2:
+  REG=254 STACK=0 SHARED=94208B smCTA=1
+```
+
+SASS:
+
+```text
+baseline pairh32:
+  instr=2536 HMMA=256 LDSM=128 LDGSTS=80
+  LDG=128 STS=44 STG=1 FFMA=256 FADD=160 FMUL=160
+  BAR=35 DEPBAR=29 IMAD=194
+
+bias_broadcast poly9:
+  instr=2248 HMMA=256 LDSM=128 LDGSTS=80
+  LDG=50 STS=14 STG=1 FFMA=256 FADD=160 FMUL=160
+  BAR=22 DEPBAR=32 IMAD=151
+
+bias_broadcast odd5:
+  instr=1880 HMMA=256 LDSM=128 LDGSTS=80
+  LDG=50 STS=14 STG=1 FFMA=64 FADD=160 FMUL=160
+  BAR=22 DEPBAR=26 IMAD=173
+```
+
+Timing:
+
+```text
+short run, 300 iters:
+  fused_pairh32_lat2:
+    best=1.7653 ms median=1.7975 ms useful=46.36 TF/s roof70=66.2%
+
+  fused_pairh32_bias_broadcast_lat2:
+    best=1.9393 ms median=1.9612 ms useful=42.20 TF/s roof70=60.3%
+
+  fused_pairh32_bias_broadcast_odd5_lat2:
+    best=1.7628 ms median=1.7781 ms useful=46.43 TF/s roof70=66.3%
+
+long run, 1000 iters:
+  fused_pairh32_lat2:
+    best=1.7769 ms median=1.7949 ms useful=46.06 TF/s roof70=65.8%
+
+  fused_pairh32_bias_broadcast_odd5_lat2:
+    best=1.7606 ms median=1.7791 ms useful=46.48 TF/s roof70=66.4%
+```
+
+Tile-first purity:
+
+```text
+./bench/audit_cuda_tile_first.sh build-min/bench_bf16_ffn12_two_stage_cutile
+PASS: CUDA Tile-first purity gate passed
+```
+
+Interpretation:
+
+- The combined spelling is statically cleaner than plain `bias_broadcast`:
+  `instr 2248 -> 1880`, `FFMA 256 -> 64`, `DEPBAR 32 -> 26`, while preserving
+  the `HMMA=256` Tensor Core body.
+- Runtime only recovers the plain baseline and gives a small best/median win
+  (`~0.9%` best, `~0.9%` median in the 1000-iteration run). It does not approach
+  the earlier source odd5 win enough to justify a new source path.
+- The key bottom cause remains unchanged: `SHARED=94208B` is still one CTA/SM on
+  A10G, so the probe does not break the residency wall.
+- The experiment is useful evidence that scalar-side cleanup alone is no longer
+  the main FFN12 limiter once the obvious odd5/poly7 path is known.
+
+Decision:
+
+- Keep `fused_pairh32_bias_broadcast_odd5_lat2` as a bench-only diagnostic.
+- Do not source-port this combination.
+- Next FFN12 work should target shared residency or a different W2/output
+  staging strategy that keeps `HMMA=256`; otherwise switch to time-attention
+  softmax/scalar work, where the current Tensor Core body is already stronger.
+
+### 2026-06-06 - Dataflow-boundary subtotal report
+
+Goal:
+
+- Quantify the current non-HMMA dataflow boundary group as a group, not as
+  isolated kernel rows.
+- Use this to estimate the upside of layout propagation or producer/consumer
+  fusion before writing another copy-like CUDA Tile kernel.
+
+Official CUDA Tile context:
+
+- Rechecked the CUDA Tile programming model before revisiting vector-width
+  ideas. The existing record still applies: the earlier `uint4` tile-copy idea is
+  not a valid Tile-first path because CUDA Tile tile elements must be scalar
+  element types. The current D256 copy therefore uses 64-bit scalar tile elements
+  rather than ordinary CUDA `uint4`.
+- Reference checked:
+  https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/writing-tile-kernels.html
+
+Change:
+
+- Extended `bench/a10g_cutile_bottleneck_report.py` so printed rows now include
+  a subtotal:
+  - printed row count
+  - summed kernel time
+  - summed known math if present
+  - summed known logical bytes and aggregate GiB/s if present
+
+Command:
+
+```bash
+python3 bench/a10g_cutile_bottleneck_report.py \
+  bench/nsys_ffn_consumer_rms_clean.sqlite \
+  build-min/cudasep_infer \
+  --limit 30 \
+  --filter 'strided_copy_bf16|rotary_time|split_qkv_heads_rotary|apply_gates|rms_norm_d256|residual_add_rms'
+```
+
+Current filtered rows:
+
+```text
+split_qkv_heads_rotary_qkv_bf16_freq60_pad64:
+  48 calls, 36.831 ms, 582.1 GiB/s
+
+residual_add_rms_norm_d256_to_bf16:
+  96 calls, 23.751 ms, 752.2 GiB/s
+
+rotary_time_split_contig_inplace:
+  48 calls, 23.669 ms, 603.9 GiB/s
+
+rms_norm_d256_to_bf16:
+  192 calls, 23.587 ms, 909.0 GiB/s
+
+apply_gates_and_merge_heads_bf16_token_d64:
+  96 calls, 23.568 ms, 611.2 GiB/s
+
+strided_copy_bf16_btf_to_bft_d256<4>:
+  96 calls, 12.037 ms, 593.7 GiB/s
+
+strided_copy_bf16_btf_to_fbt_d256<4>:
+  8 calls, 0.999 ms, 596.0 GiB/s
+```
+
+Subtotal:
+
+```text
+rows=7 total_ms=144.443
+known_logical_bytes=97.186 GiB aggregate=672.8 GiB/s
+```
+
+Interpretation:
+
+- These rows are not missing Tensor Core compute. They are memory/control
+  boundary costs already running around `580-910 GiB/s` logical bandwidth.
+- The subtotal makes the optimization target concrete: deleting one full D256
+  BTF/BFT copy group is worth about `12 ms` in the current profile; deleting the
+  whole listed boundary class is an upper bound of about `144 ms`.
+- The D256 copy vector-width route remains closed for a Tile-first source path.
+  The next real improvement must remove or move the boundary, for example by
+  making a producer write the consumer's layout or by making the consumer accept
+  the producer's current layout.
+
+Decision:
+
+- Keep using the filtered subtotal report before layout-propagation edits.
+- Next layout experiment should target the `12.037 ms` D256 BTF->BFT group or
+  the `36.831 ms` freq QKV split/rotary/pad64 group, because both are pure
+  dataflow boundaries with no HMMA body to protect.
+
+### 2026-06-06 - A10G Tile Hotspot Action Classification
+
+Goal:
+
+- Make the CUDA Tile-first triage report answer three questions per hotspot:
+  current share of A10G BF16 roof, why it is below the target, and which class of
+  experiment can actually address the bottom cause.
+- Avoid repeating closed micro-optimizations when the limiter is shared
+  residency, tiny-shape HMMA density, softmax scalar work, or a removable
+  dataflow boundary.
+
+Change:
+
+- Extended `bench/a10g_cutile_bottleneck_report.py` with `action_hint()`.
+- Each printed row now includes:
+  - `cause:` static bottleneck signals from SASS/resource usage
+  - `action:` the next experiment class that matches the bottom cause
+
+Command:
+
+```bash
+python3 bench/a10g_cutile_bottleneck_report.py \
+  bench/nsys_ffn_consumer_rms_clean.sqlite \
+  build-min/cudasep_infer \
+  --limit 16
+```
+
+Current top classifications:
+
+```text
+ffn12_fused256_split2_pairh32:
+  175.046 ms, 44.9 TF/s, 64.1% roof70
+  cause: 98KB shared residency wall; high reg/stack pressure; scalar/barrier/address work
+  action: tc-shared-residency; redesign W1/GELU/W2 staging while preserving HMMA=256
+
+time_attention1301_main1280_split_contig:
+  161.731 ms, 60.7 TF/s, 86.8% roof70
+  cause: softmax MUFU and scalar work
+  action: attention-softmax; reduce MUFU/scalar or fuse adjacent boundaries without hurting HMMA
+
+qkv_bkn_split_contig_static_full:
+  60.191 ms, 48.9 TF/s, 69.9% roof70
+  cause: 100352B shared, one CTA/SM
+  action: tc-shared-residency; reduce shared footprint without losing HMMA density
+
+freq_attention60_cutile_padded_out60:
+  38.417 ms, 12.0 TF/s, 17.1% roof70
+  cause: low HMMA density and scalar/control overhead
+  action: tiny-attention-density; needs a different fixed-shape mapping or deeper producer fusion
+
+split_qkv_heads_rotary_qkv_bf16_freq60_pad64:
+  36.831 ms, 582.1 GiB/s
+  cause: non-HMMA memory/control boundary
+  action: memory-bound-delete-boundary; write consumer layout or fuse into freq attention
+
+strided_copy_bf16_btf_to_bft_d256<4>:
+  12.037 ms, 593.7 GiB/s
+  cause: pure layout copy
+  action: layout-propagation; delete BTF/BFT materialization, not another copy retune
+```
+
+Subtotal from the same run:
+
+```text
+rows=16 total_ms=772.731
+known_math=36.01 TF/s roof70=51.4%
+known_logical_bytes=96.591 GiB aggregate=125.0 GiB/s
+```
+
+Interpretation:
+
+- The current binary already passes the CUDA Tile-first purity gate, so the next
+  improvements are not about replacing cuBLAS/cuFFT/raw WMMA. They are about
+  A10G-specific CUDA Tile shapes and dataflow.
+- FFN/QKV/large linear work is mostly shared-residency limited. The next useful
+  experiment has to lower shared/reg pressure while keeping the HMMA body dense.
+- Time attention is already the strongest Tensor Core row in this profile; the
+  remaining gap is mostly softmax/MUFU/scalar, so producer fusion must be checked
+  against HMMA regression.
+- Freq attention and freq QKV split are the best candidates for fixed-shape
+  redesign because one is low-HMMA-density and the other is a memory boundary.
+- D256 layout copy is only worth pursuing through layout propagation or
+  producer/consumer fusion. Another standalone copy kernel is not the right
+  response to the measured limiter.
+
+Validation:
+
+```text
+python3 -m py_compile bench/a10g_cutile_bottleneck_report.py: pass
+```
+
+### 2026-06-06 - Negative Source Probe: Freq Split Compile-Time FullBF16
+
+Goal:
+
+- Test whether the `split_qkv_heads_rotary_qkv_bf16_freq60_pad64` dataflow
+  boundary loses measurable time to a runtime `full_bf16` flag.
+- Specialize the freq60 pad64/to_pad64 split+rotary kernels as
+  `<TrigT, FullBF16>` so the compiler can remove the unused BF16 round/select
+  path for each mode.
+- Keep the experiment inside CUDA Tile C++ (`__tile_global__`, compile-time
+  template shape/control, no cuBLAS/cuFFT/raw WMMA).
+- Official CUDA Tile reference checked:
+  https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/writing-tile-kernels.html
+
+Temporary source probe:
+
+```text
+split_qkv_heads_rotary_qkv_bf16_freq60_pad64_kernel<TrigT, FullBF16>
+split_qkv_heads_rotary_qkv_bf16_freq60_to_pad64_kernel<TrigT, FullBF16>
+```
+
+Build and audit:
+
+```bash
+ninja -C build-min cudasep_infer -j8
+./bench/audit_cuda_tile_first.sh build-min/cudasep_infer
+```
+
+Both passed during the temporary probe.
+
+Static result from the temporary binary:
+
+```text
+pad64 <__nv_bfloat16,false>:
+  REG=40 STACK=0 SHARED=0
+  instr=480 HMMA=0 F2FP=5 FFMA=8 FMUL=10 MUFU=4 BAR=3 IMAD=150 STG=1
+
+pad64 <__nv_bfloat16,true>:
+  REG=40 STACK=0 SHARED=0
+  instr=520 HMMA=0 F2FP=15 FFMA=8 FMUL=10 MUFU=4 BAR=3 IMAD=167 STG=1
+
+to_pad64 <__nv_bfloat16,false>:
+  REG=38 STACK=0 SHARED=0
+  instr=488 HMMA=0 F2FP=4 FFMA=8 FMUL=8 MUFU=4 BAR=3 IMAD=178 STG=1
+
+to_pad64 <__nv_bfloat16,true>:
+  REG=38 STACK=0 SHARED=0
+  instr=536 HMMA=0 F2FP=14 FFMA=8 FMUL=8 MUFU=4 BAR=3 IMAD=196 STG=1
+```
+
+Runtime checks during the temporary probe:
+
+```text
+default test_clean.wav:
+  infer time=888.1 ms
+
+CUDASEP_FULL_BF16_ARITH_EXPERIMENTS=1 test_clean.wav:
+  infer time=906.3 ms
+```
+
+Output checks:
+
+```text
+freq_v32_source_baseline_clean -> temporary default output:
+  Vocals rel_rms=5.415338539e-08 snr=145.327 dB
+  Instrumental rel_rms=5.451771041e-08 snr=145.269 dB
+
+temporary default output -> temporary full-BF16 output:
+  Vocals rel_rms=0.008994111572 snr=40.921 dB
+  Instrumental rel_rms=0.007648240729 snr=42.329 dB
+```
+
+Nsight Systems on the temporary default binary:
+
+```bash
+nsys profile --trace=cuda --sample=none --cpuctxsw=none --stats=false \
+  --force-overwrite=true \
+  -o bench/nsys_freq_template_default_clean \
+  ./build-min/cudasep_infer \
+    --model mel-band-roformer-deux/becruily_deux.csm \
+    --input test_clean.wav \
+    --output outputs/nsys_freq_template_default_clean \
+    --bf16 --chunk-batch-size 1 --stem -1
+
+nsys export --type sqlite --force-overwrite=true \
+  -o bench/nsys_freq_template_default_clean.sqlite \
+  bench/nsys_freq_template_default_clean.nsys-rep
+```
+
+Relevant profile row:
+
+```text
+split_qkv_heads_rotary_qkv_bf16_freq60_pad64_kernel<__nv_bfloat16,false>:
+  calls=48 total=36.842 ms avg=767.543 us
+```
+
+Comparison to the prior profile basis:
+
+```text
+prior nsys_ffn_consumer_rms_clean:
+  split_qkv_heads_rotary_qkv_bf16_freq60_pad64: 36.831 ms
+
+temporary compile-time FullBF16 specialization:
+  split_qkv_heads_rotary_qkv_bf16_freq60_pad64<__nv_bfloat16,false>: 36.842 ms
+```
+
+Interpretation:
+
+- Compile-time specialization removes the runtime flag from the signature and
+  gives cleaner static variants, but the measured default kernel time is
+  unchanged within noise: `36.831 ms -> 36.842 ms`.
+- The default output stayed effectively identical to the previous source
+  baseline (`~5.4e-08 rel_rms`).
+- The full-BF16 arithmetic path still has visible experimental drift versus
+  default, but it ran successfully.
+- Bottom cause: this freq split boundary is not dominated by the runtime
+  `full_bf16` select. Its remaining cost is memory/address/control movement, so
+  the next real win still needs boundary deletion, layout change, or deeper
+  producer/consumer fusion.
+
+Decision:
+
+- Revert the source specialization; do not keep the extra template instances and
+  launch branching for a no-speedup result.
+- Close compile-time `FullBF16` specialization for freq60 split/pad64 as a
+  promotion path.
+- Keep the generated Nsight trace as evidence:
+  `bench/nsys_freq_template_default_clean.sqlite`.
+
+### 2026-06-06 - Negative Source Probe: Freq Split Heads8 Pad64 Specialization
+
+Goal:
+
+- Test whether the runtime `heads` argument in
+  `split_qkv_heads_rotary_qkv_bf16_freq60_pad64_kernel` costs measurable time
+  on the fixed target model, where `heads=8` and `dim_head=64`.
+- Keep the probe in CUDA Tile source form and promote only if the repeated
+  inference-loop kernel time improves.
+
+Temporary source probe:
+
+```text
+CUDASEP_ENABLE_FREQ_SPLIT_HEADS8_PAD64=1
+split_qkv_heads_rotary_qkv_bf16_freq60_pad64_h8_kernel<TrigT>
+```
+
+Build and audit during the temporary probe:
+
+```bash
+ninja -C build-min cudasep_infer -j8
+./bench/audit_cuda_tile_first.sh build-min/cudasep_infer
+git diff --check
+```
+
+All passed during the temporary probe.
+
+Static result:
+
+```text
+original pad64<__nv_bfloat16>:
+  REG=40 instr=536 IMAD=154 MUFU=4
+
+heads8 pad64<__nv_bfloat16>:
+  REG=35 instr=264 IMAD=42 MUFU=0
+```
+
+Runtime:
+
+```text
+CUDASEP_ENABLE_FREQ_SPLIT_HEADS8_PAD64=1 test_clean.wav:
+  infer time=932.7 ms
+
+Nsight trace:
+  bench/nsys_freq_heads8_pad64_clean.sqlite
+
+heads8 split kernel:
+  calls=48 total=37.018 ms avg=771.213 us
+
+prior/default split:
+  calls=48 total=36.831-36.842 ms
+```
+
+Output checks:
+
+```text
+freq_fullbf16_template_default_clean -> freq_heads8_pad64_clean:
+  Vocals rel_rms=5.445e-08 snr=145.279 dB
+  Instrumental rel_rms=5.414e-08 snr=145.329 dB
+
+nsys_freq_template_default_clean -> nsys_freq_heads8_pad64_clean:
+  Vocals rel_rms=5.468e-08 snr=145.244 dB
+  Instrumental rel_rms=5.469e-08 snr=145.242 dB
+```
+
+Interpretation:
+
+- Compile-time `heads=8` specialization cuts address/control instructions
+  substantially in SASS, but it does not improve the measured inference-loop
+  kernel. Runtime regresses from about `36.83-36.84 ms` to `37.02 ms`.
+- The final WAV output is effectively equivalent, so correctness is not the
+  limiter.
+- Bottom cause: this boundary is already dominated by global-memory movement
+  and fixed pad64 layout traffic. Reducing scalar address work alone is below
+  the runtime noise floor and may disturb scheduling enough to lose slightly.
+
+Decision:
+
+- Revert the source specialization and do not keep the env gate or extra kernel.
+- Close `heads=8` pad64 specialization as a promotion path.
+- The next useful freq split direction remains boundary deletion: write the
+  consumer layout directly or fuse the producer into freq attention.
+
+### 2026-06-06 - Negative Bench Probe: FFN12 Bias-Broadcast Odd5 Latency Hints
+
+Goal:
+
+- Continue the FFN12 A10G shared-residency investigation without touching the
+  inference source path.
+- The previous `bias_broadcast + odd5` FFN12 spelling was statically cleaner
+  than the source-like pairh32 body, but it still used `94208B` shared memory and
+  remained `1 CTA/SM`.
+- Test whether CUDA Tile load latency hints can recover additional runtime by
+  changing compiler scheduling/barrier shape while preserving the `HMMA=256`
+  Tensor Core body.
+
+Official CUDA Tile reference checked before the edit:
+
+```text
+https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/writing-tile-kernels.html
+https://docs.nvidia.com/cuda/cuda-tile-cpp-api-reference/index.html
+```
+
+Bench-only change:
+
+- Added these `ffn12_fused_pairh32_bias_broadcast_lat2_kernel<..., Odd5=true>`
+  instantiations to `bench/bf16_ffn12_two_stage_cutile.cu`:
+
+```text
+fused_pairh32_bias_broadcast_odd5_lat1
+fused_pairh32_bias_broadcast_odd5_w1lat1_w2lat2
+fused_pairh32_bias_broadcast_odd5_w1lat2_w2lat1
+fused_pairh32_bias_broadcast_odd5_lat3
+```
+
+Build:
+
+```bash
+ninja -C build-min bench_bf16_ffn12_two_stage_cutile -j8
+```
+
+Resource/occupancy:
+
+```bash
+./build-min/bench_bf16_ffn12_two_stage_cutile --describe --variant all |
+  rg 'GPU:|fused_pairh32_(lat2|bias_broadcast_odd5_(lat1|lat2|lat3|w1lat1_w2lat2|w1lat2_w2lat1))'
+```
+
+```text
+fused_pairh32_lat2:
+  REG=255 static_shared=98304B shared_limit=1 active_cta_per_sm=1 local=8B
+
+fused_pairh32_bias_broadcast_odd5_lat2:
+  REG=254 static_shared=94208B shared_limit=1 active_cta_per_sm=1 local=0B
+
+fused_pairh32_bias_broadcast_odd5_lat1:
+  REG=255 static_shared=94208B shared_limit=1 active_cta_per_sm=1 local=24B
+
+fused_pairh32_bias_broadcast_odd5_w1lat1_w2lat2:
+  REG=255 static_shared=94208B shared_limit=1 active_cta_per_sm=1 local=40B
+
+fused_pairh32_bias_broadcast_odd5_w1lat2_w2lat1:
+  REG=254 static_shared=94208B shared_limit=1 active_cta_per_sm=1 local=0B
+
+fused_pairh32_bias_broadcast_odd5_lat3:
+  REG=255 static_shared=94208B shared_limit=1 active_cta_per_sm=1 local=16B
+```
+
+SASS:
+
+```text
+all variants:
+  HMMA=256 LDSM=128 LDGSTS=80 LDG=50 STS=14 STG=1
+
+lat2/2:
+  instr=1880 BAR=22 DEPBAR=26 IMAD=173 STACK=0
+
+lat1/1:
+  instr=1992 BAR=23 DEPBAR=32 IMAD=205 STACK=24
+
+lat1/2:
+  instr=2008 BAR=27 DEPBAR=32 IMAD=208 STACK=40
+
+lat2/1:
+  instr=1912 BAR=20 DEPBAR=26 IMAD=185 STACK=0
+
+lat3/3:
+  instr=1960 BAR=22 DEPBAR=18 IMAD=213 STACK=16
+```
+
+Microbench:
+
+```bash
+for v in fused_pairh32_lat2 \
+         fused_pairh32_bias_broadcast_odd5_lat2 \
+         fused_pairh32_bias_broadcast_odd5_lat1 \
+         fused_pairh32_bias_broadcast_odd5_w1lat1_w2lat2 \
+         fused_pairh32_bias_broadcast_odd5_w1lat2_w2lat1 \
+         fused_pairh32_bias_broadcast_odd5_lat3; do
+  ./build-min/bench_bf16_ffn12_two_stage_cutile \
+    --variant "$v" --warmup 30 --iters 1000
+done
+```
+
+```text
+fused_pairh32_lat2:
+  best=1.7748 ms median=1.7947 ms useful=46.11 TF/s roof70=65.9%
+
+fused_pairh32_bias_broadcast_odd5_lat2:
+  best=1.7656 ms median=1.7788 ms useful=46.35 TF/s roof70=66.2%
+
+fused_pairh32_bias_broadcast_odd5_lat1:
+  best=1.8961 ms median=1.9480 ms useful=43.16 TF/s roof70=61.7%
+
+fused_pairh32_bias_broadcast_odd5_w1lat1_w2lat2:
+  best=2.2520 ms median=2.2848 ms useful=36.34 TF/s roof70=51.9%
+
+fused_pairh32_bias_broadcast_odd5_w1lat2_w2lat1:
+  best=2.1187 ms median=2.1924 ms useful=38.63 TF/s roof70=55.2%
+
+fused_pairh32_bias_broadcast_odd5_lat3:
+  best=2.1588 ms median=2.1798 ms useful=37.91 TF/s roof70=54.2%
+```
+
+Interpretation:
+
+- `lat2/2` remains the best latency-hint point for this CUDA Tile spelling.
+- `lat1` and `lat1/2` introduce stack/local spill and increase static
+  instruction/barrier pressure.
+- `lat2/1` keeps stack at zero, but runtime still drops to `38.63 TF/s`.
+- `lat3/3` lowers `DEPBAR` but increases stack/instruction count and is also
+  much slower.
+- Bottom cause is unchanged: this family still sits at `94208B` shared memory,
+  so A10G residency remains `1 CTA/SM`. Latency-hint retuning does not break the
+  FFN12 wall.
+
+Decision:
+
+- Keep the new variants only as bench diagnostics.
+- Do not source-port or promote any new latency hint.
+- Close `bias_broadcast + odd5` latency-hint retuning as an FFN12 promotion
+  path.
+- The next FFN12 experiment must change the W2/output accumulation structure or
+  split work in a way that reduces shared/register pressure while preserving
+  dense `HMMA=256`; another latency-hint sweep is not the right lever.
+
+### 2026-06-06 - Negative Bench Probe: FFN12 TM16 Bias-Broadcast Odd5
+
+Goal:
+
+- Test whether the cleaner `bias_broadcast + odd5` CUDA Tile spelling can be
+  combined with `TM=16` to reduce shared/register pressure enough to change A10G
+  residency.
+- This directly tests the current FFN12 bottom-cause hypothesis: a smaller row
+  tile is only useful if it crosses a residency threshold without destroying
+  Tensor Core density.
+
+NCU counter status:
+
+```bash
+ncu --set basic --launch-skip 1 --launch-count 1 \
+  --kernel-name ffn12_fused_pairh32_bias_broadcast_lat2_kernel \
+  ./build-min/bench_bf16_ffn12_two_stage_cutile \
+    --variant fused_pairh32_bias_broadcast_odd5_lat2 \
+    --warmup 1 --iters 1
+```
+
+Current machine result:
+
+```text
+ERR_NVGPUCTRPERM - no permission to access NVIDIA GPU Performance Counters
+```
+
+Interpretation:
+
+- Nsight Compute hardware counters are unavailable in the current environment.
+- Until GPU performance-counter permissions are enabled, FFN12 bottom-cause
+  work uses the available evidence chain:
+  CUDA runtime resource/occupancy, SASS/resource summary, Nsight Systems timing,
+  and focused microbench runtime.
+
+Bench-only change:
+
+- Added:
+
+```text
+fused_tm16_pairh32_bias_broadcast_odd5_lat2
+```
+
+- This is the existing
+  `ffn12_fused_pairh32_bias_broadcast_lat2_kernel<TM,TK,THidden,...,Odd5=true>`
+  instantiated as `<16,64,32,2,2,true>`.
+
+Build:
+
+```bash
+ninja -C build-min bench_bf16_ffn12_two_stage_cutile -j8
+```
+
+Resource/occupancy:
+
+```text
+fused_pairh32_lat2:
+  grid=(2439,1,1) REG=255 shared=98304B shared_limit=1 active_cta_per_sm=1
+
+fused_pairh32_bias_broadcast_odd5_lat2:
+  grid=(2439,1,1) REG=254 shared=94208B shared_limit=1 active_cta_per_sm=1
+
+fused_tm16_pairh32_bias_broadcast_odd5_lat2:
+  grid=(4878,1,1) REG=212 shared=85504B shared_limit=1 active_cta_per_sm=1
+```
+
+SASS:
+
+```text
+TM32 bias_broadcast_odd5:
+  instr=1880 HMMA=256 LDSM=128 LDGSTS=80 BAR=22 DEPBAR=26
+
+TM16 bias_broadcast_odd5:
+  instr=1312 HMMA=128 LDSM=96 LDGSTS=72 BAR=24 DEPBAR=23
+```
+
+Microbench:
+
+```text
+fused_pairh32_lat2:
+  best=1.7747 ms median=1.7956 ms useful=46.11 TF/s roof70=65.9%
+
+fused_pairh32_bias_broadcast_odd5_lat2:
+  best=1.7534 ms median=1.7778 ms useful=46.67 TF/s roof70=66.7%
+
+fused_tm16_pairh32_bias_broadcast_odd5_lat2:
+  best=3.0282 ms median=3.0569 ms useful=27.03 TF/s roof70=38.6%
+```
+
+Interpretation:
+
+- `TM=16` lowers shared from `94208B` to `85504B` and registers from `254` to
+  `212`, but it does not cross a useful A10G residency threshold. The kernel
+  remains `1 CTA/SM`.
+- `HMMA` per CTA drops from `256` to `128`, while the grid doubles. The total
+  math work is unchanged, but each CTA has lower Tensor Core density and more
+  scheduling/control overhead.
+- Runtime confirms the structural loss: `46.67 TF/s -> 27.03 TF/s`.
+- Bottom cause update: partial shared reduction is not enough. FFN12 needs a
+  structure that either gets below a real two-resident-CTA threshold or keeps the
+  large `HMMA=256` body while reducing register/shared pressure in another way.
+
+Decision:
+
+- Keep `fused_tm16_pairh32_bias_broadcast_odd5_lat2` as a bench diagnostic only.
+- Do not source-port.
+- Close simple `TM=16 + cleaner scalar spelling` as a promotion path.
+- Next FFN12 attempt should not reduce `TM` unless it can actually make
+  `active_cta_per_sm > 1` or compensate with a different multi-CTA scheduling
+  strategy.
+
+### 2026-06-06 - Negative Bench Probe: FFN12 W2-By-Hidden Reorder
+
+Goal:
+
+- Try a source-level W2 live-range rewrite that does not repeat the already
+  closed `w2pair` and `w2stream` probes.
+- Keep the cleaner `bias_broadcast + odd5` spelling and preserve the two output
+  accumulators, but load W2 tiles per hidden tile:
+
+```text
+hidden0: load W2[hidden0,out0], W2[hidden0,out1], update out_acc0/out_acc1
+hidden1: load W2[hidden1,out0], W2[hidden1,out1], update out_acc0/out_acc1
+```
+
+- Success criteria: keep `HMMA=256`, reduce resource pressure or runtime.
+
+Bench-only change:
+
+```text
+fused_pairh32_bias_broadcast_odd5_w2byhidden_lat2
+ffn12_fused_pairh32_bias_broadcast_w2byhidden_lat2_kernel<32,64,32,2,2,true>
+```
+
+Resource/occupancy:
+
+```text
+fused_pairh32_bias_broadcast_odd5_lat2:
+  REG=254 shared=94208B active_cta_per_sm=1 local=0B
+
+fused_pairh32_bias_broadcast_odd5_w2byhidden_lat2:
+  REG=254 shared=94208B active_cta_per_sm=1 local=0B
+```
+
+SASS:
+
+```text
+both bias_broadcast_odd5_lat2 and w2byhidden:
+  instr=1880 HMMA=256 LDSM=128 LDGSTS=80 LDG=50 STS=14 STG=1
+  F2FP=64 FFMA=64 FADD=160 FMUL=160 BAR=22 DEPBAR=26 IMAD=173
+```
+
+Microbench:
+
+```text
+fused_pairh32_bias_broadcast_odd5_lat2:
+  best=1.7522 ms median=1.7791 ms useful=46.71 TF/s roof70=66.7%
+
+fused_pairh32_bias_broadcast_odd5_w2byhidden_lat2:
+  best=1.7657 ms median=1.7789 ms useful=46.35 TF/s roof70=66.2%
+```
+
+Interpretation:
+
+- The CUDA Tile compiler/codegen canonicalizes this source-level W2 reorder to
+  the same SASS as the original `bias_broadcast_odd5_lat2` spelling.
+- This is useful negative evidence: changing only the lexical W2 load/MMA order
+  is not enough to alter shared/register allocation or scheduler shape.
+- The old `w2pair/w2stream` variants did produce a different SASS shape, but
+  they dropped to `HMMA=128` and were much slower. This new probe preserved
+  `HMMA=256`, but did not create a new machine-code shape.
+
+Decision:
+
+- Keep `w2byhidden` as a bench diagnostic only.
+- Do not source-port.
+- Close source-level W2 load/MMA reorder as a promotion path.
+- The next FFN12 attempt needs a semantic structure change, not just a lexical
+  reordering that the Tile compiler can canonicalize.
+
+### 2026-06-06 - CUDA Tile-First Audit Gate Tightening
+
+Goal:
+
+- Strengthen the project-level guard for the long-term constraint:
+  no cuBLAS, cuFFT, cuDNN, raw WMMA, raw inline MMA, or raw CUDA kernel path.
+- Keep this independent of any single optimization experiment so future CUDA
+  Tile probes cannot accidentally reintroduce a traditional path.
+
+Change:
+
+- Extended `bench/audit_cuda_tile_first.sh` source and binary deny lists to also
+  catch:
+
+```text
+CUDA::cublas / CUDA::cufft / CUDA::cudnn
+cublasLt / cublas_v2 / cufftXt / cudnn_ops
+#include <mma>
+wgmma
+tcgen05
+asm volatile (...)
+```
+
+- Existing checks for `cuBLAS`, `cuFFT`, `cuDNN`, `nvcuda::wmma`, `wmma::`,
+  `mma.sync`, `asm(...)`, and raw `__global__` remain in force.
+
+Validation:
+
+```bash
+./bench/audit_cuda_tile_first.sh build-min/cudasep_infer
+./bench/audit_cuda_tile_first.sh build-min/bench_bf16_ffn12_two_stage_cutile
+git diff --check -- bench/audit_cuda_tile_first.sh
+```
+
+Result:
+
+```text
+build-min/cudasep_infer:
+  PASS, no cuBLAS/cuFFT/cuDNN dependency, symbol, string, or source hit
+
+build-min/bench_bf16_ffn12_two_stage_cutile:
+  PASS, no cuBLAS/cuFFT/cuDNN dependency, symbol, string, or source hit
+```
+
+Decision:
+
+- Keep the stricter audit as the default purity gate for all future source and
+  bench experiments.
+- This does not improve runtime directly, but it makes the CUDA Tile-first
+  requirement mechanically harder to violate as the experiment set grows.
+
+### 2026-06-06 - Negative Bench Probe: Static Padded-M Linear TN128/TN256
+
+Goal:
+
+- Revisit the current `linear_cutile_static_padded_m_bf16_kernel` hotspot with a
+  fixed-shape CUDA Tile bench.
+- Target shape:
+
+```text
+mask_hid_k1024: M=1301 N=1024 K=1024
+source-like current shape: t32x64x64sp
+```
+
+- Test whether larger `TN` can improve Tensor Core density for the repeated
+  small-linear path without source changes.
+
+Official CUDA Tile context:
+
+- These are still `__tile_global__` CUDA Tile kernels using compile-time tile
+  shapes and `ct::mma`.
+- CUDA Tile docs were checked before adding the new instantiations.
+
+Bench-only change:
+
+- Added static padded-M variants to `bench/bf16_cutile_mma_gemm.cu`:
+
+```text
+t32x128x32sp
+t32x128x64sp
+t64x128x32sp
+t32x256x32sp
+```
+
+Build:
+
+```bash
+ninja -C build-min bench_bf16_cutile_mma_gemm -j8
+```
+
+Microbench:
+
+```bash
+for v in t32x64x64sp t32x128x32sp t32x128x64sp \
+         t64x128x32sp t32x256x32sp; do
+  ./build-min/bench_bf16_cutile_mma_gemm \
+    --preset infer_small_linear \
+    --shape mask_hid_k1024 \
+    --variant "$v" \
+    --warmup 20 --iters 500
+done
+```
+
+```text
+t32x64x64sp:
+  tile=32x64x64 grid=(41,16)
+  best=0.083 ms median=0.085 ms useful=33.02 TF/s issued=33.30 TF/s
+
+t32x128x32sp:
+  tile=32x128x32 grid=(41,8)
+  best=0.106 ms median=0.108 ms useful=25.71 TF/s issued=25.93 TF/s
+
+t32x128x64sp:
+  tile=32x128x64 grid=(41,8)
+  best=0.133 ms median=0.135 ms useful=20.50 TF/s issued=20.67 TF/s
+
+t64x128x32sp:
+  tile=64x128x32 grid=(21,8)
+  best=0.136 ms median=0.137 ms useful=20.03 TF/s issued=20.69 TF/s
+
+t32x256x32sp:
+  tile=32x256x32 grid=(41,4)
+  best=0.170 ms median=0.172 ms useful=16.01 TF/s issued=16.14 TF/s
+```
+
+SASS/resource:
+
+```text
+t32x64x64sp:
+  REG=114 SHARED=24576B instr=440 HMMA=32 BAR=5
+
+t32x128x32sp:
+  REG=152 SHARED=36864B instr=1032 HMMA=64 BAR=8
+
+t32x128x64sp:
+  REG=236 SHARED=57344B instr=1384 HMMA=128 BAR=8
+
+t64x128x32sp:
+  REG=150 SHARED=65536B instr=1784 HMMA=128 BAR=8
+
+t32x256x32sp:
+  REG=160 SHARED=53248B instr=1336 HMMA=64 BAR=5
+```
+
+Interpretation:
+
+- Larger `TN` increases per-CTA HMMA count, but it also increases shared memory,
+  register pressure, static instruction count, and address/control work enough
+  to lose badly on A10G.
+- The current source-like `32x64x64` shape remains best for this fixed
+  `M=1301,N=1024,K=1024` padded-M path.
+- Bottom cause: this is not solved by making `TN` larger. The small-M padded
+  shape needs either a different decomposition that improves issued work per
+  byte/control instruction, or dataflow deletion/fusion that removes repeated
+  small-linear launches.
+
+Decision:
+
+- Keep the new `TN=128/256` variants as bench diagnostics only.
+- Do not source-port.
+- Close static padded-M larger-`TN` retuning for `mask_hid_k1024`.
+
+### 2026-06-06 - Promoted: Mask estimator hidden linear + tanh epilogue fusion
+
+Goal:
+
+- Delete the mask-estimator hidden `linear -> tanh_act` BF16 global-memory
+  boundary while staying CUDA Tile-first.
+- Cover only the fixed current model shapes:
+  `M=1301,N=1024,K=256` and `M=1301,N=1024,K=1024`.
+- Preserve the original BF16 memory boundary numerics by rounding the linear
+  epilogue to BF16 before applying `tanh`.
+
+Implementation:
+
+```text
+linear_cutile_static_padded_m_bf16_kernel<..., ApplyTanh=true>
+try_linear_tanh_bf16_output(...)
+CUDASEP_DISABLE_LINEAR_TANH_FUSED=1  # opt-out A/B
+```
+
+The promoted path uses CUDA Tile `ct::mma` in the existing padded-M fixed-shape
+GEMM and adds a compile-time `tanh` epilogue. It does not add cuBLAS/cuFFT/cuDNN,
+raw WMMA, inline asm, or a non-Tile CUDA kernel.
+
+Validation:
+
+```text
+ninja -C build-min cudasep_infer -j8: pass
+./bench/audit_cuda_tile_first.sh build-min/cudasep_infer: pass
+git diff --check -- src/mbr_cuda_tile.cu src/mbr_cuda_tile.h src/model_mel_band_roformer.cu: pass
+
+default promoted test_clean.wav:
+  inference: 884.5 ms
+
+default promoted test.wav:
+  inference: 5157.6 ms
+
+default promoted Nsight test_clean.wav:
+  inference: 895.5 ms
+  kernel launches: 5450
+  tanh_bf16_to_bf16_kernel: 0 calls
+
+src line count after promotion:
+  17421 total
+```
+
+Plain same-binary A/B before promotion:
+
+```text
+default clean: 889.3 ms
+opt-in clean: 883.7 ms
+```
+
+Nsight Systems same-binary A/B on `test_clean.wav`:
+
+```text
+default nsys infer: 903.6 ms
+opt-in  nsys infer: 895.7 ms
+
+kernel launches:
+  default: 6410
+  fused:   5450
+
+tanh_bf16_to_bf16_kernel:
+  default: 960 calls, 6.295 ms
+  fused:   0 calls
+
+linear_cutile_static_padded_m K=1024:
+  default: 480 calls, 41.693 ms
+  fused:   480 calls, 41.785 ms
+
+linear_cutile_static_padded_m K=256:
+  default: 480 calls, 13.658 ms
+  fused:   480 calls, 14.214 ms
+```
+
+Target segment:
+
+```text
+removed tanh kernels:       -6.295 ms
+extra fused GEMM epilogue:  +0.648 ms
+segment net:                -5.647 ms
+```
+
+Output difference, opt-in versus default on `test_clean.wav`:
+
+```text
+Vocals.wav:       max_abs=0.000000179 rms=0.000000010 rel_rms=0.000000054
+Instrumental.wav: max_abs=0.000000238 rms=0.000000013 rel_rms=0.000000054
+```
+
+SASS/resource evidence:
+
+```text
+default K=1024:
+  REG=116 SHARED=32768 HMMA=32 MUFU=0  instr=528/568
+
+fused K=1024:
+  REG=116 SHARED=32768 HMMA=32 MUFU=32 instr=888/960
+
+default K=256:
+  REG=116 SHARED=32768 HMMA=32 MUFU=0  instr=536/568
+
+fused K=256:
+  REG=116 SHARED=32768 HMMA=32 MUFU=32 instr=888/960
+```
+
+Interpretation:
+
+- This is a boundary-deletion win, not a Tensor Core throughput win.
+- The fused producer keeps the same register count, shared memory, and HMMA
+  count, so it does not hit a new A10G occupancy/shared-memory cliff.
+- The cost is explicit: `tanh` adds `MUFU=32` and raises static instruction
+  count substantially. That extra scalar epilogue makes the two GEMMs about
+  `0.648 ms` slower in aggregate.
+- The win comes because the deleted standalone `tanh_bf16_to_bf16_kernel`
+  removed `960` launches and `6.295 ms` of BF16 global read/write traffic.
+- The resulting fixed-shape padded-M kernels are still far from 70 TFLOP/s
+  because `M=1301,N=1024,K=256/1024` with `32x64x64` has low HMMA density and
+  now has extra MUFU/scalar epilogue work. The right next step is not more
+  tanh micro-optimization; it is either a different fixed-shape decomposition or
+  another producer/consumer boundary deletion.
+
+Decision:
+
+- Promote fused `linear+tanh` to default for BF16 mask-estimator hidden layers.
+- Keep `CUDASEP_DISABLE_LINEAR_TANH_FUSED=1` as the A/B escape hatch.
+- Close standalone `tanh_bf16_to_bf16_kernel` tuning for this path; its work is
+  now deleted from the promoted model path.
+
+### 2026-06-06 - Negative Source Probe: GLU row-D1024 standalone kernel
+
+Goal:
+
+- Test whether the remaining mask-estimator `glu_last_dim_bf16_to_bf16_kernel`
+  can be sped up without repeating the already-negative final `linear+GLU`
+  producer fusion.
+- The idea was a row-wise CUDA Tile kernel with one CTA per output row and a
+  `D=1024` tile, avoiding the flat kernel's per-element
+  `idx / half_dim` and `idx % half_dim` decomposition.
+
+Temporary source gate:
+
+```text
+CUDASEP_ENABLE_GLU_ROW_D1024=1
+```
+
+The probe was removed from source after the negative result.
+
+Build and checks:
+
+```text
+ninja -C build-min cudasep_infer -j8: pass
+./bench/audit_cuda_tile_first.sh build-min/cudasep_infer: pass
+git diff --check -- src/mbr_cuda_tile.cu: pass
+```
+
+SASS/resource:
+
+```text
+flat glu_last_dim_bf16_to_bf16_kernel:
+  REG=26 instr=512 MUFU=11 FFMA=28 FMUL=4 IMAD=155 IADD3=44
+
+row_d1024:
+  REG=40 instr=528 MUFU=18 FFMA=82 FMUL=16 IMAD=62 IADD3=18
+```
+
+Nsight Systems on `test_clean.wav`:
+
+```text
+promoted default nsys:
+  inference: 895.5 ms
+  glu_last_dim_bf16_to_bf16_kernel:
+    480 calls, 1.504 ms, 3.133 us/call
+
+CUDASEP_ENABLE_GLU_ROW_D1024=1:
+  inference: 895.8 ms
+  glu_last_dim_bf16_to_bf16_row_d1024_kernel:
+    480 calls, 2.958 ms, 6.162 us/call
+```
+
+Interpretation:
+
+- The row-wise spelling does remove much of the integer index decomposition:
+  `IMAD 155 -> 62`.
+- It loses overall because `D=1024` is far wider than many mask-band GLU
+  half-dimensions, so many lanes are masked off. The wider tile also raises
+  register pressure (`26 -> 40`) and scalar/transcendental work
+  (`MUFU 11 -> 18`, `FFMA 28 -> 82`).
+- This is a useful bottom-cause result: the standalone GLU cost is not mainly
+  the flat kernel's divide/modulo address math. It is tiny per-call work plus
+  sigmoid/global-memory boundary overhead, and a generic row-wide kernel wastes
+  too much work on the variable band shapes.
+
+Decision:
+
+- Do not promote or keep the row-D1024 source probe.
+- Keep the source path on the existing flat CUDA Tile GLU kernel.
+- Future GLU work should be either shape-specific small kernels for the few
+  dominant half-dimensions or a consumer-side fusion that avoids changing the
+  Tensor Core producer resource shape; do not use a generic `D=1024` row tile.
+
+### 2026-06-06 - Negative Source Probe: STFT FFT len2 const twiddle
+
+Goal:
+
+- Test a narrow CUDA Tile FFT specialization suggested by the current STFT
+  bottom cause: the default no-cuFFT 2048 FFT still spends `~9.6 ms` in global
+  scratch FFT stages on `test_clean.wav`.
+- Replace only the first radix-4-style two-stage FFT pass (`len=2`) with a
+  fixed-shape CUDA Tile kernel whose `0` and `pi/2` twiddles are expressed as
+  constants instead of dynamic `ct::sin`/`ct::cos`.
+- Keep the probe source-gated and remove it unless the full inference profile
+  improves.
+
+Official CUDA Tile context:
+
+- Rechecked CUDA Tile programming guidance before the source probe:
+  https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/writing-tile-kernels.html
+- The temporary kernel used `__tile_global__`, `ct::iota`, `ct::load_masked`,
+  `ct::select`, and tile elementwise arithmetic. It did not add cuFFT, cuBLAS,
+  raw WMMA, inline MMA, or raw CUDA kernels.
+
+Temporary source gate:
+
+```text
+CUDASEP_ENABLE_STFT_FFT_LEN2_CONST=1
+```
+
+Static result:
+
+```text
+fft2048_two_stage_kernel:
+  REG=62 STACK=32 SHARED=0
+  instr=1344 MUFU=6 FFMA=110 FMUL=36 IMAD=190
+
+fft2048_two_stage_len2_const_kernel<false/true>:
+  REG=38 STACK=0 SHARED=0
+  instr=136 MUFU=0 FFMA=2 FMUL=0 IMAD=15
+```
+
+Correctness note:
+
+- The first exact-zero version used mathematical `cos(pi/2)=0` and produced
+  visible final WAV drift versus default:
+
+```text
+Vocals.wav:       rel_rms=0.00346725773, snr=49.200 dB
+Instrumental.wav: rel_rms=0.00331351755, snr=49.594 dB
+```
+
+- The corrected version used the float fast-math-compatible half-pi cosine
+  constant and returned to run-noise equivalence:
+
+```text
+Vocals.wav:       max_abs=1.78813934e-07 rel_rms=5.38813877e-08 snr=145.371 dB
+Instrumental.wav: max_abs=2.38418579e-07 rel_rms=5.43643879e-08 snr=145.294 dB
+```
+
+Timing:
+
+```text
+single CLI timing:
+  default:   884.7 ms
+  opt-in:    883.7 ms
+```
+
+Nsight Systems FFT group:
+
+```text
+default:
+  fft2048_two_stage_kernel: 40 calls, 7.965 ms
+  fft2048_stage_kernel:      8 calls, 1.607 ms
+
+CUDASEP_ENABLE_STFT_FFT_LEN2_CONST=1:
+  fft2048_two_stage_kernel:                    32 calls, 6.367 ms
+  fft2048_two_stage_len2_const_kernel<false>:   4 calls, 0.534 ms
+  fft2048_two_stage_len2_const_kernel<true>:    4 calls, 1.059 ms
+  fft2048_stage_kernel:                         8 calls, 1.600 ms
+```
+
+Interpretation:
+
+- Static codegen improved dramatically, and the corrected constants preserved
+  final output.
+- Runtime did not improve: the removed default two-stage work was about
+  `7.965 - 6.367 = 1.598 ms`, while the new len2 const kernels cost
+  `0.534 + 1.059 = 1.593 ms`.
+- Bottom cause: the first FFT two-stage pass is already dominated by fixed
+  global scratch load/store traffic and launch overhead for the current A10G
+  shape. Removing dynamic twiddle MUFU from this pass does not move the
+  end-to-end profile.
+
+Decision:
+
+- Remove the source probe and do not keep `CUDASEP_ENABLE_STFT_FFT_LEN2_CONST`.
+- Close first-pass constant twiddle specialization as a promotion path.
+- Future FFT work should target a real reduction in global scratch traffic, such
+  as a different balanced in-tile/shared-memory FFT staging strategy, not only
+  replacing twiddle MUFU in the existing ping-pong schedule.
+
+### 2026-06-06 - iSTFT window-sum cache promotion
+
+Goal:
+
+- Delete repeated iSTFT normalization denominator work across chunks.
+- `window_sum_kernel` depends only on the Hann window pointer, `n_fft`,
+  `hop_length`, frame count `T`, and `signal_length`. For the fixed
+  MelBandRoformer chunk path these are stable across chunks, but the previous
+  code recomputed the same GPU vector for every iSTFT call.
+- Keep the existing CUDA Tile `window_sum_kernel` for cache misses; this change
+  removes redundant launches/work rather than replacing the kernel with a
+  non-Tile path.
+
+Change:
+
+- `stft_tile::istft()` now caches the last computed `window_sum` GPU tensor.
+- Cache key:
+
+```text
+window data pointer, n_fft, hop_length, T, signal_length
+```
+
+- A/B rollback:
+
+```text
+CUDASEP_DISABLE_ISTFT_WINDOW_SUM_CACHE=1
+```
+
+Correctness:
+
+```text
+cache default vs CUDASEP_DISABLE_ISTFT_WINDOW_SUM_CACHE=1:
+  Vocals.wav:       max_abs=1.78813934e-07 rel_rms=5.41957063e-08 snr=145.321 dB
+  Instrumental.wav: max_abs=2.38418579e-07 rel_rms=5.41059116e-08 snr=145.335 dB
+
+test.wav:
+  Vocals.wav:       max_abs=1.78813934e-07 rel_rms=5.44033455e-08 snr=145.287 dB
+  Instrumental.wav: max_abs=2.38418579e-07 rel_rms=5.43546501e-08 snr=145.295 dB
+```
+
+Sequential CLI timing on `test_clean.wav`:
+
+```text
+cache default: 882.1 ms
+cache disabled: 884.7 ms
+```
+
+Sequential CLI timing on `test.wav`:
+
+```text
+cache default: 5142.9 ms
+cache disabled: 5170.8 ms
+```
+
+Nsight Systems on `test_clean.wav`:
+
+```text
+before/cache disabled basis:
+  window_sum_kernel: 4 calls, 2.967 ms, 741.730 us/call
+
+cache default:
+  window_sum_kernel: 1 call, 0.744 ms, 743.515 us/call
+
+delta:
+  calls:    -3
+  time:     -2.223 ms
+```
+
+Interpretation:
+
+- This is a pure repeated-work deletion. It is not a BF16 Tensor Core throughput
+  row and should not be measured against the 70 TFLOP/s dense GEMM reference.
+- The per-call cost is unchanged (`~742 us`), which proves the kernel itself was
+  not optimized. The win comes from avoiding three redundant calls in the
+  four-chunk `test_clean.wav` path.
+- The same idea should scale with chunk count: `test.wav` has 24 chunks, so a
+  cache hit after the first iSTFT should remove most of the repeated
+  `window_sum_kernel` calls there as well.
+
+Decision:
+
+- Promote the iSTFT window-sum cache as default.
+- Keep `CUDASEP_DISABLE_ISTFT_WINDOW_SUM_CACHE=1` as a rollback/A-B gate.
+- Next iSTFT work should look at avoiding or restructuring the remaining
+  `istft2048_prepare_bitrev_kernel` and global scratch FFT passes; the
+  window-sum repeated-work path is now mostly deleted.
+
+### 2026-06-06 - STFT/iSTFT fused first FFT stage promotion
+
+Goal:
+
+- Promote the source-gated CUDA Tile first-stage fusion for the fixed 2048 FFT
+  path.
+- Fuse:
+  - STFT `window + bit_reverse` producer with the first two FFT stages
+    (`len=2` and `len=4`), writing the post-`len=4` scratch directly.
+  - iSTFT `prepare + bit_reverse` producer with the first two inverse FFT
+    stages, also writing the post-`len=4` scratch directly.
+- Delete one global scratch write/read boundary and 8 `fft2048_two_stage_kernel`
+  launches on the 4-chunk `test_clean.wav` path.
+
+Source change:
+
+- `stft2048_window_bitrev_two_stage_kernel` is now the default STFT producer
+  for the normal two-stage FFT path.
+- `istft2048_prepare_bitrev_two_stage_kernel` is now the default iSTFT producer
+  for the normal two-stage inverse FFT path.
+- Removed the `CUDASEP_ENABLE_STFT_FFT_FUSED_FIRST_STAGE` experiment gate.
+- Rewrote the temporary template/lambda tile helper into two explicit
+  fixed-shape `__tile__` helpers to avoid CUDA Tile compiler linkage warnings.
+- Follow-up cleanup removed the old unfused producer kernels after closing the
+  separate `CUDASEP_ENABLE_STFT_FFT_THREE_STAGE` negative experiment.
+
+Correctness:
+
+```text
+clean baseline cache -> promoted:
+  Vocals.wav:       max_abs=1.78813934e-07 rel_rms=5.47567508e-08 snr=145.231 dB
+  Instrumental.wav: max_abs=2.98023224e-07 rel_rms=5.47424255e-08 snr=145.234 dB
+
+test baseline cache -> promoted:
+  Vocals.wav:       max_abs=2.38418579e-07 rel_rms=5.41813748e-08 snr=145.323 dB
+  Instrumental.wav: max_abs=2.38418579e-07 rel_rms=5.43208552e-08 snr=145.301 dB
+```
+
+Sequential CLI timing:
+
+```text
+test_clean.wav promoted default: 878.2 ms
+test.wav promoted default:       5126.5 ms
+```
+
+Nsight Systems on `test_clean.wav`:
+
+```text
+previous promoted cache baseline:
+  fft2048_two_stage_kernel:        40 calls, 7.960 ms
+  istft2048_prepare_bitrev_kernel:  4 calls, 3.274 ms
+  stft2048_window_bitrev_kernel:    4 calls, 1.338 ms
+
+promoted fused first stage:
+  fft2048_two_stage_kernel:                    32 calls, 6.367 ms
+  istft2048_prepare_bitrev_two_stage_kernel:    4 calls, 2.041 ms
+  stft2048_window_bitrev_two_stage_kernel:      4 calls, 1.004 ms
+
+targeted group delta:
+  calls: -8 two_stage launches, -8 old producer launches, +8 fused producer launches
+  time:  12.572 ms -> 9.412 ms, delta -3.160 ms
+```
+
+Static resource/SASS summary:
+
+```text
+fft2048_two_stage_kernel:
+  REG=62 STACK=32 HMMA=0 LDSM=0 instr=1344 MUFU=6
+
+stft2048_window_bitrev_two_stage_kernel:
+  REG=54 STACK=0 HMMA=0 LDSM=0 instr=608 MUFU=1
+
+istft2048_prepare_bitrev_two_stage_kernel:
+  REG=60 STACK=0 HMMA=0 LDSM=0 instr=600 MUFU=1
+```
+
+Interpretation:
+
+- This is a global-memory and launch deletion win, not a Tensor Core throughput
+  win. The fused kernels have `HMMA=0`, and the remaining FFT stages are still
+  scalar FP32 tile kernels with global scratch between stages.
+- The previous first-stage structure wrote bit-reversed values to `scratch_a`,
+  immediately read them in `fft2048_two_stage_kernel(len=2)`, then wrote
+  `scratch_b`. The promoted kernels compute the needed post-bitrev values on
+  demand and write the post-`len=4` result directly to `scratch_b`.
+- The bottom cause of the remaining STFT/iSTFT time is still the multi-pass
+  global-scratch FFT structure. This row should not be evaluated as a fraction
+  of the A10G 70 TFLOP/s dense BF16 GEMM reference.
+
+Decision:
+
+- Promote fused first stage as default for the normal STFT/iSTFT path.
+- Close the `CUDASEP_ENABLE_STFT_FFT_FUSED_FIRST_STAGE` gate.
+- Next FFT-side experiment should target a deeper scratch-pass deletion, for
+  example fusing the next FFT pair only if register pressure and instruction
+  count do not erase the saved memory traffic.
+
+### 2026-06-06 - STFT three-stage negative gate cleanup
+
+Goal:
+
+- Remove the stale `CUDASEP_ENABLE_STFT_FFT_THREE_STAGE` runtime experiment
+  after the fused first-stage path was promoted.
+- Delete the old unfused STFT/iSTFT bitrev producer kernels that were only kept
+  for that negative three-stage experiment.
+- Reduce source/binary surface area while keeping the fixed 2048 CUDA Tile FFT
+  path runnable.
+
+Basis:
+
+- Existing documented result: radix-8-style three-stage fusion was negative on
+  the current A10G shape.
+- Historical cause:
+
+```text
+fft2048_three_stage_kernel:
+  REG=114 STACK=32
+  launch count lower, but per-kernel work too heavy
+```
+
+Change:
+
+- Removed from [src/stft_cuda_tile.cu](../src/stft_cuda_tile.cu):
+  - `fft_three_stage_enabled()`
+  - `fft2048_three_stage_kernel`
+  - `fft2048_stage_value`
+  - `fft2048_two_stage_value`
+  - `stft2048_window_bitrev_kernel`
+  - `istft2048_prepare_bitrev_kernel`
+- STFT/iSTFT scheduling is now a single default path:
+
+```text
+fused window/prepare + bitrev + len=2/4 stage
+remaining fft2048_two_stage_kernel loop from len=8
+final fft2048_stage_kernel len=2048
+```
+
+Line count:
+
+```text
+after fused first-stage promotion: 17685 total
+after three-stage cleanup:        17501 total
+net:                              -184 lines
+```
+
+Verification:
+
+```text
+ninja -C build-min cudasep_infer -j8: pass
+./bench/audit_cuda_tile_first.sh build-min/cudasep_infer: pass
+strings build-min/cudasep_infer | rg 'CUDASEP_ENABLE_STFT_FFT_THREE_STAGE|fft2048_three_stage_kernel|stft2048_window_bitrev_kernel|istft2048_prepare_bitrev_kernel': no hits
+git diff --check: pass
+```
+
+Sequential CLI timing:
+
+```text
+test_clean.wav: 878.3 ms
+test.wav:       5144.5 ms
+```
+
+Correctness versus promoted fused-first-stage outputs:
+
+```text
+test_clean.wav:
+  Vocals.wav:       max_abs=1.78813934e-07 rel_rms=5.38294327e-08 snr=145.380 dB
+  Instrumental.wav: max_abs=2.98023224e-07 rel_rms=5.41772512e-08 snr=145.324 dB
+
+test.wav:
+  Vocals.wav:       max_abs=1.78813934e-07 rel_rms=5.42026525e-08 snr=145.320 dB
+  Instrumental.wav: max_abs=2.38418579e-07 rel_rms=5.44343004e-08 snr=145.283 dB
+```
+
+Decision:
+
+- Close and delete the three-stage FFT experiment path.
+- Do not keep a runtime fallback for a documented negative result.
+- Future FFT work should start from the now-single fixed path and only add a
+  new source gate when the experiment directly targets a measurable remaining
+  scratch-pass or scalar-FFT bottleneck.
+
+### 2026-06-06 - Time-QKV debug/profile cleanup
+
+Goal:
+
+- Remove debug/profile code that no longer belongs in the fixed CLI inference
+  path.
+- Keep the time-QKV producer path focused on the promoted CUDA Tile kernels
+  instead of carrying old comparison/profiling wrappers.
+
+Removed from [src/model_mel_band_roformer.cu](../src/model_mel_band_roformer.cu):
+
+- `CUDASEP_DEBUG_COMPARE_TIME_QKV_FUSED_ROTARY`
+- `CUDASEP_DEBUG_COMPARE_TIME_QKV_FUSED_ROTARY_LIMIT`
+- `CUDASEP_PROFILE_TIME_QKV_PRODUCER`
+- tensor diff helper code used only by that debug compare path
+- `cudaEvent` timing wrapper used only by that profile path
+
+Line count:
+
+```text
+after STFT three-stage cleanup: 17501 total
+after time-QKV debug cleanup:   17272 total
+net:                            -229 lines
+```
+
+Verification:
+
+```text
+ninja -C build-min cudasep_infer -j8: pass
+./bench/audit_cuda_tile_first.sh build-min/cudasep_infer: pass
+strings build-min/cudasep_infer | rg 'CUDASEP_DEBUG_COMPARE_TIME_QKV_FUSED_ROTARY|CUDASEP_PROFILE_TIME_QKV_PRODUCER|debug time-qkv|profile time-qkv': no hits
+git diff --check: pass
+```
+
+Sequential CLI timing:
+
+```text
+test_clean.wav: 878.9 ms
+test.wav:       5129.0 ms
+```
+
+Correctness versus the previous STFT cleanup outputs:
+
+```text
+test_clean.wav:
+  Vocals.wav:       max_abs=1.78813934e-07 rel_rms=5.40580384e-08 snr=145.343 dB
+  Instrumental.wav: max_abs=2.98023224e-07 rel_rms=5.42613308e-08 snr=145.310 dB
+
+test.wav:
+  Vocals.wav:       max_abs=2.98023224e-07 rel_rms=5.43381547e-08 snr=145.298 dB
+  Instrumental.wav: max_abs=2.38418579e-07 rel_rms=5.43288547e-08 snr=145.299 dB
+```
+
+Decision:
+
+- Delete the debug/profile wrappers rather than keeping disabled runtime gates.
+- Future producer comparisons should be done with external Nsight/profile
+  traces and documented source-gated experiments, not permanent model-forward
+  debug code.
+
+### 2026-06-06 - FFN12 dispatch gate cleanup
+
+Goal:
+
+- Fix the FFN12 main dispatch to the currently promoted A10G shape instead of
+  carrying runtime switches for already-closed variants.
+- Reduce binary/source variant noise before the next real FFN12 W2/output
+  accumulation redesign.
+
+Removed from [src/mbr_ffn12_cutile.cu](../src/mbr_ffn12_cutile.cu):
+
+- `CUDASEP_DISABLE_FFN12_OUT_NO_ROUND`
+- `CUDASEP_DISABLE_FFN12_PAIRH32_LAT2`
+- `CUDASEP_ENABLE_FFN12_PAIRH32_WEIGHT_LAT2`
+- `CUDASEP_ENABLE_FFN12_ROUND_OUTPUT_BIAS_BF16`
+- local `env_flag_enabled()` used only by those switches
+- nested launch branches for the removed FFN12 pairh32 variants
+
+Default hot launch remains:
+
+```text
+ffn12_fused256_split2_pairh32_cutile_kernel<
+  GeluMode=6,
+  FullBF16=false,
+  InputTileK=64,
+  AddResidual=false,
+  RoundOutputAcc=false,
+  MemoryLatency=2,
+  ALoadLatencyHint=true,
+  W1WeightLatencyHint=true,
+  StoreLatencyHint=true,
+  RoundOutputBiasBF16=false>
+```
+
+Static resource/SASS check:
+
+```text
+hot FFN12 instance:
+  REG=255 STACK=8 SHARED=98304B
+  HMMA=256 LDSM=128 LDGSTS=80
+  instr=2536 BAR=35
+```
+
+Interpretation:
+
+- This cleanup intentionally does not claim to fix the FFN12 bottom cause.
+- The bottom cause remains the same: `98KB` shared memory gives one CTA/SM, with
+  very high register pressure and a barrier-heavy staged HMMA body.
+- The next meaningful FFN12 experiment still needs to change W2/output
+  accumulation or staging while preserving the `HMMA=256` body.
+
+Line count:
+
+```text
+after time-QKV debug cleanup: 17272 total
+after FFN12 dispatch cleanup: 17111 total
+net:                           -161 lines
+```
+
+Verification:
+
+```text
+ninja -C build-min cudasep_infer -j8: pass
+./bench/audit_cuda_tile_first.sh build-min/cudasep_infer: pass
+src/binary FFN12 removed gate strings: no hits
+git diff --check: pass
+```
+
+Sequential CLI timing:
+
+```text
+test_clean.wav: 874.6 ms
+test.wav:       5125.8 ms
+```
+
+Correctness versus the previous time-QKV cleanup outputs:
+
+```text
+test_clean.wav:
+  Vocals.wav:       max_abs=1.78813934e-07 rel_rms=5.41107954e-08 snr=145.334 dB
+  Instrumental.wav: max_abs=2.98023224e-07 rel_rms=5.43434540e-08 snr=145.297 dB
+
+test.wav:
+  Vocals.wav:       max_abs=2.38418579e-07 rel_rms=5.42852274e-08 snr=145.306 dB
+  Instrumental.wav: max_abs=2.38418579e-07 rel_rms=5.43365700e-08 snr=145.298 dB
+```
+
+Decision:
+
+- Promote this as dispatch cleanup only.
+- Do not treat the small single-run timing movement as a kernel-speed win.
+- Next FFN12 work should be a source-gated structural experiment that changes
+  W2/output accumulation pressure, not another latency hint or GELU spelling.
+
+### 2026-06-06 - FFN12 GELU mode cleanup
+
+Goal:
+
+- Remove FFN12-specific runtime GELU mode switches after settling the fixed
+  MelBandRoformer path on poly9 GELU.
+- Stop compiling many FFN12 pairh32 template instances that were kept only for
+  old GELU experiments.
+
+Removed from [src/mbr_cuda_tile.cu](../src/mbr_cuda_tile.cu) and
+[src/mbr_ffn12_cutile.cu](../src/mbr_ffn12_cutile.cu):
+
+- `CUDASEP_ENABLE_FFN12_FUSED_HARD_GELU`
+- `CUDASEP_ENABLE_FFN12_FUSED_QUICK_GELU`
+- `CUDASEP_ENABLE_FFN12_FUSED_TANH_GELU`
+- `CUDASEP_ENABLE_FFN12_FUSED_POLY5_GELU`
+- `CUDASEP_ENABLE_FFN12_FUSED_POLY7_GELU`
+- `CUDASEP_ENABLE_FFN12_FUSED_ODD5_GELU`
+- `CUDASEP_ENABLE_FFN12_FUSED_TINYBLEND_GELU`
+- `CUDASEP_ENABLE_FFN12_FUSED_POLY9_GELU`
+- `CUDASEP_DISABLE_FFN12_FUSED_POLY9_GELU`
+- public FFN12 launch `gelu_mode` parameter
+- runtime `switch(gelu_mode)` in the FFN12 launcher
+
+The regular non-FFN `linear_*_gelu` experiment gates are unchanged.
+
+Binary/SASS impact:
+
+```text
+ffn12_fused256_split2_pairh32_cutile_kernel instances after cleanup:
+  only GeluMode=6 poly9 instances remain
+  pairh32 resource rows: 5
+
+hot FFN12 instance:
+  REG=255 STACK=8 SHARED=98304B
+  HMMA=256 LDSM=128 LDGSTS=80
+  instr=2536 BAR=35
+```
+
+Interpretation:
+
+- This is compile/runtime-path cleanup, not a new FFN12 speed claim.
+- The hot kernel body is intentionally unchanged, so the known bottom cause
+  remains: `98KB` shared memory, one CTA/SM, high register pressure, and a
+  barrier-heavy HMMA staging body.
+- Removing old GELU template instances makes future FFN12 structural
+  experiments easier to read in cuobjdump and Nsight.
+
+Line count:
+
+```text
+after FFN12 dispatch cleanup: 17111 total
+after FFN12 GELU cleanup:     16974 total
+net:                          -137 lines
+```
+
+Verification:
+
+```text
+ninja -C build-min cudasep_infer -j8: pass
+./bench/audit_cuda_tile_first.sh build-min/cudasep_infer: pass
+src/binary FFN12 GELU gate strings: no hits
+git diff --check: pass
+```
+
+Sequential CLI timing:
+
+```text
+test_clean.wav: 872.8 ms
+test.wav:       5132.6 ms
+```
+
+Correctness versus FFN12 dispatch cleanup outputs:
+
+```text
+test_clean.wav:
+  Vocals.wav:       max_abs=2.38418579e-07 rel_rms=5.41557194e-08 snr=145.327 dB
+  Instrumental.wav: max_abs=1.78813934e-07 rel_rms=5.43152460e-08 snr=145.302 dB
+
+test.wav:
+  Vocals.wav:       max_abs=2.38418579e-07 rel_rms=5.42831128e-08 snr=145.307 dB
+  Instrumental.wav: max_abs=2.38418579e-07 rel_rms=5.43643039e-08 snr=145.294 dB
+```
+
+Decision:
+
+- Fix FFN12 fused path to poly9 GELU.
+- Do not keep old FFN12 GELU runtime gates in the main inference binary.
+- Next FFN12 work should now move to a genuine structural W2/output
+  accumulation experiment.
+
+### 2026-06-06 - FFN12 internal GELU helper cleanup
+
+Goal:
+
+- After fixing the public FFN12 fused path to poly9, remove the now-unreachable
+  GELU helper implementations from the FFN12 CUDA Tile translation unit.
+- Make wrong future FFN12 GELU modes fail at compile time instead of silently
+  instantiating old kernels.
+
+Removed from [src/mbr_ffn12_cutile.cu](../src/mbr_ffn12_cutile.cu):
+
+- exact erf GELU helper
+- hard/quick/tanh GELU helpers
+- poly5/poly7 helpers
+- odd5 fast/full helpers
+- tinyblend fast/full helpers
+- non-poly9 branches in `gelu_selected()`
+- non-poly9 fast-path branches in the pairh32 fused kernel
+
+The remaining FFN12 GELU helper set is:
+
+```text
+gelu_erf_poly9_l30
+gelu_erf_poly9_l30_fast
+gelu_selected -> static_assert(GeluMode == kGeluErfPoly9L30)
+```
+
+Static resource/SASS check:
+
+```text
+ffn12_fused256_split2_pairh32_cutile_kernel:
+  still 5 poly9 instances
+
+hot FFN12 instance:
+  REG=255 STACK=8 SHARED=98304B
+  HMMA=256 LDSM=128 LDGSTS=80
+  instr=2536 BAR=35
+```
+
+Interpretation:
+
+- This is source and template-surface cleanup only.
+- The hot FFN12 kernel remains unchanged and still has the same A10G bottom
+  cause: `98KB` shared memory, one CTA/SM, high register pressure, and barrier
+  overhead.
+
+Line count:
+
+```text
+after FFN12 GELU cleanup:          16974 total
+after FFN12 internal GELU cleanup: 16804 total
+net:                               -170 lines
+```
+
+Verification:
+
+```text
+ninja -C build-min cudasep_infer -j8: pass
+./bench/audit_cuda_tile_first.sh build-min/cudasep_infer: pass
+src FFN12 file non-poly9 GELU helper strings: no hits
+git diff --check: pass
+```
+
+Sequential CLI timing:
+
+```text
+test_clean.wav: 873.1 ms
+test.wav:       5132.4 ms
+```
+
+Correctness versus FFN12 GELU cleanup outputs:
+
+```text
+test_clean.wav:
+  Vocals.wav:       max_abs=2.38418579e-07 rel_rms=5.40220224e-08 snr=145.349 dB
+  Instrumental.wav: max_abs=2.98023224e-07 rel_rms=5.43665918e-08 snr=145.293 dB
+
+test.wav:
+  Vocals.wav:       max_abs=2.98023224e-07 rel_rms=5.43433912e-08 snr=145.297 dB
+  Instrumental.wav: max_abs=2.38418579e-07 rel_rms=5.43504246e-08 snr=145.296 dB
+```
+
+Decision:
+
+- Keep only FFN12 poly9 GELU code in the FFN12 Tile translation unit.
+- Next FFN12 work must now be structural, not more mode cleanup.
+
+### 2026-06-06 - FFN12 residual one-kernel fallback cleanup
+
+Goal:
+
+- Keep the project on the fixed CUDA Tile-first path instead of retaining
+  fallback residual FFN12 implementations that are not used by the default
+  A10G profile.
+- Remove a residual full-BF16 rejection in `try_feedforward_fused_impl()` so
+  the all-BF16 experiment can continue through the same FFN12 Tile path.
+
+Change:
+
+- Always handle FFN12 residual by launching the promoted FFN12 Tile kernel and
+  then `try_residual_add_bf16_cutile()`.
+- Remove `launch_ffn12_fused256_residual_cutile()` from the public Tile header
+  and implementation.
+- Remove the FFN12 residual one-kernel `AddResidual` template branch from
+  `src/mbr_ffn12_cutile.cu`.
+- Remove the stale residual FFN12 env gates:
+  - `CUDASEP_DISABLE_FFN12_FUSED_RESIDUAL`
+  - `CUDASEP_DISABLE_FFN12_RESIDUAL_TWO_KERNEL`
+
+Static evidence:
+
+```text
+src stale residual FFN12 strings: no hits
+
+ffn12_fused256_split2_pairh32_cutile_kernel instances:
+  before cleanup: 5
+  after cleanup:  4
+
+removed instance:
+  ffn12_fused256_split2_pairh32_cutile_kernel<6,false,64,true,true,0,false,false,false,false>
+  HMMA=128 REG=254 SHARED=98304B
+
+hot FFN12 instance remains:
+  ffn12_fused256_split2_pairh32_cutile_kernel<6,false,64,false,2,true,true,true,false>
+  HMMA=256 REG=255 STACK=8 SHARED=98304B
+```
+
+Line count:
+
+```text
+before cleanup: 16804 total
+after cleanup:  16665 total
+net:            -139 lines
+```
+
+Verification:
+
+```text
+ninja -C build-min cudasep_infer -j8: pass
+./bench/audit_cuda_tile_first.sh build-min/cudasep_infer: pass
+git diff --check: pass
+
+test_clean.wav default BF16:                 875.4 ms
+test.wav default BF16:                       5135.5 ms
+test_clean.wav CUDASEP_ALL_BF16_EXPERIMENTS=1: 877.2 ms
+```
+
+Correctness versus FFN12 internal GELU cleanup output:
+
+```text
+test_clean.wav default BF16:
+  Vocals.wav:       rel_rms=5.38673052e-08 max_abs=2.38418579e-07
+  Instrumental.wav: rel_rms=5.41555445e-08 max_abs=2.98023224e-07
+```
+
+Decision:
+
+- Promote the two-kernel residual FFN12 route as the only supported fixed path.
+- This does not change the main FFN12 bottom cause: the hot kernel is still
+  limited by 98KB shared residency, high registers, barriers, and scalar side
+  work. The next performance step must redesign W1/GELU/W2 staging or move to
+  another top hotspot such as time attention; another residual fallback toggle
+  is closed.
+
+### 2026-06-06 - Bottleneck Report FFN12 Signature Canonicalization
+
+Goal:
+
+- Keep the A10G bottleneck evidence chain usable after deleting the FFN12
+  `AddResidual` template slot.
+- Historical Nsight traces still contain the old 10-argument FFN12 kernel name,
+  while the current binary has the same non-residual hot instance with 9
+  template arguments.
+
+Change:
+
+- Add `canonical_template_args()` in `bench/a10g_cutile_bottleneck_report.py`.
+- For `ffn12_fused256_split2_pairh32_cutile_kernel`, drop the historical
+  argument at index 3 only when matching 10-argument trace names against current
+  SASS/resource entries.
+
+Verification:
+
+```text
+python3 -m py_compile bench/a10g_cutile_bottleneck_report.py: pass
+
+python3 bench/a10g_cutile_bottleneck_report.py \
+  bench/nsys_stft_fused_first_stage_promoted_clean.sqlite \
+  build-min/cudasep_infer --limit 12: pass
+```
+
+Restored FFN12 report row:
+
+```text
+ffn12_fused256_split2_pairh32_cutile_kernel<6,false,64,false,false,2,true,true,true,false>
+  96 calls, 175.852 ms, 44.7 TF/s, 63.8% roof70
+  REG=255 STACK=8 SHARED=98304B smCTA=1 HMMA=256 MUFU=0 scalar=608 BAR=35 STG=8
+  cause: 98KB shared residency wall; high reg/stack pressure; large scalar side work;
+         barrier-heavy staging; address/control overhead; multiple global-store/layout writes
+```
+
+Decision:
+
+- Keep the compatibility canonicalization so old traces remain comparable while
+  the source keeps the cleaner current FFN12 signature.
+
+### 2026-06-06 - Time Attention Approx Softmax Source Cleanup
+
+Goal:
+
+- Remove the closed time-attention approximate softmax diagnostic path from the
+  production CUDA Tile source.
+- Keep the exact BF16 time attention path unchanged: `ct::mma` QK, exact
+  online softmax via `ct::exp2`, BF16 probability tile for AV, and the existing
+  split-contig fixed shape.
+
+Removed source switches/diagnostics:
+
+```text
+CUDASEP_ENABLE_TIME_ATTENTION_APPROX_SOFTMAX
+CUDASEP_DISABLE_TIME_ATTENTION_APPROX_SOFTMAX
+CUDASEP_TIME_ATTENTION_APPROX_SOFTMAX_START_CALL
+CUDASEP_TIME_ATTENTION_APPROX_SOFTMAX_MAX_CALLS
+CUDASEP_TIME_ATTENTION_APPROX_SOFTMAX_CHUNK
+CUDASEP_TIME_ATTENTION_APPROX_SOFTMAX_DEPTH
+CUDASEP_TIME_ATTENTION_APPROX_SOFTMAX_CLAMP_PROB
+CUDASEP_TIME_ATTENTION_APPROX_SOFTMAX_POLY2_L4
+kProbPoly3NoClamp / kProbPoly3Clamp / kProbPoly2NoClampL4
+kAlphaProbClamp
+```
+
+Static evidence:
+
+```text
+src approximate softmax strings: no hits
+
+time_attention1301_main1280_split_contig_input_kernel instances after cleanup:
+  <64,32,false,true,0,0>  REG=254 SHARED=49152B HMMA=160 MUFU=124
+  <64,32,false,false,0,0> REG=238 SHARED=40960B HMMA=128 MUFU=106
+  <64,32,true,true,0,0>   REG=237 SHARED=40960B HMMA=160 MUFU=124
+  <64,32,true,false,0,0>  REG=217 SHARED=32768B HMMA=128 MUFU=106
+```
+
+Line count:
+
+```text
+after FFN12 residual cleanup:       16665 total
+after time-attn approx cleanup:     16500 total
+net:                                -165 lines
+```
+
+Verification:
+
+```text
+ninja -C build-min cudasep_infer -j8: pass
+./bench/audit_cuda_tile_first.sh build-min/cudasep_infer: pass
+git diff --check: pass
+
+test_clean.wav default BF16: 876.9 ms
+test.wav default BF16:       5112.2 ms
+```
+
+Correctness versus FFN12 residual cleanup output:
+
+```text
+test_clean.wav:
+  Vocals.wav:       rel_rms=5.40844234e-08 max_abs=1.78813934e-07
+  Instrumental.wav: rel_rms=5.44670612e-08 max_abs=2.38418579e-07
+
+test.wav:
+  Vocals.wav:       rel_rms=5.43023471e-08 max_abs=1.78813934e-07
+  Instrumental.wav: rel_rms=5.43122956e-08 max_abs=2.38418579e-07
+```
+
+Decision:
+
+- Keep the cleanup. It does not claim a time-attention speedup; it removes
+  closed diagnostic variants from the production CUDA Tile binary.
+- The time attention bottom cause remains unchanged: the main exact kernel is
+  still limited by softmax MUFU/scalar work around an otherwise strong HMMA
+  body (`60.5 TF/s`, `86.4%` of the 70 TF/s reference in the current trace).
+  The next real time-attention speed experiment must reduce softmax scalar work
+  or fuse adjacent boundaries without lowering HMMA density.
+
+### 2026-06-06 - Negative Bench Probe: FFN12 Kernel Occupancy Hint
+
+Goal:
+
+- Test a CUDA Tile kernel-level occupancy hint on the FFN12 source-like fused
+  body.
+- The previous FFN12 failures showed that lowering shared alone is not enough
+  unless the kernel preserves the dense `HMMA=256` body. This probe asks the
+  Tile compiler to target higher CTA residency directly.
+
+Official CUDA Tile reference checked before the edit:
+
+```text
+https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/writing-tile-kernels.html
+```
+
+Temporary bench-only change:
+
+```text
+[[cutile::hint(0, occupancy=2)]]
+ffn12_fused_pairh32_lat2_occ2_kernel<32,64,32,2,2>
+```
+
+The temporary bench variant was removed after the result below because this
+direction had already been closed historically and still fails on the current
+toolchain/source state.
+
+Build:
+
+```text
+ninja -C build-min bench_bf16_ffn12_two_stage_cutile -j8: pass
+```
+
+Resource/occupancy:
+
+```text
+fused_pairh32_lat2:
+  REG=255 STACK=8 SHARED=98304B shared_limit=1 active_cta_per_sm=1
+
+fused_pairh32_lat2_occ2:
+  REG=168 STACK=0 SHARED=32896B shared_limit=3 active_cta_per_sm=3
+```
+
+SASS:
+
+```text
+fused_pairh32_lat2:
+  instr=2536 HMMA=256 LDSM=128 LDGSTS=80 BAR=35 DEPBAR=29
+
+fused_pairh32_lat2_occ2:
+  instr=1912 HMMA=128 LDSM=64 LDGSTS=40 BAR=55 DEPBAR=0
+```
+
+Microbench:
+
+```text
+fused_pairh32_lat2:
+  best=1.7977 ms median=1.8112 ms useful=45.52 TF/s roof70=65.0%
+
+fused_pairh32_lat2_occ2:
+  best=2.0948 ms median=2.1213 ms useful=39.07 TF/s roof70=55.8%
+```
+
+Interpretation:
+
+- The occupancy hint works mechanically: shared drops from `98304B` to `32896B`
+  and runtime occupancy rises from `1` to `3 CTA/SM`.
+- It is still slower because the compiler halves the Tensor Core body:
+  `HMMA=256 -> 128`, `LDSM=128 -> 64`, `LDGSTS=80 -> 40`, while barriers rise
+  from `35` to `55`.
+- Bottom cause update: FFN12 cannot be fixed by simply asking the compiler for
+  higher occupancy. The useful constraint is stricter: preserve `HMMA=256` and
+  then reduce shared/register pressure. Higher CTA residency that cuts HMMA
+  density loses on A10G.
+
+Decision:
+
+- Do not keep the repeated `fused_pairh32_lat2_occ2` bench variant.
+- Do not source-port the occupancy hint.
+- Close kernel-level `occupancy=2` hinting as an FFN12 promotion path for the
+  current source-like fused body.
+
+## Time Attention Stats Source Cleanup
+
+Goal:
+
+- Remove the obsolete time-attention stats/debug path after the approximate
+  softmax path was closed and deleted.
+- Keep the exact BF16 CUDA Tile attention path unchanged while deleting the
+  unused stats kernel instance, host allocation, CPU readback, and env-gated
+  launcher branch.
+- Delete the now-unused nonnegative env parser helper that became dead after
+  these debug gates were removed.
+
+Removed env/debug controls:
+
+```text
+CUDASEP_ENABLE_TIME_ATTENTION_STATS
+CUDASEP_TIME_ATTENTION_STATS_CHUNK
+CUDASEP_TIME_ATTENTION_STATS_DEPTH
+```
+
+Source cleanup evidence:
+
+```text
+rg "time_attention_stats|TIME_ATTENTION_STATS|print_time_attention_stats|input_stats_kernel|WriteStats|kTimeAttnStatsCols|stats_ptr" \
+  src/mbr_cuda_tile.cu src/mbr_cuda_tile.h src/mbr_time_attention_cutile.cu
+
+no matches
+
+source line count: 16500 -> 16346
+```
+
+Build/audit:
+
+```text
+ninja -C build-min cudasep_infer -j8: pass
+./bench/audit_cuda_tile_first.sh build-min/cudasep_infer: pass
+git diff --check: pass
+```
+
+End-to-end validation:
+
+```text
+test_clean.wav:
+  ./build-min/cudasep_infer --model mel-band-roformer-deux/becruily_deux.csm \
+    --input test_clean.wav --output outputs/time_attn_stats_cleanup_clean2 \
+    --bf16 --chunk-batch-size 1 --stem -1
+  inference time: 876.1 ms
+
+test.wav:
+  ./build-min/cudasep_infer --model mel-band-roformer-deux/becruily_deux.csm \
+    --input test.wav --output outputs/time_attn_stats_cleanup_test2 \
+    --bf16 --chunk-batch-size 1 --stem -1
+  inference time: 5131.2 ms
+```
+
+Output diff vs `time_attn_approx_cleanup_*`:
+
+```text
+clean Vocals:       rel_rms=5.419613237e-08 max_abs=1.788139343e-07
+clean Instrumental: rel_rms=5.418990387e-08 max_abs=2.384185791e-07
+test Vocals:        rel_rms=5.431743919e-08 max_abs=1.788139343e-07
+test Instrumental:  rel_rms=5.432398471e-08 max_abs=2.384185791e-07
+```
+
+Interpretation:
+
+- This is a source/path cleanup, not a speed promotion.
+- The exact time attention kernel now has one fewer dead variant and no CPU
+  stats readback path.
+- This moves the project closer to the Tile-first fixed-shape target by
+  removing a profiling/debug branch that is no longer part of the experiment.
+
+Decision:
+
+- Keep the cleanup.
+- Do not reintroduce the stats path; future attention analysis should use
+  external Nsight traces or focused bench-only probes.
+
+## Bottleneck Report FFN12 Tail Signature Canonicalization
+
+Goal:
+
+- Keep the A10G bottleneck report useful after the FFN12 tail kernel template
+  signature was simplified.
+- Historical Nsight traces include an old two-argument
+  `ffn12_tail_ffn2_cutile_kernel<FullBF16, ...>` signature, while current SASS
+  only has `ffn12_tail_ffn2_cutile_kernel<FullBF16>`.
+
+Change:
+
+```text
+bench/a10g_cutile_bottleneck_report.py:
+  canonical_template_args(...)
+    ffn12_tail_ffn2_cutile_kernel len(args)==2 -> args[:1]
+```
+
+Validation:
+
+```text
+python3 -m py_compile bench/a10g_cutile_bottleneck_report.py: pass
+
+python3 bench/a10g_cutile_bottleneck_report.py \
+  bench/nsys_stft_fused_first_stage_promoted_clean.sqlite \
+  build-min/cudasep_infer --limit 30: pass
+```
+
+Report evidence:
+
+```text
+ffn12_tail_ffn2_cutile_kernel<false,false>
+  calls=96 total_ms=5.352 avg_us=55.745
+  REG=255 STACK=0 SHARED=81920B smCTA=1
+  HMMA=1024 MUFU=0 scalar=64 BAR=34 STG=64
+  cause: high reg/stack pressure; barrier-heavy staging;
+         address/control overhead; multiple global-store/layout writes
+```
+
+Interpretation:
+
+- The report now matches historical trace names to current SASS/resource data
+  instead of reporting `no SASS match`.
+- This does not change inference behavior; it improves the evidence chain for
+  choosing the next A10G CUDA Tile experiments.
+- Current top hotspots remain FFN12 main, time attention main, QKV/linear, and
+  attention output projection.
+
+## Negative Bench Probe: FFN12 InputTileK 32/128 Sweep
+
+Goal:
+
+- Test the only remaining simple shape axis around the promoted FFN12 main
+  kernel without changing the fused W1/GELU/W2 structure.
+- Current promoted shape is `TM=32, InputTileK=64, THidden=32`.
+- Compare `InputTileK=32` and `InputTileK=128` against that baseline on A10G.
+
+Official CUDA Tile reference checked before the edit:
+
+```text
+https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/writing-tile-kernels.html
+```
+
+Bench-only variants added:
+
+```text
+fused_pairh32_tk32_lat2_outnoround
+  ffn12_fused_pairh32_lat2_kernel<32,32,32,2,2>
+
+fused_pairh32_tk128_lat2_outnoround
+  ffn12_fused_pairh32_lat2_kernel<32,128,32,2,2>
+```
+
+Build/audit:
+
+```text
+ninja -C build-min bench_bf16_ffn12_two_stage_cutile -j8: pass
+./bench/audit_cuda_tile_first.sh build-min/bench_bf16_ffn12_two_stage_cutile: pass
+```
+
+Runtime resource/occupancy:
+
+```text
+fused_pairh32_lat2:
+  REG=255 STACK=8  SHARED=98304B shared_limit=1 active_cta_per_sm=1
+
+fused_pairh32_tk32_lat2_outnoround:
+  REG=255 STACK=40 SHARED=98304B shared_limit=1 active_cta_per_sm=1
+
+fused_pairh32_tk128_lat2_outnoround:
+  REG=238 STACK=0  SHARED=98304B shared_limit=1 active_cta_per_sm=1
+```
+
+SASS:
+
+```text
+fused_pairh32_lat2:
+  instr=2482 HMMA=256 LDSM=128 LDGSTS=80 LDG=128 STS=44 STG=8
+  BAR=35 DEPBAR=29 IMAD=194 IADD3=146 scalar=608
+
+fused_pairh32_tk32_lat2_outnoround:
+  instr=2923 HMMA=256 LDSM=128 LDGSTS=80 LDG=152 STS=44 STG=8
+  BAR=68 DEPBAR=48 IMAD=351 IADD3=196 scalar=608
+
+fused_pairh32_tk128_lat2_outnoround:
+  instr=1553 HMMA=128 LDSM=64 LDGSTS=40 LDG=90 STS=34 STG=8
+  BAR=16 DEPBAR=10 IMAD=201 IADD3=99 scalar=336
+```
+
+Microbench:
+
+```text
+fused_pairh32_lat2:
+  best=1.7958 ms median=1.8009 ms useful=45.57 TF/s roof70=65.1%
+
+fused_pairh32_tk32_lat2_outnoround:
+  best=2.1569 ms median=2.1786 ms useful=37.94 TF/s roof70=54.2%
+
+fused_pairh32_tk128_lat2_outnoround:
+  best=3.0607 ms median=3.0632 ms useful=26.74 TF/s roof70=38.2%
+```
+
+Interpretation:
+
+- `InputTileK=32` preserves the `HMMA=256` Tensor Core body, but it doubles
+  barriers (`35 -> 68`), raises dependency barriers (`29 -> 48`), and sharply
+  increases address/control work (`IMAD=194 -> 351`). It is slower despite the
+  same HMMA count.
+- `InputTileK=128` reduces registers (`255 -> 238`) and removes stack, but the
+  compiler halves the Tensor Core body (`HMMA=256 -> 128`, `LDSM=128 -> 64`,
+  `LDGSTS=80 -> 40`). The lower resource pressure does not matter because
+  useful Tensor Core work per CTA collapses.
+- Bottom cause update: the promoted `InputTileK=64` point is a local optimum on
+  this simple K-tile axis. FFN12 still needs a structural redesign that reduces
+  shared/register pressure while preserving the `HMMA=256` body.
+
+Decision:
+
+- Do not source-port either `InputTileK=32` or `InputTileK=128`.
+- Keep the two bench-only variants as negative shape-sweep evidence.
+- Next FFN12 attempt should not retune only `InputTileK`; it needs a different
+  semantic structure for W2/output accumulation or hidden staging.
+
+## Negative Source Probe: GLU half_dim<=64 row-shape kernels
+
+Goal:
+
+- Test whether the final mask-estimator GLU calls with small last-dimension
+  halves should use shape-specific CUDA Tile row kernels instead of the generic
+  flat `glu_last_dim_bf16_to_bf16_kernel`.
+- Keep the probe opt-in under `CUDASEP_ENABLE_GLU_ROW_SHAPE=1` while measuring
+  both end-to-end and GLU-family kernel subtotal.
+
+Shape audit:
+
+```text
+final mask GLU calls in the .csm: 120
+
+half_dim distribution:
+  24: 28
+  28: 8
+  36: 6
+  40: 4
+  44: 2
+  52: 6
+  60: 2
+  64: 2
+  larger half_dim values up to 520: remaining calls
+
+half_dim<=64 coverage:
+  58/120 final GLU call sites
+  232/480 GLU launches on test_clean.wav
+```
+
+Implementation tested and removed:
+
+```text
+CUDASEP_ENABLE_GLU_ROW_SHAPE=1
+
+glu_last_dim_bf16_to_bf16_row_kernel<32>
+glu_last_dim_bf16_to_bf16_row_kernel<64>
+```
+
+End-to-end A/B on `test_clean.wav`:
+
+```text
+default:
+  inference time: 873.5 ms
+
+CUDASEP_ENABLE_GLU_ROW_SHAPE=1:
+  inference time: 873.7 ms
+
+output diff opt-in vs default:
+  Vocals:       rel_rms=5.408745656e-08 max_abs=1.788139343e-07
+  Instrumental: rel_rms=5.410594787e-08 max_abs=2.384185791e-07
+```
+
+Nsight GLU-family subtotal:
+
+```text
+default:
+  glu_last_dim_bf16_to_bf16_kernel:
+    480 calls, 1.503 ms, 3.132 us/call
+
+opt-in:
+  glu_last_dim_bf16_to_bf16_kernel:
+    248 calls, 0.989 ms, 3.988 us/call
+
+  glu_last_dim_bf16_to_bf16_row_kernel<32>:
+    144 calls, 0.387 ms, 2.685 us/call
+
+  glu_last_dim_bf16_to_bf16_row_kernel<64>:
+     88 calls, 0.245 ms, 2.785 us/call
+
+subtotal:
+  default: 1.503 ms
+  opt-in:  1.621 ms
+  delta:   +0.118 ms
+```
+
+SASS/resource:
+
+```text
+flat:
+  REG=26 STACK=0 SHARED=0
+  instr=512 MUFU=11 FFMA=30 FMUL=4 FADD=6
+  LDG=4 STG=2 IMAD=164 IADD3=53 PRMT=11 LOP3=25
+
+row32:
+  REG=18 STACK=0 SHARED=0
+  instr=184 MUFU=4 FFMA=20 FMUL=2 FADD=4
+  LDG=2 STG=1 IMAD=31 IADD3=9 PRMT=2 LOP3=18
+
+row64:
+  REG=17 STACK=0 SHARED=0
+  instr=184 MUFU=4 FFMA=20 FMUL=2 FADD=4
+  LDG=2 STG=1 IMAD=31 IADD3=9 PRMT=2 LOP3=18
+```
+
+Interpretation:
+
+- The row kernels are statically much smaller and faster per covered small
+  GLU call, but the overall GLU family is slower because the remaining generic
+  flat calls become the larger half-dim cases and dominate the subtotal.
+- This is not a Tensor Core throughput problem. GLU is a scalar sigmoid/multiply
+  memory kernel with very small per-launch work.
+- Bottom cause: standalone GLU remains launch/control-bound and is too small to
+  justify splitting the family by shape. The useful direction is to delete this
+  boundary by fusing mask-output dataflow, not to keep adding GLU micro-kernels.
+
+Decision:
+
+- Remove `CUDASEP_ENABLE_GLU_ROW_SHAPE` and the row-shape CUDA Tile kernels from
+  source.
+- Keep the generic BF16 flat GLU kernel as the default path.
+- Next mask-estimator work should target the larger boundary around
+  `cat_kernel` and `apply_mask_and_scatter_bf16_kernel`, which costs several
+  milliseconds and can plausibly be removed by producer/consumer fusion.
+
+## Negative Source Probe: mask estimator direct-output dynamic-N linear+GLU
+
+Goal:
+
+- Test the next mask-output dataflow idea after the small GLU row-shape probe
+  failed: delete the per-stem final `Tensor::cat(band_outputs, -1)` by
+  preallocating the full `[B,T,total_band_freqs*2]` mask and letting each
+  band's final `linear+GLU` write directly into its prefix offset.
+- Keep the experiment opt-in under
+  `CUDASEP_ENABLE_MASK_ESTIMATOR_DIRECT_OUTPUT=1`.
+- Use one runtime-`NOut` CUDA Tile kernel first to validate the dataflow
+  hypothesis before generating many compile-time band-width specializations.
+
+Official CUDA Tile reference checked before writing the probe:
+
+```text
+https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/writing-tile-kernels.html
+```
+
+Implementation tested and removed:
+
+```text
+linear_glu_last_dim_dynamic_n_strided_bf16_kernel<32,64,64,1301,1024>
+
+fixed:
+  TM=32, TN=64, TK=64, M=1301, K=1024
+
+runtime:
+  n_out, output_offset, output_stride
+```
+
+Plain CLI A/B on `test_clean.wav`:
+
+```text
+default:
+  inference time: 877.3 ms
+
+CUDASEP_ENABLE_MASK_ESTIMATOR_DIRECT_OUTPUT=1:
+  inference time: 928.8 ms
+```
+
+Output diff, opt-in versus default:
+
+```text
+Vocals:
+  max_abs=2.804785967e-03
+  rel_rms=1.816723889e-03
+  SNR=54.814 dB
+
+Instrumental:
+  max_abs=4.647716880e-03
+  rel_rms=2.567688823e-03
+  SNR=51.809 dB
+```
+
+Nsight opt-in trace:
+
+```text
+nsys profile:
+  inference time: 943.9 ms
+
+cat_kernel:
+  6 calls, 0.835 ms
+
+previous comparable profile:
+  cat_kernel: 14 calls, 3.963 ms
+
+deleted:
+  8 mask-estimator cat launches
+  about 3.1 ms of cat subtotal
+
+new dynamic direct-output kernel:
+  480 calls, 82.929 ms, 172.768 us/call
+
+apply_mask_and_scatter_bf16_kernel:
+  4 calls, 4.459 ms
+```
+
+SASS/resource:
+
+```text
+linear_glu_last_dim_dynamic_n_strided_bf16:
+  REG=255 STACK=208 SHARED=94208B smCTA=1
+  instr=11392 HMMA=512 MUFU=34 scalar=288
+  BAR=50 STG=16 IMAD=386 IADD3=243 PRMT=3068 LOP3=1999
+
+existing static NOut=24 fused linear+GLU for comparison:
+  REG=143 STACK=0 SHARED=90112B
+  instr=2232 HMMA=256 BAR=67 IMAD=182
+```
+
+Interpretation:
+
+- The dataflow hypothesis is partially valid: writing final band outputs
+  directly into a full mask does delete the stem mask `cat` boundary.
+- The first implementation is still a strong negative because the runtime-`NOut`
+  CUDA Tile spelling explodes codegen: max registers, 208B stack, 94KB shared,
+  one CTA per SM, huge predicate/control instructions, and 480 launches.
+- The opt-in path is also not numerically equivalent at the level expected for a
+  source cleanup or promotion. The fused runtime-`NOut` arithmetic changes final
+  WAV output by `1e-3` relative RMS, far larger than previous BF16-equivalent
+  changes.
+- Bottom cause: runtime-`NOut` masked Tensor Core tiles are the wrong spelling
+  for this path on A10G. The compiler cannot specialize away the mask/offset
+  logic and spills badly.
+
+Decision:
+
+- Remove `CUDASEP_ENABLE_MASK_ESTIMATOR_DIRECT_OUTPUT` and the dynamic-N
+  strided `linear+GLU` kernel from source.
+- Do not pursue runtime-`NOut` fused final mask output.
+- If revisiting this boundary, use compile-time `NOut` specializations for the
+  real band-width histogram and a strided epilogue, or keep the original final
+  linear/GLU arithmetic and only specialize the final store. The key test is
+  whether it can delete the 8 mask cat calls without creating a new 480-call
+  `REG=255/STACK>0` hotspot.
+
+## Bench Probe: compile-time NOut mask final linear+GLU strided store
+
+Goal:
+
+- Follow up the negative runtime-`NOut` mask direct-output probe with the
+  spelling that should be valid for A10G: compile-time `NOut`, fixed CUDA Tile
+  shapes, and a manual strided epilogue into the full mask layout.
+- Keep this bench-only. Source inference is unchanged.
+- Measure whether the strided store itself causes the bad `REG=255/STACK=208`
+  behavior, or whether the failure was specifically runtime-`NOut` masking.
+
+Official CUDA Tile reference checked before the edit:
+
+```text
+https://docs.nvidia.com/cuda/cuda-tile-cpp-api-reference/index.html
+```
+
+Added bench:
+
+```bash
+build-min/bench_bf16_mask_final_glu_cutile
+```
+
+Variants:
+
+```text
+model_strided:
+  all real final mask NOut values from the current .csm distribution, weighted
+  by per-chunk call count
+
+n24_contig:
+  NOut=24, TN=32, OutStride=24
+
+n24_strided:
+  NOut=24, TN=32, OutStride=7916
+
+n28_strided:
+  NOut=28, TN=32, OutStride=7916
+
+n64_strided:
+  NOut=64, TN=64, OutStride=7916
+
+n520_strided:
+  NOut=520, TN=64, OutStride=7916
+```
+
+Build/audit:
+
+```text
+ninja -C build-min bench_bf16_mask_final_glu_cutile -j8: pass
+./bench/audit_cuda_tile_first.sh build-min/bench_bf16_mask_final_glu_cutile: pass
+```
+
+Runtime resource:
+
+```text
+n24_contig:
+  REG=139 local=0 smem_static=90112
+
+n24_strided:
+  REG=139 local=0 smem_static=90112
+
+n28_strided:
+  REG=139 local=0 smem_static=90112
+
+n64_strided:
+  REG=232 local=0 smem_static=49152
+
+n520_strided:
+  REG=228 local=0 smem_static=49152
+```
+
+Timing:
+
+```text
+short all-variant run:
+  n24_contig:   best=0.0221 ms useful=5.79 TF/s roof70=8.3%
+  n24_strided:  best=0.0236 ms useful=5.43 TF/s roof70=7.8%
+  n28_strided:  best=0.0233 ms useful=6.40 TF/s roof70=9.1%
+  n64_strided:  best=0.0348 ms useful=9.80 TF/s roof70=14.0%
+  n520_strided: best=0.1132 ms useful=24.48 TF/s roof70=35.0%
+
+1000-iteration spot check:
+  n24_contig:   best=0.0216 ms useful=5.92 TF/s roof70=8.5%
+  n24_strided:  best=0.0231 ms useful=5.54 TF/s roof70=7.9%
+  n520_strided: best=0.1117 ms useful=24.81 TF/s roof70=35.4%
+
+full model-width weighted run, 100 iterations:
+  model_strided best_per_chunk=5.3476 ms
+  model_strided median_per_chunk=5.4649 ms
+  model_strided best_test_clean_4chunk=21.3903 ms
+  model_strided median_test_clean_4chunk=21.8597 ms
+```
+
+SASS/resource:
+
+```text
+n24_contig:
+  REG=139 STACK=0 SHARED=90112B
+  instr=2376 HMMA=256 LDSM=193 LDGSTS=128
+  BAR=67 DEPBAR=64 IMAD=212 IADD3=172
+
+n24_strided:
+  identical resource and SASS counts to n24_contig
+
+n28_strided:
+  identical resource and SASS counts to n24_contig
+
+n64_strided:
+  REG=232 STACK=0 SHARED=49152B
+  instr=4544 HMMA=512 LDSM=256 LDGSTS=320
+  BAR=132 DEPBAR=96 IMAD=469 IADD3=323
+
+n520_strided:
+  REG=228 STACK=0 SHARED=49152B
+  instr=4688 HMMA=512 LDSM=256 LDGSTS=320
+  BAR=132 DEPBAR=96 IMAD=535 IADD3=380
+
+full model-width resource envelope:
+  STACK=0 for every compile-time NOut instance
+  REG range: 139-232
+  SHARED range: 49152B-90112B
+```
+
+Interpretation:
+
+- Compile-time `NOut` fixes the catastrophic dynamic-N codegen. The strided
+  epilogue itself is not the cause: `n24_contig` and `n24_strided` compile to
+  identical resource and SASS counts.
+- The remaining bottleneck is low HMMA density for tiny `NOut` plus high shared
+  memory residency. `NOut=24/28` stays below `10%` of the 70 TF/s dense BF16
+  reference even with clean codegen.
+- Large final bands are healthier but still not close to dense GEMM:
+  `NOut=520` reaches about `24.8 TF/s`, around `35%` of the reference.
+- Compared with the current Nsight source profile, static fused strided is
+  roughly cost-neutral per final band: e.g. default final `N=48` linear is about
+  `19.8 us` and GLU about `2.9 us`, while `n24_strided` is about `23.1 us`.
+  Therefore any source win would mostly come from deleting the 8 stem-mask cat
+  launches, not from making final linear+GLU faster.
+- Full-width weighted estimate is now concrete: the compile-time strided fused
+  path costs about `21.4-21.9 ms` on `test_clean`'s 4 chunks. The comparable
+  current source profile has about `21.184 ms` of final mask linear kernels,
+  `1.403 ms` of GLU, and the previous direct-output trace showed deleting
+  stem-mask cat saves about `3.128 ms`. That puts the plausible source upside
+  around a few milliseconds, not tens of milliseconds.
+
+Decision:
+
+- Keep `bench_bf16_mask_final_glu_cutile` as the evidence harness.
+- Do not source-port a full mask direct-output path yet.
+- Next source attempt, if taken, should be a limited compile-time specialization
+  for a small set of dominant band widths and must compare full WAV quality,
+  cat count, final linear+GLU subtotal, and compile-time/SASS cost before
+  promotion.
+
+## Negative Source Probe: compile-time NOut mask final direct-output
+
+Goal:
+
+- Source-test the bench result above: compile-time `NOut` static `linear+GLU`
+  kernels write each band directly into the full `[B,T,7916]` mask buffer.
+- Delete the 8 per-chunk stem-mask cat launches while avoiding the runtime-N
+  codegen failure.
+- Keep the path opt-in under:
+
+```text
+CUDASEP_ENABLE_MASK_FINAL_STATIC_DIRECT_OUTPUT=1
+```
+
+Implementation tested and removed:
+
+- `linear_glu_last_dim_static_strided_bf16_kernel<TM,TN,TK,M,NOut,K,7916>`
+- Public opt-in helpers:
+  - `mask_final_static_direct_output_enabled()`
+  - `try_linear_glu_last_dim_bf16_output_static_strided(...)`
+- `apply_mask_estimator()` direct-output branch with fixed-shape precheck:
+  - BF16 input/weights/bias
+  - `B*T=1301`
+  - output stride `7916`
+  - all final `NOut` values from the current model histogram
+
+Build cost:
+
+- `ninja -C build-min cudasep_infer -j8` passed, but `mbr_cuda_tile.cu`
+  compilation spent several minutes in `tileiras/ptxas`, much longer than the
+  bench-only harness. Full-width source specialization is materially heavy for
+  the main binary.
+
+Plain CLI A/B on `test_clean.wav`:
+
+```text
+default:
+  inference time: 881.3 ms
+
+CUDASEP_ENABLE_MASK_FINAL_STATIC_DIRECT_OUTPUT=1:
+  inference time: 880.6 ms
+```
+
+Output diff, opt-in versus default:
+
+```text
+Vocals:
+  max_abs=2.804756165e-03
+  rel_rms=1.816724036e-03
+  SNR=54.814 dB
+
+Instrumental:
+  max_abs=4.647713155e-03
+  rel_rms=2.567688823e-03
+  SNR=51.809 dB
+```
+
+Nsight opt-in trace:
+
+```text
+profiled inference time:
+  889.8 ms
+
+static_direct_final:
+  480 calls, 23.221 ms
+
+cat_kernel:
+  6 calls, 0.834 ms
+
+apply_mask_and_scatter_bf16_kernel:
+  4 calls, 4.453 ms
+
+previous default comparable profile:
+  final mask linear kernels: 21.184 ms
+  GLU:                       1.403 ms
+  cat_kernel total:          3.963 ms
+
+deleted cat subtotal from prior direct-output trace:
+  about 3.128 ms
+```
+
+SASS/resource:
+
+```text
+compile-time static direct final kernels:
+  STACK=0 for all NOut
+  REG range=139-232
+  SHARED range=49152B-90112B
+
+representative n24:
+  REG=139 STACK=0 SHARED=90112B HMMA=256
+
+representative n64+:
+  REG=228-232 STACK=0 SHARED=49152B HMMA=512
+```
+
+Interpretation:
+
+- Compile-time `NOut` fixes the runtime-N codegen issue: no stack spill and no
+  `REG=255` dynamic kernel.
+- The dataflow hypothesis is valid: the opt-in path removes the stem-mask cat
+  launches, leaving only 6 non-mask cat calls.
+- The source probe is still not promotable:
+  - plain CLI speed is effectively neutral;
+  - profiled subtotal win is only a few milliseconds;
+  - WAV diff remains `1e-3` relative RMS, matching the runtime-N direct-output
+    path, so the dominant quality change is from fused final linear+GLU
+    arithmetic, not from runtime-N masking;
+  - full-width specialization significantly increases main compile cost and
+    source complexity.
+
+Decision:
+
+- Remove `CUDASEP_ENABLE_MASK_FINAL_STATIC_DIRECT_OUTPUT` and the source
+  direct-output path.
+- Keep the bench-only `bench_bf16_mask_final_glu_cutile` evidence harness.
+- Do not revisit full final `linear+GLU` fusion for mask output unless the next
+  attempt preserves the original arithmetic boundary, e.g. final linear writes
+  a full-mask temporary with the original BF16 rounding and only the GLU/cat
+  boundary is changed.
+
+## Current CUDA Tile-first Baseline After Mask Final Cleanup
+
+Goal:
+
+- Verify the negative compile-time mask direct-output source probe has been
+  removed from `src`.
+- Rebuild and re-profile the current CUDA Tile-first BF16 baseline.
+- Pick the next A10G-focused bottleneck from current evidence, not from older
+  traces.
+
+Cleanup check:
+
+```text
+rg -n "MASK_FINAL_STATIC_DIRECT|mask_final_static_direct|static_strided|try_linear_glu_last_dim_bf16_output_static_strided|linear_glu_last_dim_static_strided|kMaskEstimatorOutputStride" src
+  no matches
+
+src line count:
+  16346 total
+```
+
+Validation:
+
+```text
+ninja -C build-min cudasep_infer -j8:
+  pass
+
+./bench/audit_cuda_tile_first.sh build-min/cudasep_infer:
+  PASS
+  no forbidden source/CMake/bench matches
+  no cuBLAS/cuFFT/cuDNN dynamic dependency
+  no forbidden dynamic symbols or binary strings
+
+git diff --check:
+  pass
+
+test_clean.wav:
+  inference time: 875.9 ms
+
+test.wav:
+  inference time: 5123.3 ms
+```
+
+Fresh Nsight Systems trace:
+
+```text
+nsys profile --trace=cuda --sample=none --cpuctxsw=none --stats=false \
+  --force-overwrite=true -o bench/nsys_goal_current_clean \
+  ./build-min/cudasep_infer \
+    --model mel-band-roformer-deux/becruily_deux.csm \
+    --input test_clean.wav \
+    --output outputs/nsys_goal_current_clean \
+    --bf16 --chunk-batch-size 1 --stem -1
+
+profiled inference time:
+  884.1 ms
+
+exported sqlite:
+  bench/nsys_goal_current_clean.sqlite
+```
+
+Top current kernels:
+
+```text
+kernel launches:
+  5439
+
+ffn12_fused256_split2_pairh32_cutile:
+  96 calls, 174.790 ms, 1820.730 us avg
+
+time_attention1301_main1280_split_contig_input:
+  48 calls, 161.405 ms, 3362.611 us avg
+
+qkv_bkn_split_contig_static_full:
+  48 calls, 60.142 ms, 1252.969 us avg
+
+linear_cutile_static_full_bkn_bf16:
+  48 calls, 59.776 ms, 1245.336 us avg
+
+linear_cutile_static_full_bf16 M78048 N256 K512:
+  96 calls, 50.335 ms, 524.327 us avg
+```
+
+`bench/a10g_cutile_bottleneck_report.py` on the fresh trace:
+
+```text
+printed-row subtotal:
+  rows=35 total_ms=828.045
+  known_math=33.66 TF/s roof70=48.1%
+  known_logical_bytes=97.186 GiB aggregate=117.4 GiB/s
+
+rank 1 FFN12:
+  44.9 TF/s, 64.2% of 70 TF/s reference
+  REG=255 STACK=8 SMEM=98304B smCTA=1 HMMA=256
+  cause:
+    98KB shared residency wall
+    high reg/stack pressure
+    large scalar side work
+    barrier-heavy staging
+    address/control overhead
+    multiple global-store/layout writes
+
+rank 2 time attention main:
+  60.9 TF/s, 86.9% of 70 TF/s reference
+  REG=237 STACK=0 SMEM=40960B smCTA=2 HMMA=160 MUFU=124
+  cause:
+    softmax MUFU/transcendental work
+    large scalar side work
+    multiple global-store/layout writes
+```
+
+Interpretation:
+
+- The current largest CUDA Tile optimization target is FFN12, not mask final.
+- Time attention is already much closer to the dense BF16 reference; the next
+  time-attention work should focus on softmax/scalar work or producer/consumer
+  fusion, not a wholesale rewrite.
+- FFN12 has a strong HMMA body but is boxed in by one CTA per SM, near-maximum
+  registers, a small stack spill, scalar GELU work, and barrier-heavy staging.
+
+## FFN12 First Bottleneck Triage
+
+Goal:
+
+- Test whether reducing FFN12 shared-memory residency improves A10G throughput.
+- Compare existing CUDA Tile bench variants before source-porting anything.
+
+Resource sweep:
+
+```text
+./build-min/bench_bf16_ffn12_two_stage_cutile --variant all --warmup 5 --iters 30 --describe
+
+current promoted-like fused_pairh32_lat2:
+  grid=(2439,1,1)
+  attr_regs=255
+  static_shared=98304B
+  shared_limit=1
+  occupancy_active_cta_per_sm=1
+  local=8B
+
+low-shared fused_pairh32_serial_out_halves_lat2_outnoround:
+  grid=(2439,1,1)
+  attr_regs=190
+  static_shared=16608B
+  shared_limit=6
+  occupancy_active_cta_per_sm=5
+  local=0B
+```
+
+Timing sweep:
+
+```text
+./build-min/bench_bf16_ffn12_two_stage_cutile --variant all --warmup 10 --iters 100
+
+best fused variants:
+  fused_pairh32_bias_broadcast_odd5_lat2:
+    best=1.7648 ms useful=46.37 TF/s roof=66.2%
+
+  fused_pairh32_bias_broadcast_odd5_w2byhidden_lat2:
+    best=1.7692 ms useful=46.26 TF/s roof=66.1%
+
+  fused_pairh32_lat2:
+    best=1.7935 ms useful=45.63 TF/s roof=65.2%
+
+  fused_pairh32_w1lat2_w2lat1_outnoround:
+    best=1.8103 ms useful=45.21 TF/s roof=64.6%
+
+low-shared counterexample:
+  fused_pairh32_serial_out_halves_lat2_outnoround:
+    best=4.2607 ms useful=19.21 TF/s roof=27.4%
+
+two-stage counterexample:
+  two_stage_poly9_tk64_ffn2_tn64:
+    launches=2 best=2.4553 ms useful=33.33 TF/s roof=47.6%
+    hidden_rw=0.298 GiB
+```
+
+Nsight Compute attempt:
+
+```text
+ncu --set basic --target-processes all \
+  --kernel-name regex:ffn12_fused_pairh32_lat2_kernel --launch-count 1 \
+  ./build-min/bench_bf16_ffn12_two_stage_cutile \
+    --variant fused_pairh32_lat2 --warmup 1 --iters 1
+
+result:
+  ERR_NVGPUCTRPERM
+```
+
+Interpretation:
+
+- The 98KB shared residency wall is real, but it is not sufficient by itself to
+  choose a faster kernel. The low-shared serial-output candidate raises CTA
+  residency but loses enough W2 reuse/HMMA density that throughput collapses.
+- The current promoted family is already near the local best among existing
+  FFN12 candidates: around `45-46 TF/s`, about `65-66%` of the 70 TF/s dense
+  BF16 reference.
+- The best next FFN12 experiment should keep the one-CTA fused data reuse model
+  and reduce only the parts that do not directly protect HMMA reuse:
+  bias broadcast, GELU scalar work, and possibly the small stack spill.
+
+Decision:
+
+- Do not source-promote the low-shared serial-output or two-stage FFN12 variants.
+- Treat FFN12 as the next high-value A10G CUDA Tile experiment, but the first
+  fix should be a narrow fused-kernel refinement, not a split/two-stage rewrite.
+
+## Time Attention Exact-Path Recheck After Current Baseline
+
+Goal:
+
+- After the current profile showed time attention as the second largest hotspot,
+  recheck existing CUDA Tile exact-path variants on the current binary.
+- Do not remeasure dense roofline.
+- Decide whether to promote the existing `skip_keytail` source gate or keep it
+  as an experiment.
+
+Current source behavior:
+
+```text
+time_attention_cutile_skip_keytail_enabled():
+  enabled only by CUDASEP_ENABLE_TIME_ATTENTION_SKIP_KEYTAIL=1
+
+default source path:
+  IncludeKeyTail=true
+  UseExp2=true
+```
+
+Resource check:
+
+```text
+main1280_q64k32_exp2_split_contig_input:
+  REG=233 SHARED=40960B active_cta_per_sm=2
+
+main1280_q64k32_exp2_split_contig_input_no_keytail:
+  REG=217 SHARED=32768B active_cta_per_sm=3
+
+main1280_q64k32_exp2_split_contig_final_rcp_no_keytail:
+  REG=218 SHARED=32768B active_cta_per_sm=3
+
+main1280_q64k32_exp2_split_contig_first_init_no_keytail:
+  REG=214 SHARED=40960B active_cta_per_sm=2
+
+main1280_q64k32_exp2_split_contig_row_state_bf16_no_keytail:
+  REG=216 SHARED=32768B active_cta_per_sm=3
+```
+
+Microbench:
+
+```text
+main1280_split_contig_input_exp2:
+  best=3.358 ms median=3.393 ms real_math=60.93 TF/s roof70=87.0%
+  compare_vs_main1280_q64k32_exp2 rel_rms=0
+
+main1280_split_contig_input_exp2_no_keytail:
+  best=3.263 ms median=3.297 ms real_math=61.70 TF/s roof70=88.1%
+  compare_vs_main1280_q64k32_exp2 rel_rms=0.002038398
+
+main1280_split_contig_input_exp2_final_rcp_no_keytail:
+  best=3.318 ms median=3.353 ms real_math=60.68 TF/s roof70=86.7%
+  compare_vs_main1280_q64k32_exp2 rel_rms=0.002038398
+
+main1280_split_contig_input_exp2_first_init_no_keytail:
+  best=3.310 ms median=3.344 ms real_math=60.83 TF/s roof70=86.9%
+  compare_vs_main1280_q64k32_exp2 rel_rms=0.002038398
+
+main1280_split_contig_input_exp2_row_state_bf16_no_keytail:
+  best=3.584 ms median=3.619 ms real_math=56.18 TF/s roof70=80.3%
+  compare_vs_main1280_q64k32_exp2 rel_rms=0.0217881465
+```
+
+Source A/B:
+
+```text
+default test_clean.wav:
+  inference time: 875.9 ms
+
+CUDASEP_ENABLE_TIME_ATTENTION_SKIP_KEYTAIL=1 test_clean.wav:
+  inference time: 875.1 ms
+
+skip_keytail output diff versus default:
+  Vocals:
+    max_abs=1.410613358e-01
+    rms=5.806070287e-03
+    rel_rms=3.156311385e-02
+    snr=30.016 dB
+
+  Instrumental:
+    max_abs=1.726694107e-01
+    rms=6.991269998e-03
+    rel_rms=2.904878106e-02
+    snr=30.737 dB
+```
+
+Interpretation:
+
+- `skip_keytail` is a small positive microbench result but not a useful source
+  promotion: the end-to-end `test_clean.wav` timing is effectively neutral, and
+  output drift is around `3%` relative RMS.
+- Raising theoretical CTA residency from 2 to 3 is not enough to move the full
+  pipeline here. The exact attention body is already near the dense BF16
+  reference, and the remaining gap is dominated by softmax/scalar behavior plus
+  surrounding dataflow rather than a simple key-tail branch.
+- `row_state_bf16` is a clear negative for both speed and drift.
+
+Decision:
+
+- Keep `CUDASEP_ENABLE_TIME_ATTENTION_SKIP_KEYTAIL=1` as an explicit risky
+  experiment only.
+- Do not promote `skip_keytail`, `final_rcp_no_keytail`,
+  `first_init_no_keytail`, or `row_state_bf16_no_keytail`.
+- Next time-attention work should be a new exact-softmax scalar/dataflow
+  reduction or producer/consumer fusion, not another tail-skip variant.
+
+## STFT Result BF16 Boundary Experiment
+
+Goal:
+
+- Test whether the post-mask complex spectrum can stay in BF16 through
+  `zero_dc` and the iSTFT prepare boundary.
+- Keep this as an opt-in experiment because the default promoted path is already
+  stable and the expected runtime impact is small.
+
+Gate:
+
+```text
+CUDASEP_ENABLE_STFT_RESULT_BF16=1
+```
+
+Implementation:
+
+- `MelBandRoformer::load()` now builds a fixed reverse mel-band index:
+  `freq_band_offsets_gpu_` plus `freq_band_indices_gpu_`.
+- The opt-in mask path uses
+  `apply_mask_and_scatter_bf16_reduce_output_kernel<...,8>` instead of direct
+  BF16 atomic scatter.
+- `zero_dc()` accepts BF16 complex spectra through `zero_dc_bf16_kernel`.
+- `stft_tile::istft()` consumes BF16 complex spectra directly in
+  `istft2048_prepare_bitrev_two_stage_bf16_kernel`, converting to the existing
+  FP32 FFT scratch inside the prepare kernel instead of materializing a whole
+  FP32 spectrum first.
+
+Bottom cause found:
+
+- CUDA Tile 13.3 does not currently accept BF16 as the destination type for
+  `ct::atomic_add_masked`.
+- The compile-time failure was:
+
+```text
+no instance of function template "cuda::tiles::__1::atomic_add_masked"
+atomic constraint evaluates to false
+argument types include tile<__nv_bfloat16 *>, tile<__nv_bfloat16>
+```
+
+Fix:
+
+- Replaced BF16 atomic scatter with a reverse-index reduce kernel.
+- Each output complex element loads only the bands that map to its frequency,
+  accumulates the relevant BF16 masks, applies the original STFT value once,
+  divides by `bands_per_freq`, and writes one BF16 output value.
+- For the current `becruily_deux.csm`, `max_bands_per_freq <= 8`, so the active
+  template is the small fixed loop variant.
+
+Validation:
+
+```text
+ninja -C build-min cudasep_infer -j8: pass
+./bench/audit_cuda_tile_first.sh build-min/cudasep_infer: pass
+git diff --check: pass
+
+default test_clean.wav:
+  inference time: 874.1 ms
+
+CUDASEP_ENABLE_STFT_RESULT_BF16=1 test_clean.wav:
+  inference time: 875.7 ms
+
+CUDASEP_ENABLE_STFT_RESULT_BF16=1 test.wav:
+  inference time: 5121.3 ms
+```
+
+Output diff versus default `test_clean.wav`:
+
+```text
+Vocals:
+  max_abs=0.001199781895
+  rel_rms=0.0007877831739
+  snr=62.072 dB
+
+Instrumental:
+  max_abs=0.001322209835
+  rel_rms=0.0007824316358
+  snr=62.131 dB
+```
+
+Nsight Systems opt-in profile:
+
+```text
+profiled inference time: 886.2 ms
+
+apply_mask_and_scatter_bf16_reduce_output_kernel<__nv_bfloat16,8>:
+  calls=4
+  total=3.309 ms
+  avg=827.350 us
+
+istft2048_prepare_bitrev_two_stage_bf16_kernel:
+  calls=4
+  total=2.179 ms
+  avg=544.678 us
+```
+
+Interpretation:
+
+- The BF16 boundary is quality-safe for this test pair: relative RMS is below
+  `8e-4`, around `62 dB` SNR.
+- Runtime is neutral: the reduced output write and removed whole-spectrum
+  FP32 materialization are offset by extra reverse-index mask loads and
+  per-output reduction work.
+- This path is not a Tensor Core target; it is a memory/index/elementwise
+  boundary cleanup. It should remain opt-in until a broader STFT/iSTFT BF16
+  dataflow rewrite can remove more surrounding FP32 scratch work.
+
+Decision:
+
+- Keep `CUDASEP_ENABLE_STFT_RESULT_BF16=1` as an experiment.
+- Do not promote it by default yet because end-to-end speed is neutral.
+- The result is still useful evidence for the full-BF16 goal: this boundary can
+  stay BF16 without audible-scale quality drift, but CUDA Tile BF16 atomics are
+  not available, so reductions must be shape-specialized rather than atomic.
+
+## Negative Source Probe: FFN12 Odd5 + W2-By-Hidden
+
+Goal:
+
+- Recheck the best-looking FFN12 bench-only variant on the current source path:
+  `fused_pairh32_bias_broadcast_odd5_w2byhidden_lat2`.
+- Determine whether the small microbench gain is a structural W2/output win or
+  mostly a risky GELU approximation win.
+- Keep the promoted default poly9 FFN12 path unchanged unless output quality is
+  acceptable.
+
+Current microbench recheck:
+
+```text
+./build-min/bench_bf16_ffn12_two_stage_cutile --variant fused_pairh32_lat2 \
+  --warmup 10 --iters 100
+
+fused_pairh32_lat2:
+  best=1.8038 ms
+  useful=45.37 TF/s
+  roof70=64.8%
+
+./build-min/bench_bf16_ffn12_two_stage_cutile --variant fused_pairh32_bias_broadcast_lat2 \
+  --warmup 10 --iters 100
+
+fused_pairh32_bias_broadcast_lat2:
+  best=1.9402 ms
+  useful=42.18 TF/s
+  roof70=60.3%
+
+./build-min/bench_bf16_ffn12_two_stage_cutile --variant fused_pairh32_bias_broadcast_odd5_lat2 \
+  --warmup 10 --iters 100
+
+fused_pairh32_bias_broadcast_odd5_lat2:
+  best=1.7770 ms
+  useful=46.06 TF/s
+  roof70=65.8%
+
+./build-min/bench_bf16_ffn12_two_stage_cutile --variant fused_pairh32_bias_broadcast_odd5_w2byhidden_lat2 \
+  --warmup 10 --iters 100
+
+fused_pairh32_bias_broadcast_odd5_w2byhidden_lat2:
+  best=1.7678 ms
+  useful=46.30 TF/s
+  roof70=66.1%
+```
+
+Resource recheck:
+
+```text
+fused_pairh32_lat2:
+  REG=255 STACK=8 SHARED=98304B active_cta_per_sm=1
+
+fused_pairh32_bias_broadcast_lat2:
+  REG=255 STACK=0 SHARED=94208B active_cta_per_sm=1
+
+fused_pairh32_bias_broadcast_odd5_lat2:
+  REG=254 STACK=0 SHARED=94208B active_cta_per_sm=1
+```
+
+Temporary source probe:
+
+```text
+CUDASEP_ENABLE_FFN12_ODD5_W2BYHIDDEN=1
+```
+
+The source probe added one fixed-shape CUDA Tile main kernel using the
+bench-only odd5 + W2-by-hidden structure, plus matching odd5 tail handling. It
+was removed after the quality result below.
+
+End-to-end A/B:
+
+```text
+default test_clean.wav:
+  inference time: 875.1 ms
+
+CUDASEP_ENABLE_FFN12_ODD5_W2BYHIDDEN=1 test_clean.wav:
+  inference time: 872.1 ms
+```
+
+Output diff versus default:
+
+```text
+Vocals:
+  max_abs=1.051953197
+  rel_rms=0.999715944
+  snr=0.002 dB
+
+Instrumental:
+  max_abs=1.027343631
+  rel_rms=0.7515148055
+  snr=2.481 dB
+```
+
+Interpretation:
+
+- The microbench gain is not a safe structural optimization. The poly9
+  bias-broadcast variant is actually slower on the current binary; the speedup
+  appears when odd5 replaces the FFN12 GELU approximation.
+- That approximation destroys model output quality. A `~3 ms` end-to-end win on
+  `test_clean.wav` is meaningless next to `0.75-1.00` relative RMS drift.
+- The W2-by-hidden lexical staging does not provide enough independent evidence
+  to source-promote anything without the odd5 approximation.
+
+Decision:
+
+- Delete the temporary source gate and kernel.
+- Keep the bench-only odd5 variants as negative evidence.
+- Next FFN12 work must preserve the poly9 GELU semantics and target W2/output
+  staging, hidden reuse, or compiler resource shape without changing the
+  activation approximation.

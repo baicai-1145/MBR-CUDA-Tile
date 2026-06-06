@@ -156,6 +156,8 @@ Options parse_args(int argc, char** argv) {
                 "                  t32x64x32m, t32x64x64, t32x128x16, t64x64x16,\n"
                 "                  t32x256x16, t64x64x16sm, t32x64x64sm,\n"
                 "                  t64x64x16sp, t64x64x32sp, t32x64x64sp,\n"
+                "                  t32x128x32sp, t32x128x64sp,\n"
+                "                  t64x128x32sp, t32x256x32sp,\n"
                 "                  t32x8x32smn, t32x16x32smn, t32x64x32smn,\n"
                 "                  t32x64x64smn, default all\n"
                 "                  attnres_t16x128x32, attnres_t32x64x32,\n"
@@ -3818,6 +3820,14 @@ void run_small_shape(const Shape& shape, const Options& opts) {
                         std::integral_constant<int, 32>{}, "t64x64x32sp");
     run_static_padded_m(std::integral_constant<int, 32>{}, std::integral_constant<int, 64>{},
                         std::integral_constant<int, 64>{}, "t32x64x64sp");
+    run_static_padded_m(std::integral_constant<int, 32>{}, std::integral_constant<int, 128>{},
+                        std::integral_constant<int, 32>{}, "t32x128x32sp");
+    run_static_padded_m(std::integral_constant<int, 32>{}, std::integral_constant<int, 128>{},
+                        std::integral_constant<int, 64>{}, "t32x128x64sp");
+    run_static_padded_m(std::integral_constant<int, 64>{}, std::integral_constant<int, 128>{},
+                        std::integral_constant<int, 32>{}, "t64x128x32sp");
+    run_static_padded_m(std::integral_constant<int, 32>{}, std::integral_constant<int, 256>{},
+                        std::integral_constant<int, 32>{}, "t32x256x32sp");
     run_static_masked_mn(std::integral_constant<int, 32>{},
                          std::integral_constant<int, 64>{},
                          std::integral_constant<int, 32>{},

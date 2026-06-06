@@ -94,6 +94,14 @@ target_link_libraries(bench_bf16_mask_hidden_cutile PRIVATE
     CUDA::cudart
 )
 
+add_executable(bench_bf16_mask_final_glu_cutile
+    bench/bf16_mask_final_glu_cutile.cu
+)
+
+target_link_libraries(bench_bf16_mask_final_glu_cutile PRIVATE
+    CUDA::cudart
+)
+
 add_executable(bench_bf16_gate_merge_cutile
     bench/bf16_gate_merge_cutile.cu
 )

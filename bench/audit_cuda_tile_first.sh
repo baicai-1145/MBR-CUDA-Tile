@@ -5,8 +5,8 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 binary="${1:-build-min/cudasep_infer}"
-forbidden_source='cuBLAS|cublas|cuFFT|cufft|cuDNN|cudnn|nvcuda::wmma|wmma::|mma\.sync|asm\s*\(|__global__'
-forbidden_binary='cublas|cufft|cudnn|nvcuda::wmma|wmma::|mma\.sync'
+forbidden_source='cuBLAS|cublas|cuFFT|cufft|cuDNN|cudnn|CUDA::cublas|CUDA::cufft|CUDA::cudnn|cublasLt|cublas_v2|cufftXt|cudnn_ops|#include\s*<mma>|nvcuda::wmma|wmma::|mma\.sync|wgmma|tcgen05|asm(\s+volatile)?\s*\(|__global__'
+forbidden_binary='cublas|cublasLt|cufft|cudnn|nvcuda::wmma|wmma::|mma\.sync|wgmma|tcgen05'
 
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT

@@ -4,15 +4,10 @@
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
-#include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
-#include <iostream>
 #include <limits>
 #include <stdexcept>
-#include <string>
-#include <vector>
 
 namespace cudasep::mbr_tile {
 namespace {
@@ -32,27 +27,10 @@ constexpr int kTimeAttnCutileQRows128 = 128;
 constexpr int kTimeAttnCutileKTile32 = 32;
 constexpr int kTimeAttnCutileKTile64 = 64;
 constexpr int kTimeAttnCutileKTile128 = 128;
-constexpr int kTimeAttnStatsCols = 4;
 constexpr float kLog2E = 1.44269504088896340736f;
 
 static inline int64_t ceildiv(int64_t a, int64_t b) {
     return (a + b - 1) / b;
-}
-
-bool env_flag_enabled(const char* name) {
-    const char* raw = std::getenv(name);
-    if (raw == nullptr) return false;
-    std::string value(raw);
-    return !(value.empty() || value == "0" || value == "false" || value == "FALSE" ||
-             value == "off" || value == "OFF");
-}
-
-bool time_attention_approx_clamp_prob_enabled() {
-    return env_flag_enabled("CUDASEP_TIME_ATTENTION_APPROX_SOFTMAX_CLAMP_PROB");
-}
-
-bool time_attention_approx_poly2_l4_enabled() {
-    return env_flag_enabled("CUDASEP_TIME_ATTENTION_APPROX_SOFTMAX_POLY2_L4");
 }
 
 template <bool UseExp2, typename TileT>
@@ -65,64 +43,21 @@ static __tile__ auto softmax_exp(TileT x) {
 
 enum ProbMode : int {
     kProbExp = 0,
-    kProbPoly3NoClamp = 8,
-    kProbPoly3Clamp = 9,
-    kProbPoly2NoClampL4 = 10,
 };
 
 enum AlphaMode : int {
     kAlphaExact = 0,
-    kAlphaProbClamp = 1,
 };
-
-template <int Prob, typename TileT>
-static __tile__ auto softmax_prob(TileT x) {
-    if constexpr (Prob == kProbPoly3NoClamp) {
-        auto t = x * 0.333333343f + 1.0f;
-        auto t2 = t * t;
-        return t2 * t;
-    } else if constexpr (Prob == kProbPoly3Clamp) {
-        auto zero = x * 0.0f;
-        auto t = x * 0.333333343f + 1.0f;
-        t = ct::select(t > zero, t, zero);
-        auto t2 = t * t;
-        return t2 * t;
-    } else if constexpr (Prob == kProbPoly2NoClampL4) {
-        auto t = x * 0.25f + 1.0f;
-        return t * t;
-    }
-    return softmax_exp<true>(x);
-}
-
-template <int Prob, typename TileT>
-static __tile__ auto softmax_alpha_approx(TileT x) {
-    auto zero = x * 0.0f;
-    if constexpr (Prob == kProbPoly3NoClamp || Prob == kProbPoly3Clamp) {
-        auto t = x * 0.333333343f + 1.0f;
-        t = ct::select(t > zero, t, zero);
-        auto t2 = t * t;
-        return t2 * t;
-    } else if constexpr (Prob == kProbPoly2NoClampL4) {
-        auto t = x * 0.25f + 1.0f;
-        t = ct::select(t > zero, t, zero);
-        return t * t;
-    }
-    return softmax_exp<true>(x);
-}
 
 template <bool UseExp2, int Prob, int Alpha, typename TileT>
 static __tile__ auto softmax_alpha(TileT x) {
-    if constexpr (Alpha == kAlphaProbClamp) {
-        return softmax_alpha_approx<Prob>(x);
-    }
+    static_assert(Prob == kProbExp && Alpha == kAlphaExact);
     return softmax_exp<UseExp2>(x);
 }
 
 template <bool UseExp2, int Prob, typename ScoreTile, typename RowTile>
 static __tile__ auto softmax_probs_from_scores(ScoreTile scores, RowTile new_m) {
-    if constexpr (Prob == kProbPoly3NoClamp) {
-        return softmax_prob<Prob>(scores - new_m);
-    }
+    static_assert(Prob == kProbExp);
     return softmax_exp<UseExp2>(scores - new_m);
 }
 
@@ -356,14 +291,12 @@ template <int QRows,
           bool UseExp2 = false,
           bool IncludeKeyTail = true,
           int Prob = kProbExp,
-          int Alpha = kAlphaExact,
-          bool WriteStats = false>
+          int Alpha = kAlphaExact>
 static __tile__ void time_attention1301_main1280_split_contig_input_body(
     const __nv_bfloat16* __restrict__ q,
     const __nv_bfloat16* __restrict__ k,
     const __nv_bfloat16* __restrict__ v,
     __nv_bfloat16* __restrict__ out,
-    float* __restrict__ stats,
     float scale,
     std::size_t q_block,
     std::size_t bh_raw) {
@@ -371,7 +304,6 @@ static __tile__ void time_attention1301_main1280_split_contig_input_body(
     using ScoreTile = ct::tile<float, ct::shape<QRows, KTile>>;
     using OutTile = ct::tile<float, ct::shape<QRows, kTimeAttnD>>;
     using I64ScoreTile = ct::tile<long long, ct::shape<QRows, KTile>>;
-    using I64RowTile = ct::tile<long long, ct::shape<QRows, 1>>;
     using RowTile = ct::tile<float, ct::shape<QRows, 1>>;
     using NDShape = ct::shape<kTimeAttnN, kTimeAttnD>;
     using DNShape = ct::shape<kTimeAttnD, kTimeAttnN>;
@@ -464,22 +396,7 @@ static __tile__ void time_attention1301_main1280_split_contig_input_body(
         row_l = row_l * alpha + tile_l;
     }
 
-    auto out_norm = out_acc / row_l;
-    if constexpr (WriteStats) {
-        I64RowTile local_row = ct::iota<I64RowTile>();
-        auto stat_row =
-            (static_cast<long long>(bh) * (kTimeAttnMainN / QRows) +
-             static_cast<long long>(q_block)) * QRows + local_row;
-        auto out_l2 = ct::sum<1>(out_norm * out_norm);
-        auto out_abs = ct::select(out_norm < 0.0f, out_norm * -1.0f, out_norm);
-        auto out_max_abs = ct::reduce_max<1>(out_abs);
-        ct::store(stats + stat_row * kTimeAttnStatsCols + 0, row_m);
-        ct::store(stats + stat_row * kTimeAttnStatsCols + 1, row_l);
-        ct::store(stats + stat_row * kTimeAttnStatsCols + 2, out_l2);
-        ct::store(stats + stat_row * kTimeAttnStatsCols + 3, out_max_abs);
-    }
-
-    out_view.store(ct::element_cast<__nv_bfloat16>(out_norm), q_block, 0);
+    out_view.store(ct::element_cast<__nv_bfloat16>(out_acc / row_l), q_block, 0);
 }
 
 template <int QRows,
@@ -501,36 +418,8 @@ __tile_global__ void time_attention1301_main1280_split_contig_input_kernel(
                                                         UseExp2,
                                                         IncludeKeyTail,
                                                         Prob,
-                                                        Alpha,
-                                                        false>(
-        q, k, v, out, nullptr, scale,
-        static_cast<std::size_t>(q_block),
-        static_cast<std::size_t>(bh_raw));
-}
-
-template <int QRows,
-          int KTile,
-          bool UseExp2 = false,
-          bool IncludeKeyTail = true,
-          int Prob = kProbExp,
-          int Alpha = kAlphaExact>
-__tile_global__ void time_attention1301_main1280_split_contig_input_stats_kernel(
-    const __nv_bfloat16* __restrict__ q,
-    const __nv_bfloat16* __restrict__ k,
-    const __nv_bfloat16* __restrict__ v,
-    __nv_bfloat16* __restrict__ out,
-    float* __restrict__ stats,
-    float scale) {
-    auto [q_block, bh_raw, tile_z] = ct::bid();
-    (void)tile_z;
-    time_attention1301_main1280_split_contig_input_body<QRows,
-                                                        KTile,
-                                                        UseExp2,
-                                                        IncludeKeyTail,
-                                                        Prob,
-                                                        Alpha,
-                                                        true>(
-        q, k, v, out, stats, scale,
+                                                        Alpha>(
+        q, k, v, out, scale,
         static_cast<std::size_t>(q_block),
         static_cast<std::size_t>(bh_raw));
 }
@@ -1086,129 +975,27 @@ void launch_time_attention1301_split_tail_cutile(const Tensor& q,
     CUDA_CHECK(cudaGetLastError());
 }
 
-void print_time_attention_stats(const Tensor& stats,
-                                int64_t rows,
-                                bool approx_softmax,
-                                bool clamp_prob,
-                                bool poly2_l4,
-                                bool use_exp2,
-                                bool skip_keytail) {
-    std::vector<float> values = stats.to_cpu_f32();
-    double sum[kTimeAttnStatsCols] = {};
-    float min_value[kTimeAttnStatsCols];
-    float max_value[kTimeAttnStatsCols];
-    for (int c = 0; c < kTimeAttnStatsCols; ++c) {
-        min_value[c] = std::numeric_limits<float>::infinity();
-        max_value[c] = -std::numeric_limits<float>::infinity();
-    }
-    for (int64_t r = 0; r < rows; ++r) {
-        for (int c = 0; c < kTimeAttnStatsCols; ++c) {
-            float value = values[(std::size_t)r * kTimeAttnStatsCols + c];
-            sum[c] += value;
-            min_value[c] = std::min(min_value[c], value);
-            max_value[c] = std::max(max_value[c], value);
-        }
-    }
-    double inv_rows = rows > 0 ? 1.0 / static_cast<double>(rows) : 0.0;
-    std::cerr
-        << "[time-attn-stats] approx=" << (approx_softmax ? 1 : 0)
-        << " clamp_prob=" << (clamp_prob ? 1 : 0)
-        << " poly2_l4=" << (poly2_l4 ? 1 : 0)
-        << " use_exp2=" << (use_exp2 ? 1 : 0)
-        << " skip_keytail=" << (skip_keytail ? 1 : 0)
-        << " rows=" << rows
-        << " row_m_min=" << min_value[0]
-        << " row_m_max=" << max_value[0]
-        << " row_m_mean=" << (sum[0] * inv_rows)
-        << " row_l_min=" << min_value[1]
-        << " row_l_max=" << max_value[1]
-        << " row_l_mean=" << (sum[1] * inv_rows)
-        << " out_l2_min=" << min_value[2]
-        << " out_l2_max=" << max_value[2]
-        << " out_l2_mean=" << (sum[2] * inv_rows)
-        << " out_max_abs_min=" << min_value[3]
-        << " out_max_abs_max=" << max_value[3]
-        << " out_max_abs_mean=" << (sum[3] * inv_rows)
-        << '\n';
-}
-
-template <bool UseExp2, bool IncludeKeyTail, int Prob, int Alpha, bool WriteStats>
+template <bool UseExp2, bool IncludeKeyTail, int Prob, int Alpha>
 void launch_time_attention1301_split_contig_main_typed(const Tensor& q,
                                                        const Tensor& k,
                                                        const Tensor& v,
                                                        Tensor& out,
-                                                       float* stats_ptr,
                                                        float scale,
                                                        dim3 grid) {
-    if constexpr (WriteStats) {
-        time_attention1301_main1280_split_contig_input_stats_kernel<kTimeAttnCutileQRows64,
-                                                                    kTimeAttnCutileKTile32,
-                                                                    UseExp2,
-                                                                    IncludeKeyTail,
-                                                                    Prob,
-                                                                    Alpha>
-            <<<grid, 1>>>(q.data_bf16(), k.data_bf16(), v.data_bf16(),
-                          out.data_bf16(), stats_ptr, scale);
-    } else {
-        (void)stats_ptr;
-        time_attention1301_main1280_split_contig_input_kernel<kTimeAttnCutileQRows64,
-                                                              kTimeAttnCutileKTile32,
-                                                              UseExp2,
-                                                              IncludeKeyTail,
-                                                              Prob,
-                                                              Alpha>
-            <<<grid, 1>>>(q.data_bf16(), k.data_bf16(), v.data_bf16(),
-                          out.data_bf16(), scale);
-    }
+    time_attention1301_main1280_split_contig_input_kernel<kTimeAttnCutileQRows64,
+                                                          kTimeAttnCutileKTile32,
+                                                          UseExp2,
+                                                          IncludeKeyTail,
+                                                          Prob,
+                                                          Alpha>
+        <<<grid, 1>>>(q.data_bf16(), k.data_bf16(), v.data_bf16(),
+                      out.data_bf16(), scale);
 }
 
-template <int Prob, bool WriteStats>
-void launch_time_attention1301_split_contig_main_approx_prob(const Tensor& q,
-                                                            const Tensor& k,
-                                                            const Tensor& v,
-                                                            Tensor& out,
-                                                            float* stats_ptr,
-                                                            float scale,
-                                                            dim3 grid,
-                                                            bool use_exp2,
-                                                            bool skip_keytail) {
-    if (skip_keytail && use_exp2) {
-        launch_time_attention1301_split_contig_main_typed<true,
-                                                          false,
-                                                          Prob,
-                                                          kAlphaProbClamp,
-                                                          WriteStats>(
-            q, k, v, out, stats_ptr, scale, grid);
-    } else if (skip_keytail) {
-        launch_time_attention1301_split_contig_main_typed<false,
-                                                          false,
-                                                          Prob,
-                                                          kAlphaProbClamp,
-                                                          WriteStats>(
-            q, k, v, out, stats_ptr, scale, grid);
-    } else if (use_exp2) {
-        launch_time_attention1301_split_contig_main_typed<true,
-                                                          true,
-                                                          Prob,
-                                                          kAlphaProbClamp,
-                                                          WriteStats>(
-            q, k, v, out, stats_ptr, scale, grid);
-    } else {
-        launch_time_attention1301_split_contig_main_typed<false,
-                                                          true,
-                                                          Prob,
-                                                          kAlphaProbClamp,
-                                                          WriteStats>(
-            q, k, v, out, stats_ptr, scale, grid);
-    }
-}
-
-template <bool WriteStats>
 void launch_time_attention1301_split_contig_main_exact(const Tensor& q,
                                                        const Tensor& k,
                                                        const Tensor& v,
                                                        Tensor& out,
-                                                       float* stats_ptr,
                                                        float scale,
                                                        dim3 grid,
                                                        bool use_exp2,
@@ -1217,30 +1004,26 @@ void launch_time_attention1301_split_contig_main_exact(const Tensor& q,
         launch_time_attention1301_split_contig_main_typed<true,
                                                           false,
                                                           kProbExp,
-                                                          kAlphaExact,
-                                                          WriteStats>(
-            q, k, v, out, stats_ptr, scale, grid);
+                                                          kAlphaExact>(
+            q, k, v, out, scale, grid);
     } else if (skip_keytail) {
         launch_time_attention1301_split_contig_main_typed<false,
                                                           false,
                                                           kProbExp,
-                                                          kAlphaExact,
-                                                          WriteStats>(
-            q, k, v, out, stats_ptr, scale, grid);
+                                                          kAlphaExact>(
+            q, k, v, out, scale, grid);
     } else if (use_exp2) {
         launch_time_attention1301_split_contig_main_typed<true,
                                                           true,
                                                           kProbExp,
-                                                          kAlphaExact,
-                                                          WriteStats>(
-            q, k, v, out, stats_ptr, scale, grid);
+                                                          kAlphaExact>(
+            q, k, v, out, scale, grid);
     } else {
         launch_time_attention1301_split_contig_main_typed<false,
                                                           true,
                                                           kProbExp,
-                                                          kAlphaExact,
-                                                          WriteStats>(
-            q, k, v, out, stats_ptr, scale, grid);
+                                                          kAlphaExact>(
+            q, k, v, out, scale, grid);
     }
 }
 
@@ -1250,8 +1033,7 @@ void launch_time_attention1301_split_contig_main_cutile(const Tensor& q,
                                                         Tensor& out,
                                                         float scale,
                                                         bool use_exp2,
-                                                        bool skip_keytail,
-                                                        bool approx_softmax) {
+                                                        bool skip_keytail) {
     if (q.dtype() != DType::BFloat16 || k.dtype() != DType::BFloat16 ||
         v.dtype() != DType::BFloat16 || out.dtype() != DType::BFloat16) {
         throw std::runtime_error("time split-contig CUDA Tile: expected BF16 tensors");
@@ -1276,51 +1058,9 @@ void launch_time_attention1301_split_contig_main_cutile(const Tensor& q,
 
     dim3 grid(kTimeAttnMainN / kTimeAttnCutileQRows64,
               static_cast<unsigned int>(bh));
-    bool collect_stats = time_attention_stats_enabled_for_current_context();
-    int64_t stats_rows =
-        bh * (kTimeAttnMainN / kTimeAttnCutileQRows64) * kTimeAttnCutileQRows64;
-    Tensor stats;
-    float* stats_ptr = nullptr;
-    if (collect_stats) {
-        stats = Tensor::empty({stats_rows, kTimeAttnStatsCols}, DType::Float32);
-        stats_ptr = stats.data_f32();
-    }
-    bool clamp_prob = approx_softmax && time_attention_approx_clamp_prob_enabled();
-    bool poly2_l4 = approx_softmax && time_attention_approx_poly2_l4_enabled();
-    if (collect_stats) {
-        if (poly2_l4) {
-            launch_time_attention1301_split_contig_main_approx_prob<kProbPoly2NoClampL4, true>(
-                q, k, v, out, stats_ptr, scale, grid, use_exp2, skip_keytail);
-        } else if (clamp_prob) {
-            launch_time_attention1301_split_contig_main_approx_prob<kProbPoly3Clamp, true>(
-                q, k, v, out, stats_ptr, scale, grid, use_exp2, skip_keytail);
-        } else if (approx_softmax) {
-            launch_time_attention1301_split_contig_main_approx_prob<kProbPoly3NoClamp, true>(
-                q, k, v, out, stats_ptr, scale, grid, use_exp2, skip_keytail);
-        } else {
-            launch_time_attention1301_split_contig_main_exact<true>(
-                q, k, v, out, stats_ptr, scale, grid, use_exp2, skip_keytail);
-        }
-    } else {
-        if (poly2_l4) {
-            launch_time_attention1301_split_contig_main_approx_prob<kProbPoly2NoClampL4, false>(
-                q, k, v, out, stats_ptr, scale, grid, use_exp2, skip_keytail);
-        } else if (clamp_prob) {
-            launch_time_attention1301_split_contig_main_approx_prob<kProbPoly3Clamp, false>(
-                q, k, v, out, stats_ptr, scale, grid, use_exp2, skip_keytail);
-        } else if (approx_softmax) {
-            launch_time_attention1301_split_contig_main_approx_prob<kProbPoly3NoClamp, false>(
-                q, k, v, out, stats_ptr, scale, grid, use_exp2, skip_keytail);
-        } else {
-            launch_time_attention1301_split_contig_main_exact<false>(
-                q, k, v, out, stats_ptr, scale, grid, use_exp2, skip_keytail);
-        }
-    }
+    launch_time_attention1301_split_contig_main_exact(
+        q, k, v, out, scale, grid, use_exp2, skip_keytail);
     CUDA_CHECK(cudaGetLastError());
-    if (collect_stats) {
-        print_time_attention_stats(stats, stats_rows, approx_softmax, clamp_prob, poly2_l4,
-                                   use_exp2, skip_keytail);
-    }
 }
 
 void launch_time_attention1301_split_contig_qrot_main_cutile(const Tensor& q,

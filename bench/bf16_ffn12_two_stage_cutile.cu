@@ -75,6 +75,8 @@ Options parse_args(int argc, char** argv) {
                 "                  fused_tm16_pairh32_lat2_outnoround,\n"
                 "                  fused_pairh16_lat2_outnoround,\n"
                 "                  fused_pairh16_tk32_lat2_outnoround,\n"
+                "                  fused_pairh32_tk32_lat2_outnoround,\n"
+                "                  fused_pairh32_tk128_lat2_outnoround,\n"
                 "                  fused_pairh32_lat1_outnoround,\n"
                 "                  fused_pairh32_w1lat1_w2lat2_outnoround,\n"
                 "                  fused_pairh32_w1lat2_w2lat1_outnoround,\n"
@@ -88,6 +90,13 @@ Options parse_args(int argc, char** argv) {
                 "                  fused_pairh32_w2stream_lat2_outnoround,\n"
                 "                  fused_pairh32_w2pair_lat2_outnoround,\n"
                 "                  fused_pairh32_bias_broadcast_lat2,\n"
+                "                  fused_pairh32_bias_broadcast_odd5_lat2,\n"
+                "                  fused_pairh32_bias_broadcast_odd5_w2byhidden_lat2,\n"
+                "                  fused_tm16_pairh32_bias_broadcast_odd5_lat2,\n"
+                "                  fused_pairh32_bias_broadcast_odd5_lat1,\n"
+                "                  fused_pairh32_bias_broadcast_odd5_w1lat1_w2lat2,\n"
+                "                  fused_pairh32_bias_broadcast_odd5_w1lat2_w2lat1,\n"
+                "                  fused_pairh32_bias_broadcast_odd5_lat3,\n"
                 "                  two_stage_poly9_tk64,\n"
                 "                  two_stage_poly9_tk64_ffn2_tn32,\n"
                 "                  two_stage_poly9_tk64_ffn2_tn64,\n"
@@ -131,6 +140,27 @@ static __tile__ auto gelu_erf_poly9_l30(TileT x) {
     auto erf_abs = ct::min(ct::max(ax * p, zero), one);
     auto erf_approx = ct::select(x < zero, zero - erf_abs, erf_abs);
     return 0.5f * x * (one + erf_approx);
+}
+
+template <typename TileT>
+static __tile__ auto gelu_erf_odd5_l175(TileT x) {
+    auto zero = x * 0.0f;
+    auto one = zero + 1.0f;
+    auto ax = ct::abs(x);
+    auto z = ax * ax;
+    auto p = ((0.00671723077f * z - 0.116092831f) * z + 1.12144713f);
+    auto erf_abs = ct::min(ct::max(ax * p, zero), one);
+    auto erf_approx = ct::select(x < zero, zero - erf_abs, erf_abs);
+    return 0.5f * x * (one + erf_approx);
+}
+
+template <bool Odd5, typename TileT>
+static __tile__ auto gelu_selected(TileT x) {
+    if constexpr (Odd5) {
+        return gelu_erf_odd5_l175(x);
+    } else {
+        return gelu_erf_poly9_l30(x);
+    }
 }
 
 using I64InitTile = ct::tile<long long, ct::shape<kInitTile>>;
@@ -612,7 +642,12 @@ __tile_global__ void ffn12_fused_pairh32_a_persist_lat2_kernel(
     out_view.store(ct::element_cast<__nv_bfloat16>(value1), tile_m, 1);
 }
 
-template <int TM, int TK, int THidden, int MemoryLatency = 2, int W2MemoryLatency = MemoryLatency>
+template <int TM,
+          int TK,
+          int THidden,
+          int MemoryLatency = 2,
+          int W2MemoryLatency = MemoryLatency,
+          bool Odd5 = false>
 __tile_global__ void ffn12_fused_pairh32_bias_broadcast_lat2_kernel(
     const __nv_bfloat16* __restrict__ a,
     const __nv_bfloat16* __restrict__ w1_nt,
@@ -690,8 +725,8 @@ __tile_global__ void ffn12_fused_pairh32_bias_broadcast_lat2_kernel(
         auto hidden_bias1 = ct::broadcast(
             ct::element_cast<float>(ct::load(b1 + hidden_cols1)),
             ct::shape<TM, THidden>{});
-        auto hidden_value0 = gelu_erf_poly9_l30(bf16_round(hidden_acc0) + hidden_bias0);
-        auto hidden_value1 = gelu_erf_poly9_l30(bf16_round(hidden_acc1) + hidden_bias1);
+        auto hidden_value0 = gelu_selected<Odd5>(bf16_round(hidden_acc0) + hidden_bias0);
+        auto hidden_value1 = gelu_selected<Odd5>(bf16_round(hidden_acc1) + hidden_bias1);
         auto hidden_bf16_0 = ct::element_cast<__nv_bfloat16>(hidden_value0);
         auto hidden_bf16_1 = ct::element_cast<__nv_bfloat16>(hidden_value1);
         W2Tile w2_00;
@@ -710,6 +745,130 @@ __tile_global__ void ffn12_fused_pairh32_bias_broadcast_lat2_kernel(
         out_acc1 = ct::mma(hidden_bf16_0, w2_01, out_acc1);
         out_acc0 = ct::mma(hidden_bf16_1, w2_10, out_acc0);
         out_acc1 = ct::mma(hidden_bf16_1, w2_11, out_acc1);
+    }
+
+    I64OutBiasTile out_local = ct::iota<I64OutBiasTile>();
+    auto out_cols = out_local;
+    auto out_bias0 = ct::broadcast(
+        ct::element_cast<float>(ct::load(b2 + out_cols)),
+        ct::shape<TM, OutHalf>{});
+    auto out_bias1 = ct::broadcast(
+        ct::element_cast<float>(ct::load(b2 + OutHalf + out_cols)),
+        ct::shape<TM, OutHalf>{});
+    auto value0 = out_acc0 + out_bias0;
+    auto value1 = out_acc1 + out_bias1;
+    out_view.store(ct::element_cast<__nv_bfloat16>(value0), tile_m, 0);
+    out_view.store(ct::element_cast<__nv_bfloat16>(value1), tile_m, 1);
+}
+
+template <int TM,
+          int TK,
+          int THidden,
+          int MemoryLatency = 2,
+          int W2MemoryLatency = MemoryLatency,
+          bool Odd5 = false>
+__tile_global__ void ffn12_fused_pairh32_bias_broadcast_w2byhidden_lat2_kernel(
+    const __nv_bfloat16* __restrict__ a,
+    const __nv_bfloat16* __restrict__ w1_nt,
+    const __nv_bfloat16* __restrict__ b1,
+    const __nv_bfloat16* __restrict__ w2_nt,
+    const __nv_bfloat16* __restrict__ b2,
+    __nv_bfloat16* __restrict__ out) {
+    constexpr int OutHalf = kOut / 2;
+    using HiddenAccTile = ct::tile<float, ct::shape<TM, THidden>>;
+    using OutAccTile = ct::tile<float, ct::shape<TM, OutHalf>>;
+    using ATile = ct::tile<__nv_bfloat16, ct::shape<TM, TK>>;
+    using W1Tile = ct::tile<__nv_bfloat16, ct::shape<TK, THidden>>;
+    using W2Tile = ct::tile<__nv_bfloat16, ct::shape<THidden, OutHalf>>;
+    using I64HiddenBiasTile = ct::tile<long long, ct::shape<1, THidden>>;
+    using I64OutBiasTile = ct::tile<long long, ct::shape<1, OutHalf>>;
+
+    a = ct::assume_aligned(a, 16_ic);
+    w1_nt = ct::assume_aligned(w1_nt, 16_ic);
+    b1 = ct::assume_aligned(b1, 16_ic);
+    w2_nt = ct::assume_aligned(w2_nt, 16_ic);
+    b2 = ct::assume_aligned(b2, 16_ic);
+    out = ct::assume_aligned(out, 16_ic);
+
+    auto a_view = ct::partition_view{
+        ct::tensor_span{a, ct::shape<kM, kIn>{}},
+        ct::shape<TM, TK>{}
+    };
+    auto w1_view = ct::partition_view{
+        ct::tensor_span{w1_nt, ct::shape<kIn, kHidden>{}, ct::layout_left{}},
+        ct::shape<TK, THidden>{}
+    };
+    auto w2_view = ct::partition_view{
+        ct::tensor_span{w2_nt, ct::shape<kHidden, kOut>{}, ct::layout_left{}},
+        ct::shape<THidden, OutHalf>{}
+    };
+    auto out_view = ct::partition_view{
+        ct::tensor_span{out, ct::shape<kM, kOut>{}},
+        ct::shape<TM, OutHalf>{}
+    };
+
+    auto [tile_m, tile_n, tile_z] = ct::bid();
+    (void)tile_n;
+    (void)tile_z;
+
+    auto out_acc0 = ct::full<OutAccTile>(0.0f);
+    auto out_acc1 = ct::full<OutAccTile>(0.0f);
+    I64HiddenBiasTile hidden_local = ct::iota<I64HiddenBiasTile>();
+    for (auto hidden_pair : ct::irange(std::size_t{0},
+                                       std::size_t{kHidden / (2 * THidden)})) {
+        auto hidden_tile0 = hidden_pair * 2;
+        auto hidden_tile1 = hidden_tile0 + 1;
+        auto hidden_acc0 = ct::full<HiddenAccTile>(0.0f);
+        auto hidden_acc1 = ct::full<HiddenAccTile>(0.0f);
+        for (auto kk : ct::irange(std::size_t{0}, std::size_t{kIn / TK})) {
+            ATile a_tile;
+            W1Tile w1_0;
+            W1Tile w1_1;
+            [[cutile::hint(0, latency=MemoryLatency)]]
+            a_tile = a_view.load(tile_m, kk);
+            [[cutile::hint(0, latency=MemoryLatency)]]
+            w1_0 = w1_view.load(kk, hidden_tile0);
+            [[cutile::hint(0, latency=MemoryLatency)]]
+            w1_1 = w1_view.load(kk, hidden_tile1);
+            hidden_acc0 = ct::mma(a_tile, w1_0, hidden_acc0);
+            hidden_acc1 = ct::mma(a_tile, w1_1, hidden_acc1);
+        }
+
+        auto hidden_cols0 =
+            static_cast<long long>(hidden_tile0) * THidden + hidden_local;
+        auto hidden_cols1 =
+            static_cast<long long>(hidden_tile1) * THidden + hidden_local;
+        auto hidden_bias0 = ct::broadcast(
+            ct::element_cast<float>(ct::load(b1 + hidden_cols0)),
+            ct::shape<TM, THidden>{});
+        auto hidden_bias1 = ct::broadcast(
+            ct::element_cast<float>(ct::load(b1 + hidden_cols1)),
+            ct::shape<TM, THidden>{});
+        auto hidden_value0 = gelu_selected<Odd5>(bf16_round(hidden_acc0) + hidden_bias0);
+        auto hidden_value1 = gelu_selected<Odd5>(bf16_round(hidden_acc1) + hidden_bias1);
+        auto hidden_bf16_0 = ct::element_cast<__nv_bfloat16>(hidden_value0);
+        auto hidden_bf16_1 = ct::element_cast<__nv_bfloat16>(hidden_value1);
+
+        {
+            W2Tile w2_00;
+            W2Tile w2_01;
+            [[cutile::hint(0, latency=W2MemoryLatency)]]
+            w2_00 = w2_view.load(hidden_tile0, 0);
+            [[cutile::hint(0, latency=W2MemoryLatency)]]
+            w2_01 = w2_view.load(hidden_tile0, 1);
+            out_acc0 = ct::mma(hidden_bf16_0, w2_00, out_acc0);
+            out_acc1 = ct::mma(hidden_bf16_0, w2_01, out_acc1);
+        }
+        {
+            W2Tile w2_10;
+            W2Tile w2_11;
+            [[cutile::hint(0, latency=W2MemoryLatency)]]
+            w2_10 = w2_view.load(hidden_tile1, 0);
+            [[cutile::hint(0, latency=W2MemoryLatency)]]
+            w2_11 = w2_view.load(hidden_tile1, 1);
+            out_acc0 = ct::mma(hidden_bf16_1, w2_10, out_acc0);
+            out_acc1 = ct::mma(hidden_bf16_1, w2_11, out_acc1);
+        }
     }
 
     I64OutBiasTile out_local = ct::iota<I64OutBiasTile>();
@@ -1476,6 +1635,49 @@ void launch_fused_bias_broadcast(const __nv_bfloat16* d_a,
         <<<grid, 1>>>(d_a, d_w1, d_b1, d_w2, d_b2, d_out);
 }
 
+template <int TM, int MemoryLatency, int W2MemoryLatency>
+void launch_fused_bias_broadcast_odd5_latency(const __nv_bfloat16* d_a,
+                                              const __nv_bfloat16* d_w1,
+                                              const __nv_bfloat16* d_b1,
+                                              const __nv_bfloat16* d_w2,
+                                              const __nv_bfloat16* d_b2,
+                                              __nv_bfloat16* d_out) {
+    dim3 grid(kM / TM, 1, 1);
+    ffn12_fused_pairh32_bias_broadcast_lat2_kernel<TM,
+                                                   64,
+                                                   32,
+                                                   MemoryLatency,
+                                                   W2MemoryLatency,
+                                                   true>
+        <<<grid, 1>>>(d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+}
+
+void launch_fused_bias_broadcast_odd5(const __nv_bfloat16* d_a,
+                                      const __nv_bfloat16* d_w1,
+                                      const __nv_bfloat16* d_b1,
+                                      const __nv_bfloat16* d_w2,
+                                      const __nv_bfloat16* d_b2,
+                                      __nv_bfloat16* d_out) {
+    launch_fused_bias_broadcast_odd5_latency<32, 2, 2>(
+        d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+}
+
+void launch_fused_bias_broadcast_odd5_w2byhidden(const __nv_bfloat16* d_a,
+                                                 const __nv_bfloat16* d_w1,
+                                                 const __nv_bfloat16* d_b1,
+                                                 const __nv_bfloat16* d_w2,
+                                                 const __nv_bfloat16* d_b2,
+                                                 __nv_bfloat16* d_out) {
+    dim3 grid(kM / 32, 1, 1);
+    ffn12_fused_pairh32_bias_broadcast_w2byhidden_lat2_kernel<32,
+                                                              64,
+                                                              32,
+                                                              2,
+                                                              2,
+                                                              true>
+        <<<grid, 1>>>(d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+}
+
 void launch_fused_tn64_y2(const __nv_bfloat16* d_a,
                           const __nv_bfloat16* d_w1,
                           const __nv_bfloat16* d_b1,
@@ -1643,6 +1845,14 @@ void describe_all(const Options& opts) {
                     ffn12_fused_pairh32_lat2_kernel<32, 32, 16, 2, 2>,
                     dim3(kM / 32, 1, 1));
     describe_kernel(opts,
+                    "fused_pairh32_tk32_lat2_outnoround",
+                    ffn12_fused_pairh32_lat2_kernel<32, 32, 32, 2, 2>,
+                    dim3(kM / 32, 1, 1));
+    describe_kernel(opts,
+                    "fused_pairh32_tk128_lat2_outnoround",
+                    ffn12_fused_pairh32_lat2_kernel<32, 128, 32, 2, 2>,
+                    dim3(kM / 32, 1, 1));
+    describe_kernel(opts,
                     "fused_pairh32_lat1_outnoround",
                     ffn12_fused_pairh32_lat2_kernel<32, 64, 32, 1, 1>,
                     dim3(kM / 32, 1, 1));
@@ -1693,6 +1903,35 @@ void describe_all(const Options& opts) {
     describe_kernel(opts,
                     "fused_pairh32_bias_broadcast_lat2",
                     ffn12_fused_pairh32_bias_broadcast_lat2_kernel<32, 64, 32, 2, 2>,
+                    dim3(kM / 32, 1, 1));
+    describe_kernel(opts,
+                    "fused_pairh32_bias_broadcast_odd5_lat2",
+                    ffn12_fused_pairh32_bias_broadcast_lat2_kernel<32, 64, 32, 2, 2, true>,
+                    dim3(kM / 32, 1, 1));
+    describe_kernel(opts,
+                    "fused_pairh32_bias_broadcast_odd5_w2byhidden_lat2",
+                    ffn12_fused_pairh32_bias_broadcast_w2byhidden_lat2_kernel<
+                        32, 64, 32, 2, 2, true>,
+                    dim3(kM / 32, 1, 1));
+    describe_kernel(opts,
+                    "fused_tm16_pairh32_bias_broadcast_odd5_lat2",
+                    ffn12_fused_pairh32_bias_broadcast_lat2_kernel<16, 64, 32, 2, 2, true>,
+                    dim3(kM / 16, 1, 1));
+    describe_kernel(opts,
+                    "fused_pairh32_bias_broadcast_odd5_lat1",
+                    ffn12_fused_pairh32_bias_broadcast_lat2_kernel<32, 64, 32, 1, 1, true>,
+                    dim3(kM / 32, 1, 1));
+    describe_kernel(opts,
+                    "fused_pairh32_bias_broadcast_odd5_w1lat1_w2lat2",
+                    ffn12_fused_pairh32_bias_broadcast_lat2_kernel<32, 64, 32, 1, 2, true>,
+                    dim3(kM / 32, 1, 1));
+    describe_kernel(opts,
+                    "fused_pairh32_bias_broadcast_odd5_w1lat2_w2lat1",
+                    ffn12_fused_pairh32_bias_broadcast_lat2_kernel<32, 64, 32, 2, 1, true>,
+                    dim3(kM / 32, 1, 1));
+    describe_kernel(opts,
+                    "fused_pairh32_bias_broadcast_odd5_lat3",
+                    ffn12_fused_pairh32_bias_broadcast_lat2_kernel<32, 64, 32, 3, 3, true>,
                     dim3(kM / 32, 1, 1));
     describe_kernel(opts,
                     "two_stage_poly9_tk64_ffn1",
@@ -1825,6 +2064,18 @@ int main(int argc, char** argv) {
                     d_a, d_w1, d_b1, d_w2, d_b2, d_out);
             });
         }
+        if (should_run(opts, "fused_pairh32_tk32_lat2_outnoround")) {
+            run_variant("fused_pairh32_tk32_lat2_outnoround", 1, 0.0, opts, d_out, [&] {
+                launch_fused_shape_latency<32, 32, 32, 2, 2>(
+                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+            });
+        }
+        if (should_run(opts, "fused_pairh32_tk128_lat2_outnoround")) {
+            run_variant("fused_pairh32_tk128_lat2_outnoround", 1, 0.0, opts, d_out, [&] {
+                launch_fused_shape_latency<32, 128, 32, 2, 2>(
+                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+            });
+        }
         if (should_run(opts, "fused_pairh32_lat1_outnoround")) {
             run_variant("fused_pairh32_lat1_outnoround", 1, 0.0, opts, d_out, [&] {
                 launch_fused_latency<1, 1>(d_a, d_w1, d_b1, d_w2, d_b2, d_out);
@@ -1893,6 +2144,67 @@ int main(int argc, char** argv) {
         if (should_run(opts, "fused_pairh32_bias_broadcast_lat2")) {
             run_variant("fused_pairh32_bias_broadcast_lat2", 1, 0.0, opts, d_out, [&] {
                 launch_fused_bias_broadcast(d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+            });
+        }
+        if (should_run(opts, "fused_pairh32_bias_broadcast_odd5_lat2")) {
+            run_variant("fused_pairh32_bias_broadcast_odd5_lat2", 1, 0.0, opts, d_out, [&] {
+                launch_fused_bias_broadcast_odd5(d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+            });
+        }
+        if (should_run(opts, "fused_pairh32_bias_broadcast_odd5_w2byhidden_lat2")) {
+            run_variant("fused_pairh32_bias_broadcast_odd5_w2byhidden_lat2",
+                        1,
+                        0.0,
+                        opts,
+                        d_out,
+                        [&] {
+                launch_fused_bias_broadcast_odd5_w2byhidden(
+                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+            });
+        }
+        if (should_run(opts, "fused_tm16_pairh32_bias_broadcast_odd5_lat2")) {
+            run_variant("fused_tm16_pairh32_bias_broadcast_odd5_lat2",
+                        1,
+                        0.0,
+                        opts,
+                        d_out,
+                        [&] {
+                launch_fused_bias_broadcast_odd5_latency<16, 2, 2>(
+                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+            });
+        }
+        if (should_run(opts, "fused_pairh32_bias_broadcast_odd5_lat1")) {
+            run_variant("fused_pairh32_bias_broadcast_odd5_lat1", 1, 0.0, opts, d_out, [&] {
+                launch_fused_bias_broadcast_odd5_latency<32, 1, 1>(
+                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+            });
+        }
+        if (should_run(opts, "fused_pairh32_bias_broadcast_odd5_w1lat1_w2lat2")) {
+            run_variant("fused_pairh32_bias_broadcast_odd5_w1lat1_w2lat2",
+                        1,
+                        0.0,
+                        opts,
+                        d_out,
+                        [&] {
+                launch_fused_bias_broadcast_odd5_latency<32, 1, 2>(
+                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+            });
+        }
+        if (should_run(opts, "fused_pairh32_bias_broadcast_odd5_w1lat2_w2lat1")) {
+            run_variant("fused_pairh32_bias_broadcast_odd5_w1lat2_w2lat1",
+                        1,
+                        0.0,
+                        opts,
+                        d_out,
+                        [&] {
+                launch_fused_bias_broadcast_odd5_latency<32, 2, 1>(
+                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
+            });
+        }
+        if (should_run(opts, "fused_pairh32_bias_broadcast_odd5_lat3")) {
+            run_variant("fused_pairh32_bias_broadcast_odd5_lat3", 1, 0.0, opts, d_out, [&] {
+                launch_fused_bias_broadcast_odd5_latency<32, 3, 3>(
+                    d_a, d_w1, d_b1, d_w2, d_b2, d_out);
             });
         }
         if (should_run(opts, "two_stage_poly9_tk64")) {

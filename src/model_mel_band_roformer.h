@@ -53,8 +53,11 @@ private:
     std::vector<int64_t> num_freqs_per_band_; // how many freqs per band
     std::vector<int64_t> num_bands_per_freq_; // how many bands overlap each freq
     std::vector<int64_t> band_freq_dims_;     // dim_input for each band (num_freqs * 2 * audio_channels)
+    int64_t max_bands_per_freq_ = 0;
     Tensor freq_indices_gpu_;                  // GPU tensor of freq_indices
     Tensor num_bands_per_freq_gpu_;            // GPU tensor for averaging
+    Tensor freq_band_offsets_gpu_;             // prefix offsets into freq_band_indices
+    Tensor freq_band_indices_gpu_;             // reverse map: freq -> band_f list
 
     // STFT window
     Tensor stft_window_;

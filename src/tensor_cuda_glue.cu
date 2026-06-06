@@ -34,6 +34,16 @@ bool strided_copy_d256_enabled() {
     return enabled != 0;
 }
 
+int strided_copy_d256_rows_per_block() {
+    static int rows = []() {
+        const char* raw = std::getenv("CUDASEP_STRIDED_COPY_D256_ROWS_PER_BLOCK");
+        if (raw == nullptr || raw[0] == '\0') return 4;
+        int parsed = std::atoi(raw);
+        return (parsed == 4 || parsed == 8 || parsed == 16) ? parsed : 4;
+    }();
+    return rows;
+}
+
 template <typename Meta>
 Meta* upload_single_meta(const Meta& meta) {
     static Meta* d_meta = nullptr;
@@ -179,14 +189,10 @@ __tile_global__ void strided_copy_bytes_kernel(const unsigned char* __restrict__
 
 constexpr int kBf16D256 = 256;
 constexpr int kBf16D256VecBytes = 16;
-constexpr int kBf16D256RowsPerBlock = 8;
 constexpr int kBf16D256U64ElemsPerRow =
     kBf16D256 * (int)sizeof(__nv_bfloat16) / (int)sizeof(unsigned long long);
-using Bf16D256CopyI64Tile =
-    ct::tile<long long, ct::shape<kBf16D256RowsPerBlock, kBf16D256U64ElemsPerRow>>;
-using Bf16D256CopyU64Tile =
-    ct::tile<unsigned long long, ct::shape<kBf16D256RowsPerBlock, kBf16D256U64ElemsPerRow>>;
 
+template <int RowsPerBlock>
 __tile_global__ void strided_copy_bf16_btf_to_bft_d256_cutile_kernel(
     const __nv_bfloat16* __restrict__ src,
     __nv_bfloat16* __restrict__ dst,
@@ -197,10 +203,13 @@ __tile_global__ void strided_copy_bf16_btf_to_bft_d256_cutile_kernel(
         ct::assume_aligned(reinterpret_cast<const unsigned long long*>(src), 16_ic);
     auto* dst_u64 = ct::assume_aligned(reinterpret_cast<unsigned long long*>(dst), 16_ic);
 
-    auto lane = ct::iota<Bf16D256CopyI64Tile>();
+    using I64Tile = ct::tile<long long, ct::shape<RowsPerBlock, kBf16D256U64ElemsPerRow>>;
+    using U64Tile =
+        ct::tile<unsigned long long, ct::shape<RowsPerBlock, kBf16D256U64ElemsPerRow>>;
+    auto lane = ct::iota<I64Tile>();
     auto row_in_block = lane / kBf16D256U64ElemsPerRow;
     auto vec = lane % kBf16D256U64ElemsPerRow;
-    auto dst_row = static_cast<long long>(ct::bid().x) * kBf16D256RowsPerBlock + row_in_block;
+    auto dst_row = static_cast<long long>(ct::bid().x) * RowsPerBlock + row_in_block;
     long long rows = B * F * T;
     auto in_bounds = dst_row < rows;
 
@@ -210,11 +219,12 @@ __tile_global__ void strided_copy_bf16_btf_to_bft_d256_cutile_kernel(
     auto b = tmp / F;
     auto src_row = (b * T + t) * F + f;
 
-    Bf16D256CopyU64Tile values =
+    U64Tile values =
         ct::load_masked(src_u64 + src_row * kBf16D256U64ElemsPerRow + vec, in_bounds);
     ct::store_masked(dst_u64 + dst_row * kBf16D256U64ElemsPerRow + vec, values, in_bounds);
 }
 
+template <int RowsPerBlock>
 __tile_global__ void strided_copy_bf16_bft_to_btf_d256_cutile_kernel(
     const __nv_bfloat16* __restrict__ src,
     __nv_bfloat16* __restrict__ dst,
@@ -225,10 +235,13 @@ __tile_global__ void strided_copy_bf16_bft_to_btf_d256_cutile_kernel(
         ct::assume_aligned(reinterpret_cast<const unsigned long long*>(src), 16_ic);
     auto* dst_u64 = ct::assume_aligned(reinterpret_cast<unsigned long long*>(dst), 16_ic);
 
-    auto lane = ct::iota<Bf16D256CopyI64Tile>();
+    using I64Tile = ct::tile<long long, ct::shape<RowsPerBlock, kBf16D256U64ElemsPerRow>>;
+    using U64Tile =
+        ct::tile<unsigned long long, ct::shape<RowsPerBlock, kBf16D256U64ElemsPerRow>>;
+    auto lane = ct::iota<I64Tile>();
     auto row_in_block = lane / kBf16D256U64ElemsPerRow;
     auto vec = lane % kBf16D256U64ElemsPerRow;
-    auto dst_row = static_cast<long long>(ct::bid().x) * kBf16D256RowsPerBlock + row_in_block;
+    auto dst_row = static_cast<long long>(ct::bid().x) * RowsPerBlock + row_in_block;
     long long rows = B * T * F;
     auto in_bounds = dst_row < rows;
 
@@ -238,11 +251,12 @@ __tile_global__ void strided_copy_bf16_bft_to_btf_d256_cutile_kernel(
     auto b = tmp / T;
     auto src_row = (b * F + f) * T + t;
 
-    Bf16D256CopyU64Tile values =
+    U64Tile values =
         ct::load_masked(src_u64 + src_row * kBf16D256U64ElemsPerRow + vec, in_bounds);
     ct::store_masked(dst_u64 + dst_row * kBf16D256U64ElemsPerRow + vec, values, in_bounds);
 }
 
+template <int RowsPerBlock>
 __tile_global__ void strided_copy_bf16_btf_to_fbt_d256_cutile_kernel(
     const __nv_bfloat16* __restrict__ src,
     __nv_bfloat16* __restrict__ dst,
@@ -253,10 +267,13 @@ __tile_global__ void strided_copy_bf16_btf_to_fbt_d256_cutile_kernel(
         ct::assume_aligned(reinterpret_cast<const unsigned long long*>(src), 16_ic);
     auto* dst_u64 = ct::assume_aligned(reinterpret_cast<unsigned long long*>(dst), 16_ic);
 
-    auto lane = ct::iota<Bf16D256CopyI64Tile>();
+    using I64Tile = ct::tile<long long, ct::shape<RowsPerBlock, kBf16D256U64ElemsPerRow>>;
+    using U64Tile =
+        ct::tile<unsigned long long, ct::shape<RowsPerBlock, kBf16D256U64ElemsPerRow>>;
+    auto lane = ct::iota<I64Tile>();
     auto row_in_block = lane / kBf16D256U64ElemsPerRow;
     auto vec = lane % kBf16D256U64ElemsPerRow;
-    auto dst_row = static_cast<long long>(ct::bid().x) * kBf16D256RowsPerBlock + row_in_block;
+    auto dst_row = static_cast<long long>(ct::bid().x) * RowsPerBlock + row_in_block;
     long long rows = F * B * T;
     auto in_bounds = dst_row < rows;
 
@@ -266,9 +283,66 @@ __tile_global__ void strided_copy_bf16_btf_to_fbt_d256_cutile_kernel(
     auto f = tmp / B;
     auto src_row = (b * T + t) * F + f;
 
-    Bf16D256CopyU64Tile values =
+    U64Tile values =
         ct::load_masked(src_u64 + src_row * kBf16D256U64ElemsPerRow + vec, in_bounds);
     ct::store_masked(dst_u64 + dst_row * kBf16D256U64ElemsPerRow + vec, values, in_bounds);
+}
+
+void launch_strided_copy_bf16_btf_to_bft_d256(const Tensor& src,
+                                              Tensor& dst,
+                                              long long rows,
+                                              long long B,
+                                              long long T,
+                                              long long F,
+                                              int rows_per_block) {
+    if (rows_per_block == 4) {
+        strided_copy_bf16_btf_to_bft_d256_cutile_kernel<4>
+            <<<(int)ceildiv(rows, 4), 1>>>(src.data_bf16(), dst.data_bf16(), B, T, F);
+    } else if (rows_per_block == 16) {
+        strided_copy_bf16_btf_to_bft_d256_cutile_kernel<16>
+            <<<(int)ceildiv(rows, 16), 1>>>(src.data_bf16(), dst.data_bf16(), B, T, F);
+    } else {
+        strided_copy_bf16_btf_to_bft_d256_cutile_kernel<8>
+            <<<(int)ceildiv(rows, 8), 1>>>(src.data_bf16(), dst.data_bf16(), B, T, F);
+    }
+}
+
+void launch_strided_copy_bf16_bft_to_btf_d256(const Tensor& src,
+                                              Tensor& dst,
+                                              long long rows,
+                                              long long B,
+                                              long long T,
+                                              long long F,
+                                              int rows_per_block) {
+    if (rows_per_block == 4) {
+        strided_copy_bf16_bft_to_btf_d256_cutile_kernel<4>
+            <<<(int)ceildiv(rows, 4), 1>>>(src.data_bf16(), dst.data_bf16(), B, T, F);
+    } else if (rows_per_block == 16) {
+        strided_copy_bf16_bft_to_btf_d256_cutile_kernel<16>
+            <<<(int)ceildiv(rows, 16), 1>>>(src.data_bf16(), dst.data_bf16(), B, T, F);
+    } else {
+        strided_copy_bf16_bft_to_btf_d256_cutile_kernel<8>
+            <<<(int)ceildiv(rows, 8), 1>>>(src.data_bf16(), dst.data_bf16(), B, T, F);
+    }
+}
+
+void launch_strided_copy_bf16_btf_to_fbt_d256(const Tensor& src,
+                                              Tensor& dst,
+                                              long long rows,
+                                              long long B,
+                                              long long T,
+                                              long long F,
+                                              int rows_per_block) {
+    if (rows_per_block == 4) {
+        strided_copy_bf16_btf_to_fbt_d256_cutile_kernel<4>
+            <<<(int)ceildiv(rows, 4), 1>>>(src.data_bf16(), dst.data_bf16(), B, T, F);
+    } else if (rows_per_block == 16) {
+        strided_copy_bf16_btf_to_fbt_d256_cutile_kernel<16>
+            <<<(int)ceildiv(rows, 16), 1>>>(src.data_bf16(), dst.data_bf16(), B, T, F);
+    } else {
+        strided_copy_bf16_btf_to_fbt_d256_cutile_kernel<8>
+            <<<(int)ceildiv(rows, 8), 1>>>(src.data_bf16(), dst.data_bf16(), B, T, F);
+    }
 }
 
 bool try_strided_copy_bf16_d256_experiment(const Tensor& src,
@@ -288,7 +362,7 @@ bool try_strided_copy_bf16_d256_experiment(const Tensor& src,
     }
 
     long long rows = dst.numel() / kBf16D256;
-    int grid = (int)ceildiv(rows, kBf16D256RowsPerBlock);
+    int rows_per_block = strided_copy_d256_rows_per_block();
 
     // [B,T,F,D] contiguous -> permute [B,F,T,D]
     {
@@ -299,8 +373,8 @@ bool try_strided_copy_bf16_d256_experiment(const Tensor& src,
             meta.src_strides[1] == kBf16D256 &&
             meta.src_strides[2] == F * kBf16D256 &&
             meta.src_strides[3] == 1) {
-            strided_copy_bf16_btf_to_bft_d256_cutile_kernel<<<grid, 1>>>(
-                src.data_bf16(), dst.data_bf16(), B, T, F);
+            launch_strided_copy_bf16_btf_to_bft_d256(
+                src, dst, rows, B, T, F, rows_per_block);
             return true;
         }
     }
@@ -314,8 +388,8 @@ bool try_strided_copy_bf16_d256_experiment(const Tensor& src,
             meta.src_strides[1] == kBf16D256 &&
             meta.src_strides[2] == T * kBf16D256 &&
             meta.src_strides[3] == 1) {
-            strided_copy_bf16_bft_to_btf_d256_cutile_kernel<<<grid, 1>>>(
-                src.data_bf16(), dst.data_bf16(), B, T, F);
+            launch_strided_copy_bf16_bft_to_btf_d256(
+                src, dst, rows, B, T, F, rows_per_block);
             return true;
         }
     }
@@ -329,8 +403,8 @@ bool try_strided_copy_bf16_d256_experiment(const Tensor& src,
             meta.src_strides[1] == T * F * kBf16D256 &&
             meta.src_strides[2] == F * kBf16D256 &&
             meta.src_strides[3] == 1) {
-            strided_copy_bf16_btf_to_fbt_d256_cutile_kernel<<<grid, 1>>>(
-                src.data_bf16(), dst.data_bf16(), B, T, F);
+            launch_strided_copy_bf16_btf_to_fbt_d256(
+                src, dst, rows, B, T, F, rows_per_block);
             return true;
         }
     }
